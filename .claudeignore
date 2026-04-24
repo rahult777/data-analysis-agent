@@ -1,0 +1,53 @@
+# Python virtual environment — thousands of package files, never relevant
+venv/
+
+# Python cache files — generated automatically, never relevant
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Generated chart outputs — large binary files, not source code
+backend/outputs/charts/
+
+# Test fixture data — CSV files used for testing, not source code
+tests/fixtures/
+
+# Parquet files — binary format, unreadable by Claude Code, should live in Supabase Storage
+*.parquet
+
+# Environment files — sensitive, already in .gitignore
+.env
+
+# Claude Code debug logs
+.claude/debug/
+
+# Log files
+*.log
+
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Next.js build output — generated, not source code
+frontend/.next/
+frontend/out/
+
+# Node modules — when frontend is initialized
+frontend/node_modules/
+
+# Python egg and build artifacts
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Coverage reports
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Jupyter notebooks if any appear
+.ipynb_checkpoints/
