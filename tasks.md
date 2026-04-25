@@ -25,6 +25,7 @@
 - [x] backend/utils/langsmith_client.py
 - [x] backend/models/schemas.py — all 26 pydantic models
 - [x] Supabase tables and indexes
+- [x] backend/utils/file_handler.py
 
 ---
 
@@ -38,8 +39,7 @@
 
 ### Backend — Core Infrastructure
 
-- [ ] backend/utils/file_handler.py — **NEXT**
-- [ ] backend/main.py — FastAPI app, all endpoints
+- [ ] backend/main.py — FastAPI app, all endpoints — **NEXT**
 
 ### Backend — Prompts
 
