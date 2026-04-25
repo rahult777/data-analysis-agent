@@ -154,3 +154,9 @@ Alternatives considered: Downgrade the MCP package (introduces version lag), upd
 **2026-04-17 | Model switching strategy: Sonnet 4.6 with high effort for infrastructure, Opus for system prompts**
 Sonnet 4.6 with high effort is fast, capable, and token-efficient for code generation tasks. Opus is slower and costs more tokens but produces significantly deeper reasoning — worth it only for the system prompts which are the intelligence of the entire system. Switching to Opus for every task would consume the session limit too quickly.
 Alternatives considered: Opus for everything (too slow, too costly), Sonnet for everything (insufficient depth for system prompts), task-based switching (chosen).
+
+---
+
+**2026-04-25 | Deleted root level architecture.md — outdated draft superseded by docs/architecture.md**
+The root level architecture.md was an earlier draft created before the full system design was complete. docs/architecture.md contains the complete verified version with full ASCII diagram, all component descriptions, data flow, authentication model, persistence model, and observability model. Having two files with the same name in different locations causes confusion.
+Alternatives considered: Keep both (causes confusion), keep root level (wrong version), delete root level and keep docs/architecture.md (chosen).
