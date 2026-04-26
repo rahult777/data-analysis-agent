@@ -184,3 +184,9 @@ Alternatives considered: Pass analysis_id explicitly in every endpoint (verbose,
 **2026-04-26 | Step 6 hardening applied to profiler_system.md after Code Review**
 Code Review plugin identified that Step 6 (concerns and patterns flagging) could produce generic outputs under inference pressure — e.g. 'high missingness in column X' — that satisfy the schema but produce a worthless Analyzer investigation agenda. Added 4 anti-patterns for concerns, 4 anti-patterns for patterns, and a 3-question pre-output self-check requiring each flagged item to be specific to this dataset, reasoned from domain priorities, and actionable by the Analyzer. The self-check ties back to Section 4 domain intelligence and lens question (f).
 Alternatives considered: leave prompt as written (risk of generic flags corrupting downstream analysis), apply hardening (chosen — architectural quality guarantee).
+
+---
+
+**2026-04-27 | cleaner_system.md structured with 11 sections mirroring profiler_system.md pattern**
+Both sub-agents independently converged on: unified pause-signal section, hardening as separate section, Memory MCP write at end, JSON-only output contract. Final structure leads with identity, then epistemic principles, then Memory Read inheritance, then domain intelligence, then provenance intelligence, then the 10 cleaning steps, then pause signals, then pre-output self-check, then Memory MCP write, then output contract. Code Review passed all 11 compliance items with no issues.
+Alternatives considered: domain-led ordering (sub-agent 1), framework-led ordering (sub-agent 2), synthesized structure (chosen — identity-first with referenceable domain sections).

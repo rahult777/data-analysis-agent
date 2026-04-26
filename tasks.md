@@ -28,6 +28,7 @@
 - [x] backend/utils/file_handler.py
 - [x] backend/main.py — FastAPI app, all endpoints
 - [x] backend/prompts/profiler_system.md
+- [x] backend/prompts/cleaner_system.md
 
 ---
 
@@ -43,8 +44,7 @@
 
 ### Backend — Prompts
 
-- [ ] **NEXT** backend/prompts/cleaner_system.md
-- [ ] backend/prompts/analyzer_system.md
+- [ ] **NEXT** backend/prompts/analyzer_system.md
 - [ ] backend/prompts/explainer_system.md
 
 ### Backend — Agents
