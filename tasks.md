@@ -27,6 +27,7 @@
 - [x] Supabase tables and indexes
 - [x] backend/utils/file_handler.py
 - [x] backend/main.py — FastAPI app, all endpoints
+- [x] backend/prompts/profiler_system.md
 
 ---
 
@@ -42,10 +43,9 @@
 
 ### Backend — Prompts
 
-- [ ] backend/prompts/profiler.md
-- [ ] backend/prompts/cleaner.md
-- [ ] backend/prompts/analyzer.md
-- [ ] backend/prompts/explainer.md
+- [ ] **NEXT** backend/prompts/cleaner_system.md
+- [ ] backend/prompts/analyzer_system.md
+- [ ] backend/prompts/explainer_system.md
 
 ### Backend — Agents
 

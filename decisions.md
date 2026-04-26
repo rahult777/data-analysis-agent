@@ -178,3 +178,9 @@ Alternatives considered: Modify UploadResponse schema (creates scope creep), ret
 **2026-04-26 | get_session dependency receives analysis_id from path injection**
 FastAPI automatically injects path parameters into dependency functions when the parameter name matches the path variable name. get_session declares analysis_id: str with no default, so FastAPI resolves it from the path of the calling endpoint. This avoids duplicating the session validation logic across every endpoint.
 Alternatives considered: Pass analysis_id explicitly in every endpoint (verbose, repetitive), inject via path in dependency (chosen — standard FastAPI pattern, DRY).
+
+---
+
+**2026-04-26 | Step 6 hardening applied to profiler_system.md after Code Review**
+Code Review plugin identified that Step 6 (concerns and patterns flagging) could produce generic outputs under inference pressure — e.g. 'high missingness in column X' — that satisfy the schema but produce a worthless Analyzer investigation agenda. Added 4 anti-patterns for concerns, 4 anti-patterns for patterns, and a 3-question pre-output self-check requiring each flagged item to be specific to this dataset, reasoned from domain priorities, and actionable by the Analyzer. The self-check ties back to Section 4 domain intelligence and lens question (f).
+Alternatives considered: leave prompt as written (risk of generic flags corrupting downstream analysis), apply hardening (chosen — architectural quality guarantee).
