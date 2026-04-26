@@ -26,6 +26,7 @@
 - [x] backend/models/schemas.py — all 26 pydantic models
 - [x] Supabase tables and indexes
 - [x] backend/utils/file_handler.py
+- [x] backend/main.py — FastAPI app, all endpoints
 
 ---
 
@@ -38,8 +39,6 @@
 ## Backlog
 
 ### Backend — Core Infrastructure
-
-- [ ] backend/main.py — FastAPI app, all endpoints — **NEXT**
 
 ### Backend — Prompts
 

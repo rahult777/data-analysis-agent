@@ -160,3 +160,21 @@ Alternatives considered: Opus for everything (too slow, too costly), Sonnet for 
 **2026-04-25 | Deleted root level architecture.md — outdated draft superseded by docs/architecture.md**
 The root level architecture.md was an earlier draft created before the full system design was complete. docs/architecture.md contains the complete verified version with full ASCII diagram, all component descriptions, data flow, authentication model, persistence model, and observability model. Having two files with the same name in different locations causes confusion.
 Alternatives considered: Keep both (causes confusion), keep root level (wrong version), delete root level and keep docs/architecture.md (chosen).
+
+---
+
+**2026-04-26 | StaticFiles directory created at both module level and in lifespan**
+Starlette's StaticFiles asserts the directory exists at initialization time. The lifespan (startup) runs after module-level code, so the mount would fail if the directory did not already exist. Creating it at module level (before app.mount()) guarantees the mount succeeds; creating it again in lifespan satisfies the spec requirement and is idempotent via exist_ok=True.
+Alternatives considered: Create in lifespan only (breaks StaticFiles mount at import), create at module level only (doesn't satisfy spec), create in both places (chosen — technically correct and spec-compliant).
+
+---
+
+**2026-04-26 | POST /api/upload returns a plain dict rather than UploadResponse pydantic model**
+The infrastructure spec requires session_id in the upload response, but the UploadResponse pydantic schema does not include session_id (it was not added to schemas.py). Returning a plain dict allows session_id to be included without modifying the existing schemas.py file. When schemas.py is updated to add session_id to UploadResponse, the endpoint can be updated to use the model directly.
+Alternatives considered: Modify UploadResponse schema (creates scope creep), return UploadResponse and lose session_id (breaks frontend auth), return plain dict (chosen — spec-compliant without modifying other files).
+
+---
+
+**2026-04-26 | get_session dependency receives analysis_id from path injection**
+FastAPI automatically injects path parameters into dependency functions when the parameter name matches the path variable name. get_session declares analysis_id: str with no default, so FastAPI resolves it from the path of the calling endpoint. This avoids duplicating the session validation logic across every endpoint.
+Alternatives considered: Pass analysis_id explicitly in every endpoint (verbose, repetitive), inject via path in dependency (chosen — standard FastAPI pattern, DRY).
