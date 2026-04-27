@@ -30,7 +30,6 @@
 - [x] backend/prompts/profiler_system.md
 - [x] backend/prompts/cleaner_system.md
 - [x] backend/prompts/analyzer_system.md
-- [x] backend/prompts/explainer_system.md
 
 ---
 
@@ -45,6 +44,8 @@
 ### Backend — Core Infrastructure
 
 ### Backend — Prompts
+
+- [ ] **NEXT** backend/prompts/explainer_system.md
 
 ### Backend — Agents
 
