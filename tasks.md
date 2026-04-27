@@ -49,7 +49,7 @@
 
 ### Backend — Agents
 
-- [ ] **NEXT** backend/agents/profiler.py
+- [ ] backend/agents/profiler.py
 - [ ] backend/agents/cleaner.py
 - [ ] backend/agents/analyzer.py
 - [ ] backend/agents/explainer.py
