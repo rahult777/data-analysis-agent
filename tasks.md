@@ -29,6 +29,8 @@
 - [x] backend/main.py — FastAPI app, all endpoints
 - [x] backend/prompts/profiler_system.md
 - [x] backend/prompts/cleaner_system.md
+- [x] backend/prompts/analyzer_system.md
+- [x] backend/prompts/explainer_system.md
 
 ---
 
@@ -44,12 +46,9 @@
 
 ### Backend — Prompts
 
-- [ ] **NEXT** backend/prompts/analyzer_system.md
-- [ ] backend/prompts/explainer_system.md
-
 ### Backend — Agents
 
-- [ ] backend/agents/profiler.py
+- [ ] **NEXT** backend/agents/profiler.py
 - [ ] backend/agents/cleaner.py
 - [ ] backend/agents/analyzer.py
 - [ ] backend/agents/explainer.py
