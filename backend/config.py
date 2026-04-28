@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")
+ANTHROPIC_MODEL: str | None = os.getenv("ANTHROPIC_MODEL")
 OPENAI_API_KEY: str | None = os.getenv("OPENAI_API_KEY")
 SUPABASE_URL: str | None = os.getenv("SUPABASE_URL")
 SUPABASE_PUBLISHABLE_KEY: str | None = os.getenv("SUPABASE_PUBLISHABLE_KEY")
@@ -14,6 +15,7 @@ LANGCHAIN_TRACING_V2: str | None = os.getenv("LANGCHAIN_TRACING_V2")
 
 _REQUIRED_VARS: list[str] = [
     "ANTHROPIC_API_KEY",
+    "ANTHROPIC_MODEL",
     "OPENAI_API_KEY",
     "SUPABASE_URL",
     "SUPABASE_PUBLISHABLE_KEY",
