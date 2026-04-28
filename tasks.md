@@ -30,6 +30,8 @@
 - [x] backend/prompts/profiler_system.md
 - [x] backend/prompts/cleaner_system.md
 - [x] backend/prompts/analyzer_system.md
+- [x] backend/prompts/explainer_system.md
+- [x] backend/agents/profiler.py
 
 ---
 
@@ -45,12 +47,11 @@
 
 ### Backend — Prompts
 
-- [ ] **NEXT** backend/prompts/explainer_system.md
+(complete)
 
 ### Backend — Agents
 
-- [ ] backend/agents/profiler.py
-- [ ] backend/agents/cleaner.py
+- [ ] **NEXT** backend/agents/cleaner.py
 - [ ] backend/agents/analyzer.py
 - [ ] backend/agents/explainer.py
 - [ ] backend/agents/orchestrator.py
