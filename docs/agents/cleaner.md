@@ -32,6 +32,20 @@ Nothing the Cleaner does is divorced from this context. Every decision reference
 
 ---
 
+## Provenance-Aware Cleaning
+
+The Profiler's provenance hypothesis is not background information — it is a mandatory input to every cleaning decision.
+
+**Manual entry provenance:** Look for spelling variations of the same categorical value and normalize them, check for timestamp patterns suggesting batch copy-paste entry, treat round-number clustering as a data quality signal not a business pattern.
+
+**System export provenance:** Missing values likely carry semantic meaning within the source system's logic — a missing field may mean "not applicable" or "event did not occur", not "unknown". Verify the semantic meaning before imputing. Default values that appear with suspicious frequency are real system defaults, not placeholders — do not replace them.
+
+**Merged dataset provenance:** Systematic missingness in column subsets is a merge artifact — identify the likely merge key, assess join quality, flag any analysis that might be corrupted by a bad merge.
+
+**Survey provenance:** Check for straightlining (same answer repeated across many items), check for item nonresponse patterns suggesting question fatigue in later columns, check for scale endpoint clustering suggesting satisficing. When these patterns are found, flag affected records for the Analyzer rather than cleaning them individually.
+
+---
+
 ## Decision Framework — Missing Values
 
 ### Under 5% Missing
@@ -72,6 +86,20 @@ Wait for the user's explicit response before proceeding. The Cleaner does not ma
 
 ---
 
+## Missingness Pattern Analysis — Before Any Decision
+
+Before applying any threshold rule, the Cleaner must investigate the pattern of missingness, not just the percentage. Ask: is missingness random and distributed, or concentrated in a specific time period, record subset, or correlated with another column? A column that is 35% missing where all missing records belong to one region is a merge artifact — the pattern is the finding, not a data quality problem to fix. A column that is 35% missing randomly distributed is a genuine imputation decision.
+
+The Cleaner must classify missingness as:
+- **Random** — proceed to threshold rules
+- **Systematic-temporal** — flag as analytical finding for the Analyzer, offer preserve as 4th option in pause
+- **Systematic-by-subset** — flag as likely merge artifact, offer preserve as 4th option in pause
+- **Correlated-with-other-columns** — flag the co-missingness pattern as a finding
+
+Add a 4th option to every over-30% pause: "Preserve this missingness pattern as an analytical finding — do not impute or exclude. The pattern itself will be investigated by the Analyzer."
+
+---
+
 ## Decision Framework — Outliers
 
 **Never remove an outlier without domain-appropriate reasoning. Never.**
@@ -97,6 +125,22 @@ Investigate as potential satisficing or response error. Consider running sensiti
 ### The Universal Rule
 
 For every outlier decision — regardless of domain — the Cleaner states its reasoning in plain English in the CleaningReport. "Removed because it was an outlier" is never acceptable. The reasoning must reference the domain, the specific value, and why the chosen action was appropriate.
+
+---
+
+## What Investigation Means Per Domain
+
+The instruction to investigate every outlier is meaningless without domain-specific investigation criteria.
+
+**Medical data:** Check the value against known physiological bounds (not statistical bounds), check internal consistency with the patient's other values in the same record, determine if the value is isolated or consistent with a clinical pattern. A blood pressure of 220/140 is extreme but physiologically possible and clinically critical — it must be preserved. A blood pressure of 2200/140 is a data entry error.
+
+**Financial data:** Check the value against the entity's baseline transaction history, check if the timestamp is suspicious, check if the value is suspiciously round suggesting fabrication, check if it clusters temporally or by entity with other anomalies.
+
+**Operational data:** Check if the anomaly corresponds to a known process event — a machine failure, a supply chain disruption — these are often the most analytically important records.
+
+**Survey data:** Check if the outlier is a scale endpoint response (a real opinion) or inconsistent with the respondent's other answers (satisficing).
+
+Statistical distance from the mean is an input to investigation, not the conclusion.
 
 ---
 
@@ -140,6 +184,16 @@ After executing all cleaning operations, the Cleaner re-profiles the cleaned dat
 - Row count and column count match expectations
 
 If the re-profile reveals unexpected results, the Cleaner does not silently proceed. It flags the discrepancy and explains what happened.
+
+---
+
+## Interaction Detection — Issues That Co-Occur Are Not Independent
+
+Real datasets have problems that interact. The Cleaner must check: do missing values co-occur in specific record subsets across multiple columns? Do outliers cluster in time or by entity? Do data quality issues concentrate in a specific segment of records?
+
+When issues co-occur in patterns, the pattern is more meaningful than the individual issues. A transaction record with an anomalous amount AND a suspicious timestamp AND a missing merchant_id is a fraud signal cluster — cleaning the components independently would destroy the signal. The correct action is to flag the co-occurring pattern as a finding for the Analyzer, preserve the affected records with annotations, and clean the components only if the user confirms the pattern has been noted.
+
+Add to the CleaningReport output: an **interactions_detected** list, where each entry describes a co-occurring issue pattern, the records affected, and the recommended analytical action.
 
 ---
 
