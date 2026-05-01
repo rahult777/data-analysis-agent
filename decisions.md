@@ -226,3 +226,9 @@ Alternatives considered: downgrade httpx to 0.24.1 (breaks supabase), pin anthro
 **2026-04-28 | ANTHROPIC_MODEL added to config.py and .env — set to claude-sonnet-4-6**
 Agent runtime calls use claude-sonnet-4-6 rather than Opus. The intelligence of the system lives in the carefully written system prompts, not in which model processes them. Sonnet 4.6 handles the structured system prompts well and provides significant cost and latency advantages over Opus for every analysis run. The model string is loaded from environment variable so it can be changed without touching code.
 Alternatives considered: claude-opus-4-6 (more capable but slower and more expensive per run), claude-sonnet-4-6 (chosen — fast, cost-effective, system prompts compensate for capability difference).
+
+---
+
+**2026-05-01 | cleaner.md spec updated with four new sections before implementation — missingness pattern analysis, domain investigation criteria, provenance-aware cleaning, interaction detection**
+Pressure-testing the spec against five difficult real-world datasets (merged enterprise export, medical with critical outliers, manually entered sales, survey with satisficing bias, financial ledger with fraud signals) revealed four gaps: the 30% pause threshold was mechanical with no pattern analysis, the outlier investigation instruction had no concrete domain-specific criteria, the provenance hypothesis was read but never used in any decision framework, and co-occurring issues were treated as independent problems. All four gaps were added to cleaner.md before implementation so the spec is the source of truth. The build prompt and cleaner.py both derive from the updated spec.
+Alternatives considered: patch the gaps in the build prompt only (spec would be wrong), patch in cleaner_system.md only (implementation would diverge from spec), update spec first then prompt then implementation (chosen — spec is always source of truth).

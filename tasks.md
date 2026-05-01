@@ -51,8 +51,8 @@
 
 ### Backend — Agents
 
-- [ ] **NEXT** backend/agents/cleaner.py
-- [ ] backend/agents/analyzer.py
+- [x] backend/agents/cleaner.py
+- [ ] **NEXT** backend/agents/analyzer.py
 - [ ] backend/agents/explainer.py
 - [ ] backend/agents/orchestrator.py
 
