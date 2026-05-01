@@ -42,6 +42,13 @@ class PipelineState(TypedDict):
     profiler_provenance_hypothesis: Optional[str]
     profiler_top_3_concerns: Optional[list]
     profiler_top_3_patterns: Optional[list]
+    cleaner_key_decisions: Optional[list]
+    cleaner_excluded_columns: Optional[list]
+    cleaner_outliers_handled: Optional[dict]
+    cleaner_user_decisions_incorporated: Optional[list]
+    missing_value_pause_data: Optional[dict]
+    outlier_pause_data: Optional[dict]
+    user_pause_response: Optional[dict]
 
 
 def load_system_prompt(agent_name: str) -> str:
