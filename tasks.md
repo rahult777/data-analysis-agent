@@ -32,6 +32,7 @@
 - [x] backend/prompts/analyzer_system.md
 - [x] backend/prompts/explainer_system.md
 - [x] backend/agents/profiler.py
+- [x] backend/agents/cleaner.py
 
 ---
 
@@ -45,16 +46,23 @@
 
 ### Backend — Core Infrastructure
 
+- [ ] Update main.py — wire question endpoint to explainer.py + add POST /api/analysis/{id}/resume endpoint for pause state responses
+
 ### Backend — Prompts
 
 (complete)
 
+### Backend — Tools
+
+- [ ] backend/tools/__init__.py
+- [ ] **NEXT after analyzer.py** backend/tools/viz_tools.py
+- [ ] backend/tools/code_executor.py
+
 ### Backend — Agents
 
-- [x] backend/agents/cleaner.py
-- [ ] **NEXT** backend/agents/analyzer.py
-- [ ] backend/agents/explainer.py
-- [ ] backend/agents/orchestrator.py
+- [ ] **NEXT** backend/agents/analyzer.py (requires viz_tools.py first)
+- [ ] backend/agents/explainer.py (requires code_executor.py first)
+- [ ] backend/agents/orchestrator.py (requires resume endpoint added to main.py first)
 
 ### Frontend
 
@@ -65,8 +73,17 @@
 - [ ] Charts — Recharts integration for analysis visualizations
 - [ ] Mobile viewport testing (320px minimum)
 
+### Tests
+
+- [ ] tests/fixtures/ — iris.csv, messy_data.csv, time_series_data.csv
+- [ ] tests/test_profiler.py
+- [ ] tests/test_cleaner.py
+- [ ] tests/test_analyzer.py
+- [ ] tests/test_explainer.py
+- [ ] tests/test_api.py
+
 ### Infrastructure
 
 - [ ] Supabase RLS policies
-- [ ] Supabase Storage bucket for uploaded files
+- [x] Supabase Storage bucket — cleaned-datasets bucket created as private bucket
 - [ ] Vercel deployment

@@ -232,3 +232,15 @@ Alternatives considered: claude-opus-4-6 (more capable but slower and more expen
 **2026-05-01 | cleaner.md spec updated with four new sections before implementation — missingness pattern analysis, domain investigation criteria, provenance-aware cleaning, interaction detection**
 Pressure-testing the spec against five difficult real-world datasets (merged enterprise export, medical with critical outliers, manually entered sales, survey with satisficing bias, financial ledger with fraud signals) revealed four gaps: the 30% pause threshold was mechanical with no pattern analysis, the outlier investigation instruction had no concrete domain-specific criteria, the provenance hypothesis was read but never used in any decision framework, and co-occurring issues were treated as independent problems. All four gaps were added to cleaner.md before implementation so the spec is the source of truth. The build prompt and cleaner.py both derive from the updated spec.
 Alternatives considered: patch the gaps in the build prompt only (spec would be wrong), patch in cleaner_system.md only (implementation would diverge from spec), update spec first then prompt then implementation (chosen — spec is always source of truth).
+
+---
+
+**2026-05-01 | Supabase Storage bucket 'cleaned-datasets' created as private bucket in Supabase dashboard**
+The bucket must exist before the Cleaner runs — infrastructure.md Step 14 explicitly requires it. Created manually in the Supabase dashboard rather than via migration because bucket creation is a one-time infrastructure setup step, not a schema change. Set to private so parquet files containing user data are never publicly accessible. The service role key in .env handles all server-side access.
+Alternatives considered: create via migration (unnecessary complexity for a one-time bucket), public bucket (insecure — exposes user data), private bucket created manually (chosen).
+
+---
+
+**2026-05-01 | data_tools.py removed from build plan entirely**
+The original spec included data_tools.py as a shared pandas utility module. During implementation, profiler.py and cleaner.py both load and process data directly — there is no shared pandas logic that genuinely needs a shared module. analyzer.py will load the cleaned parquet from Supabase Storage directly. The only genuine shared utility needed is viz_tools.py for chart generation (complex, produces files, referenced by path) and code_executor.py for safe pandas execution in the Explainer. Building data_tools.py would add a file with no real consumers.
+Alternatives considered: build data_tools.py as specified (adds unused complexity), skip it entirely (chosen — YAGNI, actual build pattern made it unnecessary).
