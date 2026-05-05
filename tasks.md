@@ -54,13 +54,13 @@
 
 ### Backend — Tools
 
-- [ ] backend/tools/__init__.py
-- [ ] **NEXT after analyzer.py** backend/tools/viz_tools.py
+- [x] backend/tools/__init__.py
+- [x] backend/tools/viz_tools.py
 - [ ] backend/tools/code_executor.py
 
 ### Backend — Agents
 
-- [ ] **NEXT** backend/agents/analyzer.py (requires viz_tools.py first)
+- [ ] **NEXT** backend/agents/analyzer.py
 - [ ] backend/agents/explainer.py (requires code_executor.py first)
 - [ ] backend/agents/orchestrator.py (requires resume endpoint added to main.py first)
 
