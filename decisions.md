@@ -244,3 +244,57 @@ Alternatives considered: create via migration (unnecessary complexity for a one-
 **2026-05-01 | data_tools.py removed from build plan entirely**
 The original spec included data_tools.py as a shared pandas utility module. During implementation, profiler.py and cleaner.py both load and process data directly — there is no shared pandas logic that genuinely needs a shared module. analyzer.py will load the cleaned parquet from Supabase Storage directly. The only genuine shared utility needed is viz_tools.py for chart generation (complex, produces files, referenced by path) and code_executor.py for safe pandas execution in the Explainer. Building data_tools.py would add a file with no real consumers.
 Alternatives considered: build data_tools.py as specified (adds unused complexity), skip it entirely (chosen — YAGNI, actual build pattern made it unnecessary).
+
+---
+
+**2026-05-06 | sanitize_for_json implemented as recursive function returning a NEW object — explicit reassignment is mandatory**
+The analyzer.py output dict contains pandas/numpy float values that may be NaN or Inf (correlation matrices in particular generate NaN on diagonals and on column-pairs with insufficient data). A json default= handler does not help because the JSON encoder does not invoke default= for NaN/Inf — it emits them as the non-standard literals "NaN" / "Infinity" which Postgres JSONB rejects. The correct approach is to walk the structure recursively and replace NaN/Inf with None and tuples with lists before json.dumps. The function returns a new sanitized object — it does NOT mutate in place — so the caller MUST reassign: `analysis_response = sanitize_for_json(analysis_response)`. Forgetting the reassignment silently writes the original unsanitized dict to Supabase.
+Alternatives considered: json.dumps(..., default=handler) (does not catch NaN/Inf), in-place mutation of the dict (couples mutation semantics to caller awareness, easier to break later), recursive function returning a new object with explicit reassignment (chosen — pure transform, hard to misuse if the reassignment idiom is followed).
+
+---
+
+**2026-05-06 | np.polyfit on time-series trend detection requires NaN dropna mask BEFORE the call, not after**
+np.polyfit raises ValueError on real-world cleaned datasets when y contains any NaN — the linear-algebra solve fails. Cleaned data still contains NaNs in numeric columns where the cleaner chose to flag-and-include rather than impute. The fix is to compute `mask = ~np.isnan(y)` first, then `x = np.arange(len(df))[mask]` and `y = y[mask]`, then call np.polyfit only if `len(y) >= 2`; otherwise treat trend as "flat". Using df.dropna() before computing x would misalign x and y because np.arange would no longer match dropped rows.
+Alternatives considered: scipy.stats.linregress (would add scipy to dependencies for one call), using datetime values directly as x to np.polyfit (TypeError — Timestamp is not numeric in numpy linalg), np.arange with NaN mask (chosen — pure-numpy, no extra dependency, correctly handles holes in cleaned data).
+
+---
+
+**2026-05-06 | Correlation matrix diagonal masking is required to prevent self-pairs in highest-pair detection**
+Pearson correlation of a column with itself is always 1.0, which would always be the "highest pair" if the diagonal is not masked. The fix is to copy the correlation matrix values, set np.fill_diagonal(values, NaN) on the copy, and find the highest pair from the masked copy. The original matrix is preserved for the to_dict() output that is reported back to the LLM. Strong-pair detection is also done on the upper triangle only (j > i) to avoid duplicate pairs in both directions.
+Alternatives considered: leave diagonal in place (highest_pair would always be a self-pair), mask diagonal in place (mutates the matrix that gets reported), copy + mask (chosen — preserves original output, prevents self-pair selection).
+
+---
+
+**2026-05-06 | TimeSeriesInfo schema has exactly 4 fields; recommended_value_column is an internal helper returned as the second tuple element**
+The TimeSeriesInfo pydantic model in schemas.py has detected, datetime_column, frequency, trend — and only those four. The recommended_value_column (the numeric column with highest variance, used for line-chart and trend computation) is not in the schema. detect_time_series therefore returns a tuple (info_dict, recommended_value_column) where the dict matches the schema and the second element is consumed only by chart generation. This keeps the schema clean while preserving the routing information the analyzer node needs.
+Alternatives considered: add recommended_value_column to TimeSeriesInfo (schema bloat for a value the Explainer does not need), recompute recommended_value_column inside chart generation (duplicate logic), tuple return (chosen — single source of truth, schema minimal).
+
+---
+
+**2026-05-06 | numpy.polyfit + np.arange chosen over scipy.linregress and over raw datetime x-axis**
+Three options were considered for time-series trend slope: scipy.stats.linregress (would force scipy as a runtime dependency for one call), np.polyfit with the original datetime values as x (TypeError — numpy linalg cannot solve with pd.Timestamp values), and np.polyfit with np.arange(len(df)) as x. The third works because integer row position is monotone in time when df is sorted by the datetime column, the slope is sign-correct, and the magnitude can be thresholded for the "flat" classification. No extra dependency, no type errors, correct on any sorted timeline.
+Alternatives considered: scipy.stats.linregress (adds scipy dependency for one call), datetime values as x to np.polyfit (TypeError on np.linalg.solve), np.arange(len(df)) as x (chosen — pure numpy, type-safe, slope sign-correct).
+
+---
+
+**2026-05-06 | Superpowers parallel-investigation protocol handled at the LLM reasoning level, not in Python**
+analyzer_system.md Section 9 instructs the LLM to spawn parallel sub-agents through the Superpowers plugin when competing hypotheses exist for a significant finding. The Python analyzer_node does not orchestrate this — the LLM reasons about it inside the single Anthropic call. The Python code provides the inputs (descriptive stats, correlations, distributions, value counts, time-series info, profile/cleaning reports, concerns, patterns) and the verification loop (criteria a-e); the synthesis of competing hypotheses is content the LLM produces inside the response JSON. Implementing parallel sub-agent dispatch in Python would require duplicating the system prompt for each hypothesis and synthesizing results outside the LLM, which is out of scope for the current build pass and would not improve the synthesis quality.
+Alternatives considered: Python-level Superpowers orchestration (high complexity, duplicate prompts, no quality gain), LLM-level reasoning only (chosen — matches existing agent pattern, single inference, synthesis stays inside the model).
+
+---
+
+**2026-05-06 | analyzer.anomalies_found omitted from the Python-level Memory MCP write**
+analyzer_system.md Section 12 specifies seven keys the LLM must write to Memory MCP at the close of its run: most_important_finding, most_surprising_finding, strong_correlations, anomalies_found, chart_paths, data_quality_score, open_questions. Of these, the Python code writes six and intentionally omits anomalies_found because the Python code cannot reliably extract structured anomaly objects from the LLM's response — the schema does not field anomalies as a top-level list, and parsing them out of free-text would corrupt the data. The LLM closing ritual is the correct place to write anomalies_found because the LLM has the structured anomaly objects in scope at that moment. The Python writes the six structurally-extractable keys; the LLM writes the seventh.
+Alternatives considered: write all seven from Python with best-effort parsing (corrupts memory data), write none from Python and rely on LLM (loses the six the Python code can write reliably), write six from Python and let the LLM write the seventh (chosen — each side writes what it can extract reliably).
+
+---
+
+**2026-05-06 | Distribution classifier elif chain ordering produces unreachable bimodal/other branches; preserved per spec**
+classify_distributions in analyzer.py uses the elif chain specified in the build prompt: NaN → unknown, abs(skew) < 0.5 → normal, skew >= 0.5 → skewed_right, skew <= -0.5 → skewed_left, kurtosis < -1 → bimodal, else → other. The three skew branches together cover all non-NaN reals, so the bimodal and other branches are unreachable. Preserved as specified — distribution classification is currently skewness-only with bimodal classification reserved for a future revision of the rule. Documented here so the unreachable branches are not mistaken for dead code by future readers.
+Alternatives considered: reorder kurtosis check before skew checks (would change the semantics defined in the spec), remove the unreachable branches (would break parity with the spec), preserve as-specified with documentation (chosen — spec fidelity, future revision can re-order).
+
+---
+
+**2026-05-06 | Four separate Supabase update calls at the close of analyzer_node, per spec**
+Steps 23-26 of the analyzer.py build spec enumerate four separate save actions: analyses.analysis_report, analyses.chart_paths, analyses.data_quality_score, analyses.updated_at. Implemented as four separate await asyncio.to_thread(...) calls. Existing convention in cleaner.py batches multiple fields into one update; the analyzer follows the spec literally instead of the convention. Each call is independently safe and the four-roundtrip cost is acceptable at the volume the system runs. If profile shows latency, consolidate to a single update.
+Alternatives considered: consolidate to one update (more efficient, follows cleaner.py convention, deviates from spec), four separate updates (chosen — spec fidelity, latency cost acceptable).

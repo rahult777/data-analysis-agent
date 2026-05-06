@@ -33,6 +33,7 @@
 - [x] backend/prompts/explainer_system.md
 - [x] backend/agents/profiler.py
 - [x] backend/agents/cleaner.py
+- [x] backend/agents/analyzer.py
 
 ---
 
@@ -56,11 +57,10 @@
 
 - [x] backend/tools/__init__.py
 - [x] backend/tools/viz_tools.py
-- [ ] backend/tools/code_executor.py
+- [ ] **NEXT** backend/tools/code_executor.py
 
 ### Backend — Agents
 
-- [ ] **NEXT** backend/agents/analyzer.py
 - [ ] backend/agents/explainer.py (requires code_executor.py first)
 - [ ] backend/agents/orchestrator.py (requires resume endpoint added to main.py first)
 
