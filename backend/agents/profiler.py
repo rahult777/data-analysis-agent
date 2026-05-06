@@ -49,6 +49,9 @@ class PipelineState(TypedDict):
     missing_value_pause_data: Optional[dict]
     outlier_pause_data: Optional[dict]
     user_pause_response: Optional[dict]
+    chart_paths: Optional[list]
+    data_quality_score: Optional[float]
+    analyzer_most_important_finding: Optional[str]
 
 
 def load_system_prompt(agent_name: str) -> str:
