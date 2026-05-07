@@ -340,3 +340,15 @@ Alternatives considered: extract from analyst_layer narrative (not the canonical
 **2026-05-07 | Four explainer_node Supabase writes merged into single atomic update after Code Review**
 The initial implementation of explainer_node used four separate asyncio.to_thread Supabase calls: executive_summary, insight_report, status="complete", updated_at. The Code Review plugin identified a race condition: a crash between any two calls leaves the analyses row in a partially-updated state where data is present but status is not yet "complete" (or vice versa). Merged into a single .update({executive_summary, insight_report, status, updated_at}) call. This is a deviation from the spec's enumerated step ordering (steps 12-15) but is architecturally superior. The analyzer_node equivalent was not changed — its four separate writes were an explicit prior decision (see decisions.md entry above) and are left consistent with their spec.
 Alternatives considered: keep four separate calls per spec (race condition window, per analyzer pattern), merge into one atomic update (chosen — eliminates race, no behavioral change, data and status land together).
+
+---
+
+**2026-05-07 | Resume endpoint stores user pause response and documents pipeline continuation as a TODO stub**
+The resume endpoint cannot trigger LangGraph pipeline continuation until orchestrator.py is built. The endpoint writes user_pause_response to the analyses record and restores the pre-pause status so the orchestrator can detect the response when polling. BackgroundTasks parameter is included with a TODO stub to make the integration point explicit. restore_status semantics depend on whether the orchestrator re-runs the paused node or continues from a LangGraph interrupt checkpoint — resolved during orchestrator.py build. Pause statuses added to AnalysisStatus now but not written to DB until orchestrator.py is built. CLEANED = 'cleaned' added to fix pre-existing bug where cleaner.py wrote this value without it being in the enum. 'cleaned' added to _PROGRESS_MAP at 45.0 and _AGENT_MAP as 'cleaner' so the status endpoint returns correct progress during the cleaning-to-analyzing transition.
+Alternatives considered: implement full LangGraph resume now (requires orchestrator), write response only with no status change (leaves state ambiguous), current approach (chosen — correct interface, explicit TODO, orchestrator-ready).
+
+---
+
+**2026-05-07 | PauseResumeRequest Code Review corruption — follow-up fix required**
+Code Review plugin changed PauseResumeRequest fields from the specified response: dict to action: str and user_input: Optional[str]. This was incorrect — the field name and type were both wrong. The resume endpoint writes the full user decision dict to user_pause_response in the database; a single dict field is the correct type. A follow-up commit (9388400) restored PauseResumeRequest to the correct single-field definition.
+Alternatives considered: keep corrupted fields (breaks resume endpoint), restore correct spec (chosen).
