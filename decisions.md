@@ -298,3 +298,45 @@ Alternatives considered: reorder kurtosis check before skew checks (would change
 **2026-05-06 | Four separate Supabase update calls at the close of analyzer_node, per spec**
 Steps 23-26 of the analyzer.py build spec enumerate four separate save actions: analyses.analysis_report, analyses.chart_paths, analyses.data_quality_score, analyses.updated_at. Implemented as four separate await asyncio.to_thread(...) calls. Existing convention in cleaner.py batches multiple fields into one update; the analyzer follows the spec literally instead of the convention. Each call is independently safe and the four-roundtrip cost is acceptable at the volume the system runs. If profile shows latency, consolidate to a single update.
 Alternatives considered: consolidate to one update (more efficient, follows cleaner.py convention, deviates from spec), four separate updates (chosen — spec fidelity, latency cost acceptable).
+
+---
+
+**2026-05-07 | Raw dict save to Supabase JSONB chosen over pydantic validation in explainer_node**
+The LLM output contract (explainer_system.md §13) uses executive_summary.bullets as a list of objects with finding/context/recommended_action fields. The pydantic ExecutiveSummary model in schemas.py uses bullet_points: list[str]. The LLM output contract for insight_report uses executive_layer/analyst_layer/technical_layer/open_questions fields; the pydantic FullInsightReport uses data_overview/data_quality/key_findings/patterns/anomalies/recommended_actions. Reconciling these without rewriting both schemas.py and the system prompt simultaneously was out of scope. Saving the raw LLM-produced dict directly to Supabase JSONB preserves all fields the LLM produces without validation loss.
+Alternatives considered: validate through pydantic (requires simultaneous rewrite of schemas.py and system prompt, high coordination cost), save raw dict (chosen — avoids scope expansion, preserves all LLM fields, correct at runtime).
+
+---
+
+**2026-05-07 | Two separate prompt files for custom question LLM calls per CLAUDE.md Rule 7**
+Custom question answering in answer_question uses two LLM calls: one to generate pandas code (question_code_generator_system.md) and one to translate the computed result to plain English (question_answer_system.md). CLAUDE.md Rule 7 prohibits inline system prompts; two separate prompt files are required rather than one file or inline strings. The two-call design also keeps the code generation step separate from the answer-formulation step, giving each LLM call a single, clear responsibility.
+Alternatives considered: single prompt for both steps (mixes responsibilities, inline not allowed), two prompt files (chosen — CLAUDE.md compliant, single responsibility per call).
+
+---
+
+**2026-05-07 | answer_question requires question_id to update questions table per main.py integration contract**
+main.py creates the questions table record before calling answer_question (via run_question_task background task). The question_id is needed to update status, answer, and pandas_code on that record throughout execution. Without question_id, there is no way to tie the async result back to the questions table row. The function signature is answer_question(analysis_id, question_id, question) accordingly.
+Alternatives considered: look up question_id by analysis_id and question text (fragile, race-prone), pass question_id (chosen — direct, unambiguous, matches the record created by main.py).
+
+---
+
+**2026-05-07 | Memory MCP read required in answer_question per explainer_system.md §10**
+Section 10 of explainer_system.md explicitly states that the full 15-key Memory MCP inheritance read is required even in Custom Questions Mode. answer_question does not receive PipelineState, so the 15 keys are unavailable at the Python level. The read is logged as attempted with all keys missing, and the function proceeds without them. This is a known deviation — the system prompt instructs the LLM to read these keys during Custom Questions Mode, but the Python host function cannot retrieve them without a live MCP store connection.
+Alternatives considered: pass PipelineState to answer_question (changes function signature, breaks main.py integration), skip Memory MCP read entirely (violates §10 spec), log as attempted with graceful missing treatment (chosen — spec-compliant at the documentation level, main.py compatible).
+
+---
+
+**2026-05-07 | Proceed-despite-missing-keys is a documented deviation from explainer_system.md §3 refusal instruction**
+Section 3 of explainer_system.md instructs the Explainer to refuse to proceed if profiler.domain_hypothesis, profiler.top_3_concerns, cleaner.key_cleaning_decisions, analyzer.most_important_finding, or analyzer.open_questions are missing or empty. The Python explainer_node logs a warning for missing keys but proceeds rather than refusing, because the cleaner and analyzer LLM closing rituals may not have written all required keys reliably. Refusing here would break the pipeline silently. The deviation is documented in a code comment at the point of the check.
+Alternatives considered: hard-fail on missing keys (breaks pipeline when LLM closing ritual fails), soft-fail with warning and proceed (chosen — pipeline resilience, deviation documented in code and decisions.md).
+
+---
+
+**2026-05-07 | explainer.lead extracted from first executive bullet's finding field, not analyst narrative**
+Section 12 of explainer_system.md specifies: explainer.lead = the single most important finding as stated in the Lead of the user-facing report; identical to the finding component of the first Executive bullet. The extraction path is executive_summary.bullets[0].finding, not a top-level lead field or the analyst_layer narrative. This is the finding component specifically, not the full bullet (which also contains context and recommended_action).
+Alternatives considered: extract from analyst_layer narrative (not the canonical lead per §12), extract top-level lead field (does not exist in the output schema), extract bullets[0].finding (chosen — exact §12 spec match).
+
+---
+
+**2026-05-07 | Four explainer_node Supabase writes merged into single atomic update after Code Review**
+The initial implementation of explainer_node used four separate asyncio.to_thread Supabase calls: executive_summary, insight_report, status="complete", updated_at. The Code Review plugin identified a race condition: a crash between any two calls leaves the analyses row in a partially-updated state where data is present but status is not yet "complete" (or vice versa). Merged into a single .update({executive_summary, insight_report, status, updated_at}) call. This is a deviation from the spec's enumerated step ordering (steps 12-15) but is architecturally superior. The analyzer_node equivalent was not changed — its four separate writes were an explicit prior decision (see decisions.md entry above) and are left consistent with their spec.
+Alternatives considered: keep four separate calls per spec (race condition window, per analyzer pattern), merge into one atomic update (chosen — eliminates race, no behavioral change, data and status land together).

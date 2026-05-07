@@ -52,6 +52,8 @@ class PipelineState(TypedDict):
     chart_paths: Optional[list]
     data_quality_score: Optional[float]
     analyzer_most_important_finding: Optional[str]
+    executive_summary: Optional[dict]
+    explainer_lead: Optional[str]
 
 
 def load_system_prompt(agent_name: str) -> str:
