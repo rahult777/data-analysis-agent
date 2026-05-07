@@ -8,6 +8,7 @@ import asyncio
 import logging
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -15,9 +16,11 @@ from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPE
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from backend.agents.explainer import answer_question
 from backend.models.schemas import (
     AnalysisResponse,
     AnalysisStatus,
+    PauseResumeRequest,
     QuestionRequest,
     QuestionResponse,
     QuestionStatus,
@@ -114,12 +117,7 @@ async def run_question_task(
     analysis_id: str,
     question: str,
 ) -> None:
-    # TODO: wire in: from backend.agents.explainer import answer_question
-    logger.info(
-        "Question task triggered for question_id=%s analysis_id=%s",
-        question_id,
-        analysis_id,
-    )
+    await answer_question(analysis_id, question_id, question)
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +257,48 @@ async def post_question(
         status=QuestionStatus.PENDING,
         answer=None,
         pandas_code=None,
+    )
+
+
+@app.post("/api/analysis/{analysis_id}/resume", response_model=StatusResponse)
+async def resume_analysis(
+    analysis_id: str,
+    body: PauseResumeRequest,
+    background_tasks: BackgroundTasks,
+    _session: str = Depends(get_session),
+) -> StatusResponse:
+    client = get_supabase_client()
+    response = await asyncio.to_thread(
+        lambda: client.table("analyses")
+        .select("id, status, error_message")
+        .eq("id", analysis_id)
+        .execute()
+    )
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Analysis not found.")
+    record = response.data[0]
+    status = record["status"]
+    if status not in ("domain_pause", "missing_value_pause", "outlier_pause"):
+        raise HTTPException(status_code=400, detail="Analysis is not in a pause state.")
+    # restore_status semantics depend on orchestrator design — will be resolved when orchestrator.py is built
+    restore_status = "profiling" if status == "domain_pause" else "cleaning"
+    await asyncio.to_thread(
+        lambda: client.table("analyses")
+        .update({
+            "user_pause_response": body.response,
+            "status": restore_status,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        .eq("id", analysis_id)
+        .execute()
+    )
+    # TODO: trigger pipeline continuation — background_tasks.add_task(resume_pipeline, analysis_id) — implement when orchestrator.py is built
+    return StatusResponse(
+        analysis_id=analysis_id,
+        status=AnalysisStatus(restore_status),
+        current_agent=_AGENT_MAP.get(restore_status),
+        progress_pct=_PROGRESS_MAP.get(restore_status, 0.0),
+        error_message=None,
     )
 
 

@@ -330,6 +330,11 @@ class QuestionRequest(BaseModel):
     question: str
 
 
+class PauseResumeRequest(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    response: dict
+
+
 class QuestionResponse(BaseModel):
     """Response body for POST /api/analysis/{id}/question."""
 
