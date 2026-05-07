@@ -57,11 +57,11 @@
 
 - [x] backend/tools/__init__.py
 - [x] backend/tools/viz_tools.py
-- [ ] **NEXT** backend/tools/code_executor.py
+- [x] backend/tools/code_executor.py
 
 ### Backend — Agents
 
-- [ ] backend/agents/explainer.py (requires code_executor.py first)
+- [ ] **NEXT** backend/agents/explainer.py (requires code_executor.py first)
 - [ ] backend/agents/orchestrator.py (requires resume endpoint added to main.py first)
 
 ### Frontend
@@ -75,7 +75,10 @@
 
 ### Tests
 
-- [ ] tests/fixtures/ — iris.csv, messy_data.csv, time_series_data.csv
+- [x] tests/fixtures/iris.csv
+- [ ] tests/fixtures/messy_data.csv
+- [ ] tests/fixtures/time_series_data.csv
+- [x] tests/test_code_executor.py
 - [ ] tests/test_profiler.py
 - [ ] tests/test_cleaner.py
 - [ ] tests/test_analyzer.py
