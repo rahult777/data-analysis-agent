@@ -34,6 +34,7 @@
 - [x] backend/agents/profiler.py
 - [x] backend/agents/cleaner.py
 - [x] backend/agents/analyzer.py
+- [x] backend/agents/explainer.py
 
 ---
 
@@ -61,8 +62,8 @@
 
 ### Backend — Agents
 
-- [ ] **NEXT** backend/agents/explainer.py (requires code_executor.py first)
-- [ ] backend/agents/orchestrator.py (requires resume endpoint added to main.py first)
+- [x] backend/agents/explainer.py
+- [ ] **NEXT** backend/agents/orchestrator.py (requires resume endpoint added to main.py first)
 
 ### Frontend
 
@@ -82,7 +83,7 @@
 - [ ] tests/test_profiler.py
 - [ ] tests/test_cleaner.py
 - [ ] tests/test_analyzer.py
-- [ ] tests/test_explainer.py
+- [x] tests/test_explainer.py
 - [ ] tests/test_api.py
 
 ### Infrastructure
