@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from backend.agents.explainer import answer_question
+from backend.agents.orchestrator import build_initial_state, run_pipeline
 from backend.models.schemas import (
     AnalysisResponse,
     AnalysisStatus,
@@ -116,8 +117,9 @@ async def run_pipeline_task(
     context: str,
     user_type: str,
 ) -> None:
-    # TODO: wire in: from backend.agents.orchestrator import run_pipeline
     logger.info("Pipeline task triggered for analysis_id=%s", analysis_id)
+    initial_state = await build_initial_state(analysis_id, stored_filename, context, user_type)
+    await run_pipeline(initial_state)
 
 
 async def run_question_task(
@@ -272,7 +274,6 @@ async def post_question(
 async def resume_analysis(
     analysis_id: str,
     body: PauseResumeRequest,
-    background_tasks: BackgroundTasks,
     _session: str = Depends(get_session),
 ) -> StatusResponse:
     client = get_supabase_client()
@@ -288,7 +289,6 @@ async def resume_analysis(
     status = record["status"]
     if status not in ("domain_pause", "missing_value_pause", "outlier_pause"):
         raise HTTPException(status_code=400, detail="Analysis is not in a pause state.")
-    # restore_status semantics depend on orchestrator design — will be resolved when orchestrator.py is built
     restore_status = "profiling" if status == "domain_pause" else "cleaning"
     await asyncio.to_thread(
         lambda: client.table("analyses")
@@ -300,7 +300,8 @@ async def resume_analysis(
         .eq("id", analysis_id)
         .execute()
     )
-    # TODO: trigger pipeline continuation — background_tasks.add_task(resume_pipeline, analysis_id) — implement when orchestrator.py is built
+    # Pipeline continues automatically — the polling loop in pause wait nodes
+    # detects user_pause_response and resumes execution.
     return StatusResponse(
         analysis_id=analysis_id,
         status=AnalysisStatus(restore_status),

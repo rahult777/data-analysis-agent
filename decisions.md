@@ -352,3 +352,57 @@ Alternatives considered: implement full LangGraph resume now (requires orchestra
 **2026-05-07 | PauseResumeRequest Code Review corruption — follow-up fix required**
 Code Review plugin changed PauseResumeRequest fields from the specified response: dict to action: str and user_input: Optional[str]. This was incorrect — the field name and type were both wrong. The resume endpoint writes the full user decision dict to user_pause_response in the database; a single dict field is the correct type. A follow-up commit (9388400) restored PauseResumeRequest to the correct single-field definition.
 Alternatives considered: keep corrupted fields (breaks resume endpoint), restore correct spec (chosen).
+
+---
+
+**2026-05-08 | LangGraph StateGraph chosen for pipeline orchestration with polling-based pause states**
+LangGraph 0.2.0 interrupt() was unavailable in the installed version, so pause states are implemented as polling nodes that loop until user_pause_response appears in the analyses DB record. Each pause wait node first clears user_pause_response in the DB before polling to prevent stale values from a prior pause cycle causing an immediate false return.
+Alternatives considered: LangGraph interrupt() checkpointing (unavailable in 0.2.0), manual asyncio.Event signaling (not durable — would lose state on process restart), polling DB (chosen — durable, works with any number of worker processes).
+
+---
+
+**2026-05-08 | ainvoke() with tracer as config callbacks required for LangSmith tracing per CLAUDE.md Rule 8**
+Individual agent files call create_tracer() locally but do not pass it as a callback — the comment in profiler.py (line 143-144) explicitly documents this. The orchestrator creates a single LangChainTracer and passes it via config={"callbacks": [tracer]} to ainvoke(). LangGraph propagates this callback to every node execution automatically. Without this pattern, LangSmith traces do not appear.
+Alternatives considered: pass tracer in each individual agent's Anthropic SDK call (does not instrument the graph-level orchestration), pass at ainvoke level (chosen — single tracer instruments the full pipeline).
+
+---
+
+**2026-05-08 | clear_and_proceed node handles both normal second-profiler-run path and edge-case repeat path**
+When profiler succeeds on its second run (after domain pause), domain_pause_data is None but user_pause_response is still set in LangGraph state (profiler does not clear it). Without the clear_and_proceed node, route_after_profiler case (c) would fall through to "cleaner" and the domain confirmation response would flow into the cleaner's build_cleaner_message as if it were a cleaner pause response — silent data corruption. The clear_user_pause_response_node returns {user_pause_response: None} to clear it before cleaner runs. The same node handles the edge case where profiler repeats domain_confirmation_required despite a user response (case b) — routing to clear_and_proceed prevents an infinite domain confirmation loop.
+Alternatives considered: profiler_node explicitly clears user_pause_response on success (couples profiler to orchestrator concerns), separate clear nodes for each case (unnecessary — same operation), single clear_and_proceed handling both cases (chosen).
+
+---
+
+**2026-05-08 | route_after_profiler handles four distinct state combinations; the critical case is (c)**
+Case (a): domain_pause_data set, user_pause_response None → domain_pause_wait. Case (b): both set → clear_and_proceed (edge case: don't loop on repeated domain pause). Case (c): domain_pause_data None, user_pause_response set → clear_and_proceed. This is the CRITICAL CASE — profiler succeeded on second run but user_pause_response is still in state from the domain pause. Without this explicit branch, LangGraph would route to cleaner with the stale response. Case (d): both None → cleaner (happy path).
+Alternatives considered: simplified two-branch router (would miss the critical case c), four-case explicit router (chosen — each case testable independently, critical case visibly documented).
+
+---
+
+**2026-05-08 | domain_confirmed initialized to False not None per PipelineState TypedDict annotation**
+PipelineState in profiler.py declares domain_confirmed: bool (not Optional[bool]). Initializing to None would violate the TypedDict contract and cause a runtime type error if any code checks `if state["domain_confirmed"] is True`. False is the correct sentinel for "not yet confirmed".
+Alternatives considered: None (wrong type), False (chosen — matches TypedDict annotation).
+
+---
+
+**2026-05-08 | build_initial_state accepts params directly because context and user_type are not stored in analyses table**
+The analyses table schema (docs/infrastructure.md) does not include context or user_type columns. These values are passed through from the upload endpoint to the background task to build_initial_state without DB persistence. Reading from Supabase in build_initial_state would fail since the columns do not exist.
+Alternatives considered: add context and user_type columns to analyses table (schema change, unnecessary for current build), read from DB (columns don't exist), accept directly from params (chosen).
+
+---
+
+**2026-05-08 | Stale resume endpoint TODO removed — polling loop handles continuation automatically**
+The resume endpoint previously had a TODO: "background_tasks.add_task(resume_pipeline, analysis_id) — implement when orchestrator.py is built". The polling-based orchestrator design means no explicit trigger is needed — the pause wait nodes poll DB every 3 seconds and detect user_pause_response automatically. The BackgroundTasks parameter was removed from resume_analysis since it was only there for the stub. BackgroundTasks import retained (used by upload_file and post_question).
+Alternatives considered: keep BackgroundTasks param and add explicit resume trigger (unnecessary complexity), remove param and rely on polling (chosen).
+
+---
+
+**2026-05-08 | error_message written alongside status=error in run_pipeline exception handler**
+The run_pipeline exception handler updates both status="error" AND error_message=f"SYSTEM_ERROR: {str(exc)}" in a single Supabase call, consistent with all four individual agent exception handlers (profiler, cleaner, analyzer, explainer all write both fields together). Without error_message, pipeline failures are invisible to the frontend per decisions.md entry 2026-04-13.
+Alternatives considered: write status only (leaves error_message null, frontend cannot display error detail), write both fields (chosen — consistent with agent pattern).
+
+---
+
+**2026-05-08 | Pause wait nodes clear user_pause_response in DB before polling to prevent stale-value false return**
+Code Review identified that user_pause_response in the Supabase DB persists across pause cycles. When cleaner_pause_wait_node starts polling after a domain pause has already occurred, the DB still contains the domain confirmation response. Without clearing it first, check_for_pause_response would immediately return the stale value and the cleaner pause would return the wrong response. Fix: each pause wait node includes user_pause_response=None in its initial DB update alongside the status change, before the polling loop begins.
+Alternatives considered: clear user_pause_response in a separate Supabase call (two roundtrips, race window), clear as part of the status update (chosen — atomic, zero race window).
