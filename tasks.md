@@ -48,7 +48,7 @@
 
 ### Backend — Core Infrastructure
 
-- [ ] Update main.py — wire question endpoint to explainer.py + add POST /api/analysis/{id}/resume endpoint for pause state responses
+- [x] Update main.py — wire question endpoint to explainer.py + add POST /api/analysis/{id}/resume endpoint for pause state responses
 
 ### Backend — Prompts
 
@@ -63,9 +63,9 @@
 ### Backend — Agents
 
 - [x] backend/agents/explainer.py
-- [ ] **NEXT** backend/agents/orchestrator.py (requires resume endpoint added to main.py first)
+- [x] backend/agents/orchestrator.py
 
-### Frontend
+### Frontend — **NEXT**
 
 - [ ] Next.js app scaffold (App Router, TypeScript, Tailwind, shadcn/ui)
 - [ ] Upload page — file input, drag-and-drop, validation
