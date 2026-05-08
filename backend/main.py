@@ -34,7 +34,11 @@ logger = logging.getLogger(__name__)
 
 _PROGRESS_MAP: dict[str, float] = {
     "profiling": 20.0,
+    "domain_pause": 20.0,
     "cleaning": 40.0,
+    "cleaned": 45.0,
+    "missing_value_pause": 40.0,
+    "outlier_pause": 40.0,
     "analyzing": 60.0,
     "explaining": 80.0,
     "complete": 100.0,
@@ -43,7 +47,11 @@ _PROGRESS_MAP: dict[str, float] = {
 
 _AGENT_MAP: dict[str, Optional[str]] = {
     "profiling": "profiler",
+    "domain_pause": "profiler",
     "cleaning": "cleaner",
+    "cleaned": "cleaner",
+    "missing_value_pause": "cleaner",
+    "outlier_pause": "cleaner",
     "analyzing": "analyzer",
     "explaining": "explainer",
     "complete": None,

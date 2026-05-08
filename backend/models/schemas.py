@@ -25,7 +25,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class AnalysisStatus(str, Enum):
     PROFILING = "profiling"
+    DOMAIN_PAUSE = "domain_pause"
     CLEANING = "cleaning"
+    CLEANED = "cleaned"
+    MISSING_VALUE_PAUSE = "missing_value_pause"
+    OUTLIER_PAUSE = "outlier_pause"
     ANALYZING = "analyzing"
     EXPLAINING = "explaining"
     COMPLETE = "complete"
