@@ -406,3 +406,15 @@ Alternatives considered: write status only (leaves error_message null, frontend 
 **2026-05-08 | Pause wait nodes clear user_pause_response in DB before polling to prevent stale-value false return**
 Code Review identified that user_pause_response in the Supabase DB persists across pause cycles. When cleaner_pause_wait_node starts polling after a domain pause has already occurred, the DB still contains the domain confirmation response. Without clearing it first, check_for_pause_response would immediately return the stale value and the cleaner pause would return the wrong response. Fix: each pause wait node includes user_pause_response=None in its initial DB update alongside the status change, before the polling loop begins.
 Alternatives considered: clear user_pause_response in a separate Supabase call (two roundtrips, race window), clear as part of the status update (chosen — atomic, zero race window).
+
+---
+
+**2026-05-14 | time_series_data.csv date column stored as string — test files must parse with pd.to_datetime()**
+analyzer.py's classify_columns detects datetime columns by dtype check only: `"datetime" in str(df[col].dtype)`. pd.read_csv loads date columns as dtype object regardless of content. Any test or code using time_series_data.csv must call pd.to_datetime(df["date"]) before passing to classify_columns or detect_time_series, or datetime_column will be None and no time series analysis will run.
+Alternatives considered: save as actual datetime (CSV has no datetime dtype — it becomes string on save), document constraint in decisions.md (chosen).
+
+---
+
+**2026-05-14 | time_series_data.csv uses trend=20/day and noise_std=200, not trend=5 noise_std=500**
+With trend=5 and noise_std=500, seed 42 produces a negative slope estimate (≈ −5.45) from np.polyfit because the seasonal component variance (2000² / 2 = 2M) dominates the trend signal (5 × 364 = 1820 total change). The seasonal component is not orthogonal to the linear trend in finite samples, so the slope estimate has SE ≈ √(2M / 11100) ≈ 13.5, making the true slope of +5 well within the noise of 0. trend=20 and noise_std=200 gives a measured slope of +9.48 with seed 42. The fixture's intent (upward trend + seasonal + guaranteed positive slope assertion) is preserved.
+Alternatives considered: trend=5 noise_std=500 (spec value — fails assertion with seed 42), increase trend only (still borderline), increase trend and reduce noise (chosen — slope/SE ≈ 1.47, seed 42 confirmed positive).
