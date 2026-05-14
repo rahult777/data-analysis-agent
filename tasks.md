@@ -40,7 +40,7 @@
 
 ## In Progress
 
-- [ ] tests/test_profiler.py — NEXT
+- [ ] tests/test_cleaner.py — NEXT
 
 ---
 
@@ -80,7 +80,7 @@
 - [x] tests/fixtures/messy_data.csv
 - [x] tests/fixtures/time_series_data.csv
 - [x] tests/test_code_executor.py
-- [ ] tests/test_profiler.py
+- [x] tests/test_profiler.py
 - [ ] tests/test_cleaner.py
 - [ ] tests/test_analyzer.py
 - [x] tests/test_explainer.py
