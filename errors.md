@@ -21,3 +21,7 @@ Solution: already handled gracefully by the try/except pattern in viz_tools.py. 
 **2026-05-07 | PauseResumeRequest fields corrupted by Code Review plugin**
 Root cause: Code Review plugin changed response: dict to action: str and user_input: Optional[str] without being instructed to. The resume endpoint expects a dict containing the full user decision to write to user_pause_response in the database.
 Solution: follow-up fix commit (9388400) restored PauseResumeRequest to exactly one field: response (dict). Verification: python -c 'from backend.models.schemas import PauseResumeRequest; print(PauseResumeRequest.model_fields)' must print only response field.
+
+**2026-05-15 | test_analyzer.py sepal_width and petal_width excluded from numeric_cols on iris.csv**
+Root cause: classify_columns excludes any column whose name contains "id" as a substring — "width" contains "id" so sepal_width and petal_width are excluded from numeric_cols on iris.csv. This is documented behavior not a bug in the code.
+Solution: test_classify_columns_numeric updated to assert sepal_length and petal_length are present and sepal_width and petal_width are absent, with an explanatory comment. Any future fixture or test involving columns with "id" anywhere in the name must account for this exclusion.

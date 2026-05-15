@@ -35,12 +35,7 @@
 - [x] backend/agents/cleaner.py
 - [x] backend/agents/analyzer.py
 - [x] backend/agents/explainer.py
-
----
-
-## In Progress
-
-- [ ] tests/test_cleaner.py — NEXT
+- [x] tests/test_cleaner.py
 
 ---
 
@@ -81,10 +76,10 @@
 - [x] tests/fixtures/time_series_data.csv
 - [x] tests/test_code_executor.py
 - [x] tests/test_profiler.py
-- [ ] tests/test_cleaner.py
-- [ ] tests/test_analyzer.py
+- [x] tests/test_cleaner.py
+- [x] tests/test_analyzer.py
 - [x] tests/test_explainer.py
-- [ ] tests/test_api.py
+- [ ] tests/test_api.py — NEXT
 
 ### Infrastructure
 
