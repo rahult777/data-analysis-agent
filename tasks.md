@@ -60,10 +60,10 @@
 - [x] backend/agents/explainer.py
 - [x] backend/agents/orchestrator.py
 
-### Frontend — **NEXT** ← START HERE
+### Frontend
 
-- [ ] Next.js app scaffold (App Router, TypeScript, Tailwind, shadcn/ui)
-- [ ] Upload page — file input, drag-and-drop, validation
+- [x] Next.js app scaffold (App Router, TypeScript, Tailwind, shadcn/ui, Framer Motion, axios, recharts, lucide-react, lib/types.ts, lib/api.ts, dark layout)
+- [ ] **NEXT** ← Upload page — file input, drag-and-drop, validation
 - [ ] Results page — three-layer output display (executive / analyst / technical)
 - [ ] Polling logic — job status updates
 - [ ] Charts — Recharts integration for analysis visualizations
