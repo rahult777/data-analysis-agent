@@ -60,7 +60,7 @@
 - [x] backend/agents/explainer.py
 - [x] backend/agents/orchestrator.py
 
-### Frontend — **NEXT**
+### Frontend — **NEXT** ← START HERE
 
 - [ ] Next.js app scaffold (App Router, TypeScript, Tailwind, shadcn/ui)
 - [ ] Upload page — file input, drag-and-drop, validation
@@ -79,7 +79,7 @@
 - [x] tests/test_cleaner.py
 - [x] tests/test_analyzer.py
 - [x] tests/test_explainer.py
-- [ ] tests/test_api.py — NEXT
+- [x] tests/test_api.py
 
 ### Infrastructure
 
