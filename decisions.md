@@ -418,3 +418,9 @@ Alternatives considered: save as actual datetime (CSV has no datetime dtype — 
 **2026-05-14 | time_series_data.csv uses trend=20/day and noise_std=200, not trend=5 noise_std=500**
 With trend=5 and noise_std=500, seed 42 produces a negative slope estimate (≈ −5.45) from np.polyfit because the seasonal component variance (2000² / 2 = 2M) dominates the trend signal (5 × 364 = 1820 total change). The seasonal component is not orthogonal to the linear trend in finite samples, so the slope estimate has SE ≈ √(2M / 11100) ≈ 13.5, making the true slope of +5 well within the noise of 0. trend=20 and noise_std=200 gives a measured slope of +9.48 with seed 42. The fixture's intent (upward trend + seasonal + guaranteed positive slope assertion) is preserved.
 Alternatives considered: trend=5 noise_std=500 (spec value — fails assertion with seed 42), increase trend only (still borderline), increase trend and reduce noise (chosen — slope/SE ≈ 1.47, seed 42 confirmed positive).
+
+---
+
+**2026-05-16 | Frontend scaffold font pairing: Instrument Serif + DM Sans**
+frontend-design skill specified this pairing for the Data Analysis Agent. Instrument Serif for headings, DM Sans for body text. Applied in frontend/app/layout.tsx.
+Alternatives considered: Inter only (create-next-app default — too generic), Instrument Serif + DM Sans (chosen — professional, data-focused aesthetic per frontend-design skill).
