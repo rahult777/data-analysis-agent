@@ -25,3 +25,7 @@ Solution: follow-up fix commit (9388400) restored PauseResumeRequest to exactly 
 **2026-05-15 | test_analyzer.py sepal_width and petal_width excluded from numeric_cols on iris.csv**
 Root cause: classify_columns excludes any column whose name contains "id" as a substring — "width" contains "id" so sepal_width and petal_width are excluded from numeric_cols on iris.csv. This is documented behavior not a bug in the code.
 Solution: test_classify_columns_numeric updated to assert sepal_length and petal_length are present and sepal_width and petal_width are absent, with an explanatory comment. Any future fixture or test involving columns with "id" anywhere in the name must account for this exclusion.
+
+**2026-05-17 | Build error: `border-border` class does not exist in globals.css:3:1**
+Root cause: globals.css contained `@apply border-border outline-ring/50` in the universal `*` selector. `border-border` is a shadcn/ui shorthand that requires Tailwind v4. The project uses Tailwind v3 (tailwind.config.ts present), where this utility does not exist as an @apply-able class. This was a pre-existing issue in the frontend scaffold that was exposed on first compile.
+Solution: Replaced `@apply border-border outline-ring/50` with the Tailwind v3 equivalent using explicit CSS custom property reference.
