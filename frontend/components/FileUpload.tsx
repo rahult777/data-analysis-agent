@@ -292,7 +292,7 @@ export function FileUpload() {
             setContext(event.target.value)
           }
           placeholder="Tell us about your data: what it represents, what you're trying to learn."
-          className="min-h-[120px] bg-card/40 border-border/60"
+          className="min-h-[120px] bg-card/40 border-border/60 text-zinc-900"
         />
       </div>
 

@@ -2,7 +2,7 @@ import { FileUpload } from "@/components/FileUpload";
 
 export default function Home() {
   return (
-    <main className="min-h-screen w-full px-6 py-16 sm:py-24 md:py-32">
+    <main className="min-h-screen w-full px-6 py-8 sm:py-12 md:py-16">
       <div className="mx-auto flex w-full max-w-2xl flex-col gap-12">
         <header className="flex flex-col gap-4 text-center">
           <h1
