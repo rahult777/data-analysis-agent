@@ -424,3 +424,27 @@ Alternatives considered: trend=5 noise_std=500 (spec value — fails assertion w
 **2026-05-16 | Frontend scaffold font pairing: Instrument Serif + DM Sans**
 frontend-design skill specified this pairing for the Data Analysis Agent. Instrument Serif for headings, DM Sans for body text. Applied in frontend/app/layout.tsx.
 Alternatives considered: Inter only (create-next-app default — too generic), Instrument Serif + DM Sans (chosen — professional, data-focused aesthetic per frontend-design skill).
+
+---
+
+**2026-05-17 | globals.css @apply border-border replaced with explicit CSS custom properties for Tailwind v3 compatibility**
+The frontend scaffold's globals.css used `@apply border-border outline-ring/50` in the universal `*` selector. This is a shadcn/ui shorthand that requires Tailwind v4. The project uses Tailwind v3 (tailwind.config.ts present), where this utility does not exist as an @apply-able class. Replaced with `border-color: var(--border)` and `outline-color: color-mix(in oklch, var(--ring) 50%, transparent)` — explicit CSS custom property references that work correctly in Tailwind v3.
+Alternatives considered: upgrade to Tailwind v4 (too disruptive at this stage), find a v3 @apply equivalent (none exists), explicit CSS custom properties (chosen — minimal change, correct behavior, no dependency changes).
+
+---
+
+**2026-05-17 | FileUpload writes session_id to localStorage; Results page must read with same key and pass explicitly to every api.ts call**
+After successful upload, FileUpload.tsx writes session_id to localStorage using key `session_id_${analysis_id}`. api.ts has no automatic localStorage handling — every authenticated function (getAnalysisStatus, getAnalysis, getCharts, postQuestion, resumeAnalysis) takes sessionId as an explicit positional parameter and passes it as the "session-id" header. The Results page must read localStorage with the exact key `session_id_${analysis_id}` on mount and pass the retrieved value explicitly to every api.ts call. Any deviation in the key string causes silent 403 failures on all authenticated requests with no visible error cause.
+Alternatives considered: automatic header injection in api.ts interceptor (would hide the dependency, harder to debug, changes api.ts contract), explicit parameter per call (chosen — transparent, consistent with existing api.ts design, failure mode is visible).
+
+---
+
+**2026-05-17 | FileUpload.tsx ESLint fixes — MouseEvent import removed, _event params dropped, apostrophe escaped**
+After the initial build, npm run build revealed three ESLint errors in FileUpload.tsx: unused MouseEvent import (imported but no handler used it after the drag counter refactor), unused _event parameters in handleClick and handleDragLeave (event object not needed since neither function uses it), and unescaped apostrophe in "Who's analyzing this?" JSX text. Fixed by dropping the MouseEvent import, removing the unused parameters, and replacing the apostrophe with Who&apos;s. TypeScript and build both clean after fixes.
+Alternatives considered: suppress ESLint rules (wrong — these are real cleanliness issues), fix the three issues (chosen).
+
+---
+
+**2026-05-18 | Progress UI build scoped to Path B — pause UI deferred to follow-up build**
+Assessment of the Results page revealed that pause data (domain_pause_data, missing_value_pause_data, outlier_pause_data) is written only to LangGraph state and never persisted to the Supabase analyses table. The status endpoint returns no pause payload. Without this data the frontend cannot render the pause question UI. Path B chosen: build the Progress UI in this session with pipeline visualization, polling, error states, and complete placeholder only. When a pause status occurs, render a generic placeholder naming the specific pause type. The follow-up build will bundle (a) adding a pause_data jsonb column to the analyses table, (b) writing the pause payload from profiler_node and cleaner_node, (c) clearing it in the pause wait nodes after resume, (d) expanding the status endpoint to return it, and (e) the full pause UI components. Testing this build uses iris.csv which does not trigger any pause state.
+Alternatives considered: bundle backend fix into this build (Path A — correct but expands scope to two build cycles), defer pause UI entirely (Path B — chosen — smaller scope, cleaner separation, backend and frontend pause work designed together in one focused follow-up build).
