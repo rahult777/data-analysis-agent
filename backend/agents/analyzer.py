@@ -43,6 +43,15 @@ logger = logging.getLogger(__name__)
 
 client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
+# Output-token ceiling for the analyzer's synthesis call. Raised from 8000 after
+# the first end-to-end run truncated mid-JSON (stop_reason="max_tokens"): the
+# analyzer echoes the full computed stats blocks (which Python overwrites
+# downstream), so the response is large. NOTE: 32000 is above the SDK's
+# non-streaming ceiling (~21.3K, beyond which messages.create raises
+# "Streaming is required..."), so the synthesis call MUST use messages.stream().
+# See errors.md 2026-06-03 / 2026-06-04.
+ANALYZER_MAX_TOKENS = 32000
+
 
 def sanitize_for_json(obj: Any) -> Any:
     """Recursively replace NaN/Inf floats with None and tuples with lists.
@@ -678,14 +687,27 @@ async def analyzer_node(state: PipelineState) -> dict:
                 failed_criteria=failed_criteria,
             )
 
-            response = await asyncio.to_thread(
-                lambda: client.messages.create(
+            def _run_analyzer_stream():
+                # Must stream: ANALYZER_MAX_TOKENS exceeds the SDK's non-streaming
+                # ceiling (see the constant's note). get_final_message() returns the
+                # same Message shape messages.create() would, so the stop_reason
+                # guard and JSON parsing below are unchanged.
+                with client.messages.stream(
                     model=ANTHROPIC_MODEL,
-                    max_tokens=8000,
+                    max_tokens=ANALYZER_MAX_TOKENS,
                     system=system_prompt,
                     messages=[{"role": "user", "content": user_message}],
+                ) as stream:
+                    return stream.get_final_message()
+
+            response = await asyncio.to_thread(_run_analyzer_stream)
+
+            if response.stop_reason == "max_tokens":
+                raise ValueError(
+                    "Analyzer LLM response truncated: reached the max_tokens "
+                    f"ceiling ({ANALYZER_MAX_TOKENS}) before the JSON was complete. "
+                    "Raise ANALYZER_MAX_TOKENS or reduce the analyzer's output size."
                 )
-            )
 
             analysis_response = parse_json_response(response.content[0].text)
 

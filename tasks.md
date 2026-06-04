@@ -64,8 +64,8 @@
 
 - [x] Next.js app scaffold (App Router, TypeScript, Tailwind, shadcn/ui, Framer Motion, axios, recharts, lucide-react, lib/types.ts, lib/api.ts, dark layout)
 - [x] Upload page — file input, drag-and-drop, validation
-- [~] **NEXT** ← Results page — Progress UI (polling, pipeline visualization, error states, complete placeholder). Pause UI deferred to follow-up build. Build prompt assessed and ready.
-- [ ] Results page — full results display (three-layer output, charts, custom questions). Depends on Progress UI shipping.
+- [x] Results page — Progress UI (polling, pipeline visualization, error states, complete placeholder). Pause UI deferred to follow-up build.
+- [ ] **NEXT** ← Results page — full results display (three-layer output, charts, custom questions). Depends on Progress UI shipping + pause UI follow-up build.
 - [ ] Charts — Recharts integration for analysis visualizations
 - [ ] Mobile viewport testing (320px minimum)
 

@@ -34,6 +34,16 @@ logger = logging.getLogger(__name__)
 
 client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
+# Output-token ceiling for the explainer's synthesis call. Raised from 8000 to
+# match the analyzer fix (errors.md 2026-06-03): the explainer emits a large
+# three-layer report (5 executive bullets + analyst narrative + technical
+# methodology and code blocks) that can exceed 8000 tokens and truncate mid-JSON
+# (stop_reason="max_tokens"). NOTE: 32000 is above the SDK's non-streaming ceiling
+# (~21.3K, beyond which messages.create raises "Streaming is required..."), so the
+# synthesis call MUST use messages.stream(). The smaller custom-question calls
+# (max_tokens=2000/1000) stay non-streaming. See errors.md 2026-06-04.
+EXPLAINER_MAX_TOKENS = 32000
+
 
 def build_explainer_message(state: PipelineState) -> str:
     """Build the Anthropic user message for the explainer LLM call."""
@@ -121,14 +131,27 @@ async def explainer_node(state: PipelineState) -> dict:
         message = build_explainer_message(state)
         system_prompt = load_system_prompt("explainer")
 
-        response = await asyncio.to_thread(
-            lambda: client.messages.create(
+        def _run_explainer_stream():
+            # Must stream: EXPLAINER_MAX_TOKENS exceeds the SDK's non-streaming
+            # ceiling (see the constant's note). get_final_message() returns the
+            # same Message shape messages.create() would, so the stop_reason
+            # guard and JSON parsing below are unchanged.
+            with client.messages.stream(
                 model=ANTHROPIC_MODEL,
-                max_tokens=8000,
+                max_tokens=EXPLAINER_MAX_TOKENS,
                 system=system_prompt,
                 messages=[{"role": "user", "content": message}],
+            ) as stream:
+                return stream.get_final_message()
+
+        response = await asyncio.to_thread(_run_explainer_stream)
+
+        if response.stop_reason == "max_tokens":
+            raise ValueError(
+                "Explainer LLM response truncated: reached the max_tokens "
+                f"ceiling ({EXPLAINER_MAX_TOKENS}) before the JSON was complete. "
+                "Raise EXPLAINER_MAX_TOKENS or reduce the explainer's output size."
             )
-        )
 
         explainer_response = parse_json_response(response.content[0].text)
 

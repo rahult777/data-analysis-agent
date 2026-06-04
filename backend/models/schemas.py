@@ -305,12 +305,16 @@ class AnalysisResponse(BaseModel):
     row_count: int | None = None
     column_count: int | None = None
     data_quality_score: float | None = None
-    profile_report: ProfileReport | None = None
+    # Agent-output JSONB returned as raw dicts: the stored shapes are the rich
+    # agent outputs and intentionally differ from any strict nested model (raw
+    # dict save — see decisions.md 2026-05-07 / 2026-06-04). profile_report,
+    # analysis_report, insight_report, and executive_summary are pass-through.
+    profile_report: dict | None = None
     cleaning_report: CleaningReport | None = None
     cleaning_decisions: list[CleaningDecision] | None = None
-    analysis_report: AnalysisReport | None = None
-    insight_report: FullInsightReport | None = None
-    executive_summary: ExecutiveSummary | None = None
+    analysis_report: dict | None = None
+    insight_report: dict | None = None
+    executive_summary: dict | None = None
     chart_paths: list[str] | None = None
 
 
