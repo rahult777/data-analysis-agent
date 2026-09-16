@@ -60,6 +60,7 @@
 
 - [x] backend/agents/explainer.py
 - [x] backend/agents/orchestrator.py
+- [ ] Fix Profiler/Cleaner row-sampling bug — build_profiler_message (and build_cleaner_message's sample_values) under-sample via head(5)/head(3), causing wrong full-dataset statistics when the uploaded file is sorted/grouped by a categorical column. Fully diagnosed and planned (see errors.md 2026-09-17, decisions.md 2026-09-17 entries) — ready for implementation, no remaining blockers.
 
 ### Frontend
 
