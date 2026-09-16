@@ -44,6 +44,7 @@
 ### Backend — Core Infrastructure
 
 - [x] Update main.py — wire question endpoint to explainer.py + add POST /api/analysis/{id}/resume endpoint for pause state responses
+- [x] GET /api/analysis/{id}/question/{question_id} — question polling endpoint (main.py) + 2 unit tests (test_api.py, Group 5)
 
 ### Backend — Prompts
 
@@ -65,9 +66,10 @@
 - [x] Next.js app scaffold (App Router, TypeScript, Tailwind, shadcn/ui, Framer Motion, axios, recharts, lucide-react, lib/types.ts, lib/api.ts, dark layout)
 - [x] Upload page — file input, drag-and-drop, validation
 - [x] Results page — Progress UI (polling, pipeline visualization, error states, complete placeholder). Pause UI deferred to follow-up build.
-- [ ] **NEXT** ← Results page — full results display (three-layer output, charts, custom questions). Depends on Progress UI shipping + pause UI follow-up build.
-- [ ] Charts — Recharts integration for analysis visualizations
-- [ ] Mobile viewport testing (320px minimum)
+- [x] Results page — full results display. Completion handoff wired (AnalysisProgress onComplete → page.tsx swaps AnalysisProgress↔AnalysisResults via AnimatePresence). Built CodeBlock, AnalysisResults (header + three-layer output), InsightReport (InsightReportExecutive cards + InsightReportDetail collapsible Analyst/Open Questions/Technical accordion), ChartGrid (agent-generated PNG/HTML charts), QuestionInput (custom-question polling via new GET endpoint). Backend GET question-polling endpoint + tests. Build + lint clean, 95 backend tests pass.
+- [ ] Charts — Recharts integration for React-native visualizations (separate from the agent-generated ChartGrid shipped above)
+- [ ] Mobile viewport testing (320px minimum) — components built mobile-first (44px tap targets, single-column stacking, 14px min text) but not yet verified in a 320px browser viewport
+- [ ] Pause-state UI follow-up (backend pause_data persistence + pause question components) — still deferred per 2026-05-18
 
 ### Tests
 

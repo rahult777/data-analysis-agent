@@ -2,10 +2,11 @@
 
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { motion } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import { AlertTriangle } from "lucide-react";
 
 import { AnalysisProgress } from "@/components/AnalysisProgress";
+import { AnalysisResults } from "@/components/AnalysisResults";
 import { Button } from "@/components/ui/button";
 
 export default function AnalysisPage() {
@@ -15,6 +16,7 @@ export default function AnalysisPage() {
 
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessionChecked, setSessionChecked] = useState<boolean>(false);
+  const [isComplete, setIsComplete] = useState<boolean>(false);
 
   useEffect(() => {
     const stored = localStorage.getItem(`session_id_${analysisId}`);
@@ -24,7 +26,11 @@ export default function AnalysisPage() {
 
   return (
     <main className="min-h-screen w-full px-6 py-8 sm:py-12 md:py-16">
-      <div className="mx-auto flex w-full max-w-2xl flex-col gap-12">
+      <div
+        className={`mx-auto flex w-full flex-col gap-12 transition-[max-width] duration-500 ${
+          isComplete ? "max-w-4xl" : "max-w-2xl"
+        }`}
+      >
         <header className="flex flex-col gap-4 text-center">
           <h1
             className="text-4xl sm:text-5xl md:text-6xl italic leading-tight"
@@ -60,7 +66,36 @@ export default function AnalysisPage() {
         )}
 
         {sessionId !== null && (
-          <AnalysisProgress analysisId={analysisId} sessionId={sessionId} />
+          <AnimatePresence mode="wait" initial={false}>
+            {!isComplete ? (
+              <motion.div
+                key="progress"
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.3, ease: "easeOut" }}
+              >
+                <AnalysisProgress
+                  analysisId={analysisId}
+                  sessionId={sessionId}
+                  onComplete={() => setIsComplete(true)}
+                />
+              </motion.div>
+            ) : (
+              <motion.div
+                key="results"
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.3, ease: "easeOut" }}
+              >
+                <AnalysisResults
+                  analysisId={analysisId}
+                  sessionId={sessionId}
+                />
+              </motion.div>
+            )}
+          </AnimatePresence>
         )}
       </div>
     </main>

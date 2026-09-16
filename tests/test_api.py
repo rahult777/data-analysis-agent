@@ -232,7 +232,69 @@ def test_resume_valid_domain_pause() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Group 5 — Integration tests (skipped — require live services)
+# Group 5 — Get question endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_get_question_success() -> None:
+    """GET question returns 200 with fields correctly mapped (id -> question_id).
+
+    Uses a two-level chainable mock because get_question chains two .eq() calls
+    (.eq('id', ...).eq('analysis_id', ...)), unlike the single-.eq() endpoints
+    that make_supabase_mock supports. The same mock also serves the get_session
+    dependency's analyses lookup, so mock_record must carry session_id.
+    """
+    mock_record = {
+        "id": "q-123",
+        "analysis_id": "a-456",
+        "session_id": "test-session",  # get_session validates this against the header
+        "question": "test?",
+        "status": "complete",
+        "answer": "42",
+        "pandas_code": "df.shape",
+    }
+    mock_response = MagicMock()
+    mock_response.data = [mock_record]
+    mock_table = MagicMock()
+    mock_table.select.return_value = mock_table
+    mock_table.eq.return_value = mock_table  # chainable across BOTH .eq() calls
+    mock_table.execute.return_value = mock_response
+    mock_client = MagicMock()
+    mock_client.table.return_value = mock_table
+
+    with patch("backend.main.get_supabase_client", return_value=mock_client):
+        response = client.get(
+            "/api/analysis/a-456/question/q-123",
+            headers={"session-id": "test-session"},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["question_id"] == "q-123"
+    assert body["answer"] == "42"
+
+
+def test_get_question_not_found() -> None:
+    """Empty Supabase data triggers 404 in get_session before the question lookup
+    runs — same precedent as test_status_not_found."""
+    mock_response = MagicMock()
+    mock_response.data = []
+    mock_table = MagicMock()
+    mock_table.select.return_value = mock_table
+    mock_table.eq.return_value = mock_table
+    mock_table.execute.return_value = mock_response
+    mock_client = MagicMock()
+    mock_client.table.return_value = mock_table
+
+    with patch("backend.main.get_supabase_client", return_value=mock_client):
+        response = client.get(
+            "/api/analysis/nonexistent/question/nonexistent",
+            headers={"session-id": "test-session"},
+        )
+    assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Group 6 — Integration tests (skipped — require live services)
 # ---------------------------------------------------------------------------
 
 

@@ -7,7 +7,7 @@ import type {
   UploadResponse,
 } from "./types";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 const client = axios.create({ baseURL: API_URL });
 
@@ -103,6 +103,22 @@ export async function postQuestion(
     return data;
   } catch (error) {
     throw toError(error, "Failed to post question.");
+  }
+}
+
+export async function getQuestion(
+  analysisId: string,
+  sessionId: string,
+  questionId: string,
+): Promise<QuestionResponse> {
+  try {
+    const { data } = await client.get<QuestionResponse>(
+      `/api/analysis/${analysisId}/question/${questionId}`,
+      { headers: authHeaders(sessionId) },
+    );
+    return data;
+  } catch (error) {
+    throw toError(error, "Failed to fetch question.");
   }
 }
 

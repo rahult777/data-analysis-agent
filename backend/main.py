@@ -270,6 +270,36 @@ async def post_question(
     )
 
 
+@app.get(
+    "/api/analysis/{analysis_id}/question/{question_id}",
+    response_model=QuestionResponse,
+)
+async def get_question(
+    analysis_id: str,
+    question_id: str,
+    _session: str = Depends(get_session),
+) -> QuestionResponse:
+    client = get_supabase_client()
+    response = await asyncio.to_thread(
+        lambda: client.table("questions")
+        .select("*")
+        .eq("id", question_id)
+        .eq("analysis_id", analysis_id)
+        .execute()
+    )
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Question not found")
+    record = response.data[0]
+    return QuestionResponse(
+        question_id=record["id"],
+        analysis_id=record["analysis_id"],
+        question=record["question"],
+        status=QuestionStatus(record["status"]),
+        answer=record.get("answer"),
+        pandas_code=record.get("pandas_code"),
+    )
+
+
 @app.post("/api/analysis/{analysis_id}/resume", response_model=StatusResponse)
 async def resume_analysis(
     analysis_id: str,

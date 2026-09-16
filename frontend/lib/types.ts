@@ -45,6 +45,13 @@ export interface PauseResumeRequest {
   response: Record<string, unknown>;
 }
 
+export interface CleaningDecision {
+  column_name: string | null;
+  issue: string;
+  action: string;
+  reason: string;
+}
+
 export interface AnalysisResponse {
   id: string;
   filename: string;
@@ -55,7 +62,7 @@ export interface AnalysisResponse {
   data_quality_score: number | null;
   profile_report: Record<string, unknown> | null;
   cleaning_report: Record<string, unknown> | null;
-  cleaning_decisions: unknown[] | null;
+  cleaning_decisions: CleaningDecision[] | null;
   analysis_report: Record<string, unknown> | null;
   insight_report: Record<string, unknown> | null;
   executive_summary: Record<string, unknown> | null;

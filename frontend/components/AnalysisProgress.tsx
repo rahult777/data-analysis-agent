@@ -53,6 +53,7 @@ type StageState = "waiting" | "active-running" | "active-paused" | "complete";
 interface AnalysisProgressProps {
   analysisId: string;
   sessionId: string;
+  onComplete?: () => void;
 }
 
 function isPauseStatus(status: AnalysisStatus): boolean {
@@ -64,6 +65,7 @@ function getStageState(
   status: AnalysisStatus,
   currentAgent: string | null,
 ): StageState {
+  if (status === "complete") return "complete";
   if (currentAgent === stage) {
     return isPauseStatus(status) ? "active-paused" : "active-running";
   }
@@ -78,8 +80,16 @@ function getStageState(
 export function AnalysisProgress({
   analysisId,
   sessionId,
+  onComplete,
 }: AnalysisProgressProps) {
   const router = useRouter();
+
+  // Hold the latest onComplete in a ref so the polling effect never
+  // re-subscribes when the parent passes a new callback identity.
+  const onCompleteRef = useRef(onComplete);
+  useEffect(() => {
+    onCompleteRef.current = onComplete;
+  }, [onComplete]);
 
   const [status, setStatus] = useState<AnalysisStatus | null>(null);
   const [currentAgent, setCurrentAgent] = useState<string | null>(null);
@@ -112,10 +122,20 @@ export function AnalysisProgress({
     async function init() {
       const initialStatus = await fetchStatus();
       if (cancelled) return;
-      if (initialStatus === "complete" || initialStatus === "error") return;
+      if (initialStatus === "error") return;
+      if (initialStatus === "complete") {
+        onCompleteRef.current?.();
+        return;
+      }
       intervalRef.current = setInterval(async () => {
         const next = await fetchStatus();
-        if (next === "complete" || next === "error") {
+        if (next === "complete") {
+          if (intervalRef.current) {
+            clearInterval(intervalRef.current);
+            intervalRef.current = null;
+          }
+          onCompleteRef.current?.();
+        } else if (next === "error") {
           if (intervalRef.current) {
             clearInterval(intervalRef.current);
             intervalRef.current = null;
@@ -135,10 +155,14 @@ export function AnalysisProgress({
     };
   }, [analysisId, sessionId]);
 
-  let view: "loading" | "pipeline" | "error-card" | "complete-card";
+  // At "complete" the pipeline is shown fully finished (all stages green)
+  // during the brief exit transition while the parent swaps in the results
+  // view — the parent is notified via onComplete the moment status hits it.
+  let view: "loading" | "pipeline" | "error-card";
   if (status === "error") view = "error-card";
-  else if (status === "complete") view = "complete-card";
-  else if (status === null || currentAgent === null) view = "loading";
+  else if (status === null) view = "loading";
+  else if (status === "complete") view = "pipeline";
+  else if (currentAgent === null) view = "loading";
   else view = "pipeline";
 
   return (
@@ -166,7 +190,7 @@ export function AnalysisProgress({
         </motion.div>
       )}
 
-      {view === "pipeline" && status !== null && currentAgent !== null && (
+      {view === "pipeline" && status !== null && (
         <motion.div
           key="pipeline"
           initial={{ opacity: 0, y: 8 }}
@@ -217,15 +241,13 @@ export function AnalysisProgress({
           onTryAgain={() => router.push("/")}
         />
       )}
-
-      {view === "complete-card" && <CompleteCard key="complete-card" />}
     </AnimatePresence>
   );
 }
 
 interface PipelineViewProps {
   status: AnalysisStatus;
-  currentAgent: string;
+  currentAgent: string | null;
   progressPct: number | null;
   pollingError: boolean;
 }
@@ -450,29 +472,3 @@ function ErrorCard({ errorMessage, onTryAgain }: ErrorCardProps) {
   );
 }
 
-function CompleteCard() {
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -8 }}
-      transition={{ duration: 0.25, ease: "easeOut" }}
-      className="flex flex-col items-center justify-center gap-4 rounded-md border border-border/60 bg-card/40 px-6 py-12 text-center"
-    >
-      <Check
-        className="size-10 text-green-500"
-        strokeWidth={2.5}
-        aria-hidden
-      />
-      <h2
-        className="italic text-3xl leading-tight"
-        style={{ fontFamily: "var(--font-display)" }}
-      >
-        Analysis complete
-      </h2>
-      <p className="text-sm text-muted-foreground">
-        Results display coming in next build.
-      </p>
-    </motion.div>
-  );
-}
