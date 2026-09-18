@@ -34,19 +34,19 @@ Every plugin has a specific trigger condition. When that condition is met, the p
 
 ## Superpowers Plugin
 
-**What it does:** Enables parallel hypothesis investigation by spawning sub-agents. Each sub-agent investigates one hypothesis independently. The main agent synthesizes findings. This produces better analysis than investigating one hypothesis at a time.
+**What it does:** Installs 14 skills (`brainstorming`, `writing-plans`, `executing-plans`, `subagent-driven-development`, `dispatching-parallel-agents`, `test-driven-development`, `systematic-debugging`, `verification-before-completion`, `requesting-code-review`, `receiving-code-review`, `using-git-worktrees`, `finishing-a-development-branch`, `writing-skills`, `using-superpowers`) covering the full development lifecycle — not just parallel hypothesis investigation. `dispatching-parallel-agents` is the one that spawns sub-agents to investigate competing hypotheses independently and synthesize findings; the others cover planning, TDD, debugging, verification, and code review workflows.
 
-**When to invoke:**
+**How it's triggered:** A `SessionStart` hook injects the `using-superpowers` skill's instructions at the start of every session. That skill tells the model to check, before any response or action, whether one of the 14 skills applies to the current task, and to invoke it if so. There is no explicit command — the model decides which skill applies based on the task at hand (e.g. "fix this bug" → `systematic-debugging`; "let's build X" → `brainstorming`).
+
+**When the parallel-investigation skill specifically applies:**
 - When the Analyzer identifies two or more competing explanations for a significant finding
 - When a dataset has distinct subsets (by region, product, time period) that appear to behave differently and parallel analysis would reveal interactions
 - When debugging a complex error where multiple causes are plausible and investigating them sequentially would take too long
 - When designing the system prompt for an agent and multiple philosophical approaches are viable — spawn sub-agents to evaluate each approach before committing
 
-**How to invoke:** Define each hypothesis or sub-task clearly. Spawn one sub-agent per hypothesis. Each sub-agent investigates independently. Synthesize all findings in the main response.
-
 **What it produces:** Parallel investigation results that are synthesized into a single conclusion with explicit reasoning about which hypothesis the evidence supports.
 
-**Example trigger:** "The Analyzer found that revenue dropped in Q3 AND that a new product was launched in Q3 AND that a key account was lost in Q3. Use Superpowers to investigate all three as potential causes simultaneously."
+**Example trigger:** "The Analyzer found that revenue dropped in Q3 AND that a new product was launched in Q3 AND that a key account was lost in Q3. Use the dispatching-parallel-agents skill to investigate all three as potential causes simultaneously."
 
 ---
 
@@ -69,11 +69,15 @@ Every plugin has a specific trigger condition. When that condition is met, the p
 
 ---
 
-## Code Review Plugin
+## Code Review — Built-in Skill (not the installed "code-review" plugin)
 
-**What it does:** Reviews code for correctness, completeness, bugs, and CLAUDE.md compliance. Eliminates silent computational errors before they corrupt analysis results. An analysis system that produces wrong numbers with confidence is worse than no analysis at all.
+**What this project actually uses:** Claude Code's built-in, non-namespaced `code-review` skill ("Review the current diff, or a PR number/branch/path target, for correctness bugs..."). It reviews the local git diff directly — no GitHub PR required — which matches this project's commit-straight-to-main workflow.
 
-**When to invoke:**
+**The installed `code-review` plugin is NOT applicable here.** Its manifest describes it as "Automated code review for pull requests using multiple specialized agents," and its command's `allowed-tools` are exclusively `gh pr *` / `gh issue *` — it fetches a pull request via `gh pr view` and comments back via `gh pr comment`. It has no local-diff mode. This project has no PR workflow, so this plugin is installed but structurally cannot be used for CLAUDE.md Rule 13 compliance here; the built-in skill above is what fulfills that rule.
+
+**What it eliminates:** Silent computational errors before they corrupt analysis results. An analysis system that produces wrong numbers with confidence is worse than no analysis at all.
+
+**When to invoke the built-in skill:**
 - After completing any agent file (profiler.py, cleaner.py, analyzer.py, explainer.py)
 - After completing any tool file (data_tools.py, viz_tools.py, code_executor.py)
 - After completing the orchestrator (orchestrator.py)
@@ -91,7 +95,7 @@ Every plugin has a specific trigger condition. When that condition is met, the p
 - Hardcoded values
 - Missing edge case handling
 
-**How to invoke:** After completing a major feature, type: "Use the code-review plugin to review [filename] for correctness, completeness, CLAUDE.md compliance, and any issues before we commit."
+**How to invoke:** Type `/code-review` (or ask to review the current diff) after completing a major feature, before committing.
 
 ---
 
@@ -163,7 +167,9 @@ Every plugin has a specific trigger condition. When that condition is met, the p
 
 ---
 
-## Security Review Plugin
+## Security Review — Built-in `/security-review` Command
+
+**What it is:** No plugin named "Security Review" is installed. This is Claude Code's built-in `/security-review` command ("Complete a security review of the pending changes on the current branch") — explicit-invoke, pre-deployment.
 
 **What it does:** Scans for security vulnerabilities before deployment. Catches issues that are easy to miss during development — exposed secrets, injection vulnerabilities, improper authentication, insecure defaults.
 
@@ -177,7 +183,17 @@ Every plugin has a specific trigger condition. When that condition is met, the p
 - Exposed internal error details in API responses
 - Missing input validation
 
-**How to invoke:** "Use the Security Review plugin to scan the entire backend for vulnerabilities before deployment."
+**How to invoke:** `/security-review` before deployment.
+
+---
+
+## Security Guidance (background hooks — not explicit-invoke)
+
+**What it does:** Runs automatically, not on request — pattern-based regex warnings on every `Edit`/`Write`/`MultiEdit`/`NotebookEdit`, plus an LLM-powered diff review firing on `Stop`, `SubagentStop`, and `git commit`/`git push`. Installed and enabled (`security-guidance@claude-plugins-official`) since project inception; distinct from the built-in `/security-review` command above, which is explicit-invoke and pre-deployment only.
+
+**Billing:** Uses `ANTHROPIC_AUTH_TOKEN` (the Claude Code account's own OAuth credentials), not this project's `ANTHROPIC_API_KEY` — because the project's key is loaded via `python-dotenv` inside the backend Python process only and is never exported into the shell/OS environment the hook subprocess reads from. If that key were ever exported at the shell level, the hook would silently switch to billing it instead.
+
+**Known gap:** on any LLM-call failure (including an HTTP 429 rate-limit), the reviewer's exception handler returns an empty findings list — the same shape as a genuine clean pass. A rate-limited review is therefore indistinguishable from "no vulnerabilities found" downstream.
 
 ---
 

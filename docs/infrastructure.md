@@ -73,7 +73,9 @@ The pipeline has two pause states — domain confirmation (Step 9) and missing v
 5. Frontend POSTs the response to the backend
 6. Backend resumes the pipeline with the user's input incorporated
 
-The pause states are LangGraph interrupt nodes. They are not timeouts — the pipeline waits indefinitely for user input.
+The pause states are **DB-polling nodes**, not LangGraph `interrupt()` — the installed LangGraph 0.2.0 does not support `interrupt()` (decisions.md, 2026-05-08). Each pause-wait node clears `user_pause_response` in Supabase, sets `status` to the specific pause value, then polls every 3 seconds until a response appears. They are not timeouts — the pipeline waits indefinitely for user input.
+
+**Known gap:** `domain_pause_data` / `missing_value_pause_data` / `outlier_pause_data` exist only in LangGraph's in-memory state and are never persisted to Supabase (decisions.md, 2026-05-18). The status endpoint therefore cannot return the actual pause question/options, which is why the current frontend shows a generic placeholder naming the pause type instead of the real question. Tracked as deferred follow-up work, not a bug.
 
 ---
 
@@ -84,9 +86,11 @@ All endpoints except POST /api/upload require a `session-id` header. The backend
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | POST | `/api/upload` | Upload CSV or Excel. Returns analysis_id and session_id. | No |
-| GET | `/api/analysis/{id}` | Get full analysis result including all agent outputs. | Yes |
 | GET | `/api/analysis/{id}/status` | Get current pipeline status and current_agent name. | Yes |
-| POST | `/api/analysis/{id}/question` | Submit a custom question. Returns computed answer with pandas code. | Yes |
+| GET | `/api/analysis/{id}` | Get full analysis result including all agent outputs. | Yes |
+| POST | `/api/analysis/{id}/question` | Submit a custom question. Returns question_id with status pending. | Yes |
+| GET | `/api/analysis/{id}/question/{question_id}` | Poll a submitted question for its computed answer and pandas code. | Yes |
+| POST | `/api/analysis/{id}/resume` | Submit the user's response to an active pause state (`{"response": {...}}`). Only valid when status is `domain_pause`, `missing_value_pause`, or `outlier_pause`; restores status to `profiling` or `cleaning` and lets the polling pause-wait node pick it up. | Yes |
 | GET | `/api/analysis/{id}/charts` | Get list of chart file paths for this analysis. | Yes |
 | GET | `/charts/{filename}` | Serve chart image file. Handled by FastAPI StaticFiles mount. | No |
 
@@ -177,6 +181,8 @@ All endpoints except POST /api/upload require a `session-id` header. The backend
 | row_count | integer | — | Populated after profiling |
 | column_count | integer | — | Populated after profiling |
 | data_quality_score | numeric | — | 0.0 to 1.0, populated after analyzing |
+
+**Correction note:** `profile_report`, `analysis_report`, `insight_report`, and `executive_summary` are stored as raw LLM-contract dicts, not validated instances of the pydantic models named above — the model field names above do not match the actual stored keys. See decisions.md `2026-05-07 | Raw dict save to Supabase JSONB...` and `2026-06-04 | AnalysisResponse relaxes profile_report, analysis_report, insight_report, executive_summary to dict...` for the authoritative stored shapes and rationale. `cleaning_report` and `cleaning_decisions` are unaffected — they validate cleanly against their pydantic models.
 
 ### Table: questions
 

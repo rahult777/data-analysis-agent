@@ -147,11 +147,10 @@ When status is `complete`, the full results are displayed.
 
 ### InsightReport.tsx
 
-**Behavior:**
-- Displays all three output layers
-- Executive Summary always expanded on load
-- Analyst Report and Technical Detail in collapsible AccordionItems (shadcn/ui Accordion)
-- Expand/collapse transitions via Framer Motion
+**Behavior:** Two named exports, no default export — split so `ChartGrid` can sit physically between them in the results layout (header → Executive → Charts → Analyst/Open Questions/Technical). See decisions.md, 2026-09-16.
+
+- `InsightReportExecutive` — Executive Summary cards, always expanded on load.
+- `InsightReportDetail` — Analyst Report, Open Questions, and Technical Detail as three collapsible AccordionItems (shadcn/ui Accordion), all collapsed by default. Expand/collapse height animation is driven natively by Base UI, not Framer Motion.
 - Each section has a header with the layer name and a brief description of who it is for
 
 **Executive Summary display:**
@@ -166,12 +165,13 @@ When status is `complete`, the full results are displayed.
 - Chart references linked to the ChartGrid below
 
 **Technical Layer display:**
-- Monospace font for all code blocks
-- Syntax highlighting for pandas code
+- Plain monospace display via the shared `CodeBlock` component for all code blocks (no syntax-highlighting library — CLAUDE.md Rule 3 forbids adding a dependency without a stated necessary reason; see decisions.md 2026-09-16)
 - Cleaning decisions shown as a structured list, not prose
 - Methodological limitations highlighted in a distinct callout style
 
-**Props:** executiveSummary, insightReport, chartPaths, analysisId, sessionId
+**Props — InsightReportExecutive:** `executiveSummary: Record<string, unknown> | null`
+
+**Props — InsightReportDetail:** `insightReport: Record<string, unknown> | null`, `cleaningDecisions: CleaningDecision[] | null`, `chartPaths: string[] | null` (used to cross-reference chart mentions in the Analyst narrative)
 
 ---
 
