@@ -178,6 +178,23 @@ def test_build_cleaner_message_with_user_pause_response(
     assert parsed["user_pause_response"] == pause_response
 
 
+def test_build_cleaner_message_categorical_sample_shows_every_category() -> None:
+    """iris.csv is grouped by species — sample_values must show all 3, not the first block."""
+    df = pd.read_csv(FIXTURES_DIR / "iris.csv")
+    missingness_patterns = analyze_missingness_patterns(df)
+    result = build_cleaner_message(
+        df=df,
+        profile_report={},
+        domain_hypothesis=None,
+        provenance_hypothesis=None,
+        top_3_concerns=None,
+        user_pause_response=None,
+        missingness_patterns=missingness_patterns,
+    )
+    parsed = json.loads(result)
+    assert len(set(parsed["column_info"]["species"]["sample_values"])) == 3
+
+
 # ---------------------------------------------------------------------------
 # Group 4 — execute_cleaning_operations
 # ---------------------------------------------------------------------------

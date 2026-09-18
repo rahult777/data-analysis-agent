@@ -60,7 +60,9 @@
 
 - [x] backend/agents/explainer.py
 - [x] backend/agents/orchestrator.py
-- [ ] Fix Profiler/Cleaner row-sampling bug — build_profiler_message (and build_cleaner_message's sample_values) under-sample via head(5)/head(3), causing wrong full-dataset statistics when the uploaded file is sorted/grouped by a categorical column. Fully diagnosed and planned (see errors.md 2026-09-17, decisions.md 2026-09-17 entries) — ready for implementation, no remaining blockers.
+- [~] Fix Profiler/Cleaner row-sampling bug — build_profiler_message (and build_cleaner_message's sample_values) under-sample via head(5)/head(3), causing wrong full-dataset statistics when the uploaded file is sorted/grouped by a categorical column. Implemented and unit-tested 2026-09-17 (compute_column_stats + `computed_column_stats` message key, sample_values fix in both agents, profiler_system.md Step 3, plus the overwrite guarantee — apply_computed_column_stats replaces the LLM's copied column stats with Python's values before the profile_report save, closing Code Review follow-up (1); full suite 111 passed / 16 skipped). Remaining: live end-to-end validation (needs explicit approval — costs API money), commit.
+- [ ] Fix Cleaner TypeError on bool-dtype (True/False) columns — pre-existing; see errors.md 2026-09-17
+- [ ] Fix bool columns taking the random-sample branch of sample_values in build_profiler_message and build_cleaner_message — Code Review follow-up (2) on the row-sampling fix (errors.md 2026-09-17 row-sampling entry); a heavily imbalanced True/False column can still show a homogeneous sample. Separate bug from the Cleaner TypeError line above.
 
 ### Frontend
 

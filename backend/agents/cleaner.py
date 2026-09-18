@@ -180,7 +180,11 @@ def build_cleaner_message(
     for col in columns:
         series = df_subset[col]
         non_null_vals = series.dropna()
-        sample = [str(v) for v in non_null_vals.head(3).tolist()]
+        if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_datetime64_any_dtype(series):
+            sampled = non_null_vals.sample(min(5, len(non_null_vals)), random_state=42)
+        else:
+            sampled = non_null_vals.drop_duplicates().head(5)
+        sample = [str(v) for v in sampled.tolist()]
         col_info[col] = {
             "dtype": str(series.dtype),
             "missing_pct": round(float(series.isna().mean() * 100), 2),
