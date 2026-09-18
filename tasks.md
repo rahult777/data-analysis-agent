@@ -46,6 +46,9 @@
 - [x] Update main.py — wire question endpoint to explainer.py + add POST /api/analysis/{id}/resume endpoint for pause state responses
 - [x] GET /api/analysis/{id}/question/{question_id} — question polling endpoint (main.py) + 2 unit tests (test_api.py, Group 5)
 - [x] Fix empty-file upload handling (Build D, Phase 1) — validate_file (backend/utils/file_handler.py) now rejects 0-byte and zero-data-row CSV/XLSX uploads with a USER_ERROR 400 before any DB record, temp file, or LLM call. Fail-open for files pandas cannot read; an empty Excel peek is confirmed with a full read (blank-second-row layouts); main.py runs validation via asyncio.to_thread. 17 new tests (14 in test_file_handler.py, 3 in test_api.py); full suite 128 passed / 16 skipped. Completed 2026-09-18. Deferred issues found along the way are logged in errors.md 2026-09-18.
+- [ ] Fix .xls uploads — xlrd is not installed or in requirements.txt, so every .xls upload fails in the Profiler as SYSTEM_ERROR although the UI and validate_file accept .xls (add xlrd with a stated reason, or stop advertising .xls); pre-existing, found during Build D; see errors.md 2026-09-18
+- [ ] Handle corrupted and non-UTF-8 files at upload (Definition of Done item 4) — Build D's fail-open check passes them through and the Profiler fails them as SYSTEM_ERROR; see errors.md 2026-09-18
+- [ ] Handle files whose only data row is entirely empty (e.g. `a,b\n,\n`) — passes Build D's check as 1 all-missing row; narrow edge case; see errors.md 2026-09-18
 
 ### Backend — Prompts
 
@@ -61,9 +64,12 @@
 
 - [x] backend/agents/explainer.py
 - [x] backend/agents/orchestrator.py
-- [~] Fix Profiler/Cleaner row-sampling bug — build_profiler_message (and build_cleaner_message's sample_values) under-sample via head(5)/head(3), causing wrong full-dataset statistics when the uploaded file is sorted/grouped by a categorical column. Implemented and unit-tested 2026-09-17 (compute_column_stats + `computed_column_stats` message key, sample_values fix in both agents, profiler_system.md Step 3, plus the overwrite guarantee — apply_computed_column_stats replaces the LLM's copied column stats with Python's values before the profile_report save, closing Code Review follow-up (1); full suite 111 passed / 16 skipped). Remaining: live end-to-end validation (needs explicit approval — costs API money), commit.
+- [~] Fix Profiler/Cleaner row-sampling bug — build_profiler_message (and build_cleaner_message's sample_values) under-sample via head(5)/head(3), causing wrong full-dataset statistics when the uploaded file is sorted/grouped by a categorical column. Implemented and unit-tested 2026-09-17 (compute_column_stats + `computed_column_stats` message key, sample_values fix in both agents, profiler_system.md Step 3, plus the overwrite guarantee — apply_computed_column_stats replaces the LLM's copied column stats with Python's values before the profile_report save, closing Code Review follow-up (1); full suite 111 passed / 16 skipped). Committed in 976200b. Remaining: live end-to-end validation (needs explicit approval — costs API money).
 - [ ] Fix Cleaner TypeError on bool-dtype (True/False) columns — pre-existing; see errors.md 2026-09-17
 - [ ] Fix bool columns taking the random-sample branch of sample_values in build_profiler_message and build_cleaner_message — Code Review follow-up (2) on the row-sampling fix (errors.md 2026-09-17 row-sampling entry); a heavily imbalanced True/False column can still show a homogeneous sample. Separate bug from the Cleaner TypeError line above.
+- [ ] Classify user-fixable errors in agent nodes instead of prefixing every exception SYSTEM_ERROR (profiler.py:313, cleaner.py:621, analyzer.py:818, explainer.py:209, orchestrator.py:255) — pre-existing; needs a per-node audit of exception types; see errors.md 2026-09-18. docs/infrastructure.md:61 describes the intended behavior, not the current one.
+- [ ] Handle the Cleaner reducing a valid file to 0 rows — the Analyzer runs on the empty frame and compute_data_quality_score (analyzer.py:396) reports 1.0; pre-existing; see errors.md 2026-09-18
+- [ ] Fix cleaner.py:61 missingness guard — `missing_pct == 0` is False for the NaN a 0-row frame produces, so every column gets a fabricated "random" label; pre-existing, unreachable from uploads since Build D; see errors.md 2026-09-18
 
 ### Frontend
 
@@ -74,6 +80,7 @@
 - [ ] Charts — Recharts integration for React-native visualizations (separate from the agent-generated ChartGrid shipped above)
 - [ ] Mobile viewport testing (320px minimum) — components built mobile-first (44px tap targets, single-column stacking, 14px min text) but not yet verified in a 320px browser viewport
 - [ ] Pause-state UI follow-up (backend pause_data persistence + pause question components) — still deferred per 2026-05-18
+- [ ] Show upload USER_ERROR rejections as user errors in FileUpload — the backend detail currently appears, `USER_ERROR:` prefix included, in the red "api" error box; header-only files are the first backend 400 a UI user can hit (since Build D); see errors.md 2026-09-18
 
 ### Tests
 
