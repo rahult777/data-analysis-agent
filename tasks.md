@@ -45,6 +45,7 @@
 
 - [x] Update main.py — wire question endpoint to explainer.py + add POST /api/analysis/{id}/resume endpoint for pause state responses
 - [x] GET /api/analysis/{id}/question/{question_id} — question polling endpoint (main.py) + 2 unit tests (test_api.py, Group 5)
+- [x] Fix empty-file upload handling (Build D, Phase 1) — validate_file (backend/utils/file_handler.py) now rejects 0-byte and zero-data-row CSV/XLSX uploads with a USER_ERROR 400 before any DB record, temp file, or LLM call. Fail-open for files pandas cannot read; an empty Excel peek is confirmed with a full read (blank-second-row layouts); main.py runs validation via asyncio.to_thread. 17 new tests (14 in test_file_handler.py, 3 in test_api.py); full suite 128 passed / 16 skipped. Completed 2026-09-18. Deferred issues found along the way are logged in errors.md 2026-09-18.
 
 ### Backend — Prompts
 

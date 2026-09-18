@@ -12,6 +12,7 @@ import io
 
 import pytest
 from fastapi.testclient import TestClient
+from openpyxl import Workbook
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from backend.main import app
@@ -39,6 +40,33 @@ def make_supabase_mock(record: dict) -> MagicMock:
     mock_client.table.return_value.update.return_value.eq.return_value.execute.return_value = execute_result
     mock_client.table.return_value.insert.return_value.execute.return_value = execute_result
     return mock_client
+
+
+def post_rejected_upload(filename: str, content: bytes, content_type: str) -> str:
+    """POST a file that validation must reject and return the 400 detail.
+
+    Also asserts the rejection happened before any side effect: no analyses insert,
+    no temp file, no pipeline task.
+    """
+    mock_client = make_supabase_mock({"id": "test-id", "session_id": "test-session"})
+    save_mock = AsyncMock(return_value="stored.csv")
+    pipeline_mock = AsyncMock()
+    with (
+        patch("backend.main.get_supabase_client", return_value=mock_client),
+        patch("backend.main.save_temp_file", new=save_mock),
+        patch("backend.main.run_pipeline_task", new=pipeline_mock),
+    ):
+        response = client.post(
+            "/api/upload",
+            files={"file": (filename, io.BytesIO(content), content_type)},
+        )
+    assert response.status_code == 400
+    mock_client.table.return_value.insert.assert_not_called()
+    save_mock.assert_not_called()
+    pipeline_mock.assert_not_called()
+    detail = response.json()["detail"]
+    assert detail.startswith("USER_ERROR:")
+    return detail
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +116,32 @@ def test_upload_valid_csv() -> None:
     body = response.json()
     assert "analysis_id" in body
     assert "session_id" in body
+
+
+def test_upload_empty_csv_rejected() -> None:
+    """0-byte CSV sent straight to the API returns 400 USER_ERROR and creates nothing."""
+    detail = post_rejected_upload("data.csv", b"", "text/csv")
+    assert "empty" in detail.lower()
+
+
+def test_upload_header_only_csv_rejected() -> None:
+    """Header-only CSV returns 400 USER_ERROR before any record, file, or pipeline run."""
+    detail = post_rejected_upload("data.csv", b"a,b\n", "text/csv")
+    assert "no data rows" in detail
+
+
+def test_upload_header_only_xlsx_rejected() -> None:
+    """Header-only XLSX returns 400 USER_ERROR before any record, file, or pipeline run."""
+    workbook = Workbook()
+    workbook.active.append(["a", "b"])
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    detail = post_rejected_upload(
+        "data.xlsx",
+        buffer.getvalue(),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    assert "no data rows" in detail
 
 
 # ---------------------------------------------------------------------------

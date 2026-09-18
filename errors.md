@@ -74,3 +74,36 @@ Solution: none applied — observation only. If tests ever need to run offline, 
 Observed while inspecting the security-guidance Claude Code plugin. Its end-of-turn LLM code review runs on Claude Code's own login, not the project's API key. During the 2026-09-16 push review it hit HTTP 429 three times, and the log entries right after those errors read "LLM code review: no vulnerabilities found".
 Root cause: the plugin's hooks/llm.py (marketplace copy, around line 1046) logs "LLM code review: no vulnerabilities found" whenever the analysis result is empty — `if not analysis or not analysis.get("hasVulnerabilities") ...` — and a failed or rate-limited call also produces an empty result. In the log, a review that never ran looks the same as a real clean pass.
 Solution: none — this is plugin behaviour outside the repo. Do not treat a "no vulnerabilities found" line as proof a review ran; check for 429 errors around it, and run the Security Review plugin explicitly before any deployment (CLAUDE.md rule 14).
+
+**2026-09-18 | Excel nrows=1 peek reports 0 data rows for workbooks whose second row is blank — found and fixed during the Build D build**
+Found while building the empty-upload check (Build D) and reproduced in tests/test_file_handler.py before the fix: `validate_file` rejected valid .xlsx files, including the common "title row, blank row, table" layout, with "USER_ERROR: This file has no data rows."
+Root cause: pandas 2.2.0's openpyxl reader reads only header + nrows physical rows and then trims trailing blank rows (`get_sheet_data`, pandas/io/excel/_openpyxl.py), while the full read keeps interior blank rows (`skip_blank_lines=False`, _base.py). With nrows=1 a blank second row is trimmed, so the peek comes back empty although the full read has data. `read_csv` is not affected, because it skips blank lines before counting nrows.
+Solution: in `_has_no_data_rows`, an empty Excel peek is confirmed with a full `pd.read_excel` (the Profiler's own read) before rejecting. Covered by `test_accepts_xlsx_with_blank_second_row` (2 layouts). See decisions.md 2026-09-18.
+
+**2026-09-18 | Every exception inside an agent node is reported as SYSTEM_ERROR, including user-fixable ones — pre-existing, NOT yet fixed (deferred)**
+profiler.py:313, cleaner.py:621, analyzer.py:818 and explainer.py:209 (and orchestrator.py:255) all build `error_message` as `f"SYSTEM_ERROR: {str(exc)}"` for any exception. A problem the user could fix therefore reaches the UI as a system failure; before Build D, a 0-byte CSV sent straight to the API failed in the Profiler with pandas' "No columns to parse from file" as SYSTEM_ERROR. Build D moves empty and header-only files out of the pipeline but does not change this.
+Solution: not applied (deferred). A proper fix means auditing the exception types each of the four nodes can raise and deciding which are user-fixable; that is separate scope.
+
+**2026-09-18 | Cleaner can reduce a valid file to 0 rows mid-pipeline; the Analyzer completes but reports a 1.0 data-quality score — pre-existing, NOT yet fixed (deferred)**
+From the Build D investigation pass: when the Cleaner's own operations leave 0 rows, the Analyzer does not crash but still reports data_quality_score 1.0. Traced 2026-09-18: `compute_data_quality_score` (analyzer.py:396) starts at 1.0 and deducts only for columns with missing values, duplicate rows, and outlier/flag cleaning decisions. A 0-row frame has no missing values or duplicates, so it scores 1.0 (0.9 if a cleaning decision mentions outliers or flagging). The function does not read the Cleaner's missingness patterns, so this is independent of the cleaner.py:61 NaN bug in the next entry. Build D only rejects files that arrive with zero data rows; it does not cover files the Cleaner empties.
+Solution: not applied (deferred). Likely fix: when the cleaned frame has 0 rows, return a low score or flag the result instead of scoring it as clean.
+
+**2026-09-18 | cleaner.py:61 missingness guard never fires on a 0-row frame (NaN == 0 is False) — pre-existing, NOT yet fixed**
+`analyze_missingness_patterns` computes `missing_pct = missing_mask.mean() * 100`. On a 0-row frame the mean is NaN and `NaN == 0` is False, so the "skip columns with no missing values" guard at line 61 never fires. Reproduced locally: a header-only frame returns every column as `classification: random` with `missing_pct: nan`, a fabricated finding. Its only caller (cleaner.py:481) runs on the raw uploaded file, and after Build D no CSV/XLSX upload reaches it with 0 rows; the comparison itself is unchanged.
+Solution: not applied. Likely fix: test `missing_mask.sum() == 0` (or return early when `len(df) == 0`) instead of comparing the mean.
+
+**2026-09-18 | .xls uploads always fail in the Profiler because xlrd is not installed and not in requirements.txt — pre-existing, NOT yet fixed**
+Found during Build D verification. FileUpload.tsx:27 lists ".xls" in VALID_EXTENSIONS and file_handler's `_ALLOWED_EXTENSIONS` accepts it, but `pd.read_excel` on an .xls raises "ImportError: Missing optional dependency 'xlrd'". profiler.load_dataframe therefore fails on every .xls upload and profiler_node reports it as a confusing SYSTEM_ERROR. Build D does not change this: its peek hits the same ImportError and passes the file through (fail-open).
+Solution: not applied (needs approval). Either add xlrd to requirements.txt, stating the reason (CLAUDE.md rule 3), or stop advertising .xls.
+
+**2026-09-18 | Corrupted files and non-UTF-8 CSVs still reach the pipeline and fail there as SYSTEM_ERROR — Definition of Done item 4 still open**
+Build D's data-row peek is deliberately fail-open. Anything pandas cannot read (UnicodeDecodeError on e.g. a Latin-1 CSV, ParserError, an .xlsx that is not a valid zip) is logged and passed through, and the Profiler's read then fails with SYSTEM_ERROR, as it did before Build D.
+Solution: not applied. Detecting these at upload needs its own design (user-facing message, whether to try other encodings); separate future item.
+
+**2026-09-18 | A header plus one entirely empty data row passes the empty-file check — known edge case, not addressed**
+`a,b\n,\n` parses as 1 row of NaN, so `_has_no_data_rows` returns False and the file enters the pipeline with a single all-missing row.
+Solution: not applied; narrow edge case, out of scope for Build D.
+
+**2026-09-18 | Upload rejections render as red "api" errors with the raw "USER_ERROR:" prefix — observation, not fixed**
+FileUpload.tsx:206-209 turns any failed upload into `{ type: "api", message: err.message }`, and `err.message` is the backend's `detail` verbatim (frontend/lib/api.ts `toError`). The error box uses amber styling only for `type === "user"`, so a backend USER_ERROR 400 shows in red, prefix included. The frontend pre-checks type, 0 bytes and size (FileUpload.tsx:113-133), so until Build D no backend 400 was reachable from the UI; header-only files are the first. AnalysisProgress.tsx:419 already classifies errors with `startsWith("USER_ERROR:")`.
+Solution: not applied (frontend is outside Build D). Likely fix: in FileUpload's catch, map a `USER_ERROR:` detail to `type: "user"` and strip the prefix.

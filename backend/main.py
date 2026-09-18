@@ -144,7 +144,7 @@ async def upload_file(
 ) -> dict:
     content = await file.read()
     try:
-        validate_file(filename=file.filename, file_size=len(content))
+        await asyncio.to_thread(validate_file, file.filename, content)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
