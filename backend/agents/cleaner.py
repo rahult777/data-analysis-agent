@@ -180,7 +180,7 @@ def build_cleaner_message(
     for col in columns:
         series = df_subset[col]
         non_null_vals = series.dropna()
-        if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_datetime64_any_dtype(series):
+        if (pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series)) or pd.api.types.is_datetime64_any_dtype(series):
             sampled = non_null_vals.sample(min(5, len(non_null_vals)), random_state=42)
         else:
             sampled = non_null_vals.drop_duplicates().head(5)
@@ -193,7 +193,8 @@ def build_cleaner_message(
         }
 
     for col in columns:
-        if pd.api.types.is_numeric_dtype(df_subset[col]):
+        # is_numeric_dtype is True for bool, but bool has no quantile (same exclusion as profiler.compute_column_stats).
+        if pd.api.types.is_numeric_dtype(df_subset[col]) and not pd.api.types.is_bool_dtype(df_subset[col]):
             series = df_subset[col].dropna()
             if len(series) > 4:
                 q1 = float(series.quantile(0.25))
@@ -262,7 +263,10 @@ def detect_interactions(df: pd.DataFrame, profile_report: dict) -> list:
                 })
 
     # Outlier + missing combination patterns
-    numeric_cols = [col for col in df.columns if pd.api.types.is_numeric_dtype(df[col])]
+    numeric_cols = [
+        col for col in df.columns
+        if pd.api.types.is_numeric_dtype(df[col]) and not pd.api.types.is_bool_dtype(df[col])
+    ]
     for col in numeric_cols:
         series = df[col].dropna()
         if len(series) < 4:
@@ -416,7 +420,7 @@ def execute_cleaning_operations(
         # 9. OUTLIER FLAG — annotate without removing
         if "outlier" in combined or "flag" in combined:
             if not any(kw in combined for kw in ("remove", "delete", "drop")):
-                if pd.api.types.is_numeric_dtype(df[col]):
+                if pd.api.types.is_numeric_dtype(df[col]) and not pd.api.types.is_bool_dtype(df[col]):
                     series = df[col].dropna()
                     if len(series) > 4:
                         q1 = series.quantile(0.25)

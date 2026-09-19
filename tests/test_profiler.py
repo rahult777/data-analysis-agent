@@ -13,6 +13,7 @@ tracer and the file loader mocked; it is a plain test driven by asyncio.run().
 
 import asyncio
 import copy
+import io
 import json
 import logging
 import pathlib
@@ -472,3 +473,41 @@ def test_profiler_node_saves_python_computed_column_stats(iris_df: pd.DataFrame)
     assert sepal["mean"] == pytest.approx(5.9067, abs=1e-4)
     assert species["unique_count"] == 3
     assert result["profile_report"] == saved[0]["profile_report"]
+
+
+# ---------------------------------------------------------------------------
+# Group 9 — bool-dtype (True/False) columns in build_profiler_message
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def imbalanced_bool_df() -> pd.DataFrame:
+    return pd.DataFrame({"flag": [False] * 990 + [True] * 10})
+
+
+def test_build_profiler_message_imbalanced_bool_sample_shows_both_values(
+    imbalanced_bool_df: pd.DataFrame,
+) -> None:
+    """990 False / 10 True — a random sample of 5 is almost always all False."""
+    parsed = json.loads(build_profiler_message(imbalanced_bool_df, None))
+    assert set(parsed["column_info"]["flag"]["sample_values"]) == {"True", "False"}
+
+
+def test_build_profiler_message_bool_unique_count_is_two(
+    imbalanced_bool_df: pd.DataFrame,
+) -> None:
+    """The full-column unique_count is unaffected by how sample_values is drawn."""
+    parsed = json.loads(build_profiler_message(imbalanced_bool_df, None))
+    assert parsed["computed_column_stats"]["flag"]["unique_count"] == 2
+
+
+def test_build_profiler_message_bool_with_missing_values_uses_distinct_sampling() -> None:
+    """True/False with blanks loads from CSV as object dtype and keeps distinct-value sampling."""
+    csv = "id,flag\n" + "\n".join(
+        f"{i},{'True' if i < 990 else 'False' if i < 1000 else ''}" for i in range(1005)
+    )
+    df = pd.read_csv(io.StringIO(csv))
+    assert df["flag"].dtype == object
+
+    parsed = json.loads(build_profiler_message(df, None))
+    assert set(parsed["column_info"]["flag"]["sample_values"]) == {"True", "False"}

@@ -146,7 +146,7 @@ def build_profiler_message(df: pd.DataFrame, context: Optional[str]) -> str:
     for col in columns:
         series = df_subset[col]
         non_null_vals = series.dropna()
-        if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_datetime64_any_dtype(series):
+        if (pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series)) or pd.api.types.is_datetime64_any_dtype(series):
             sampled = non_null_vals.sample(min(5, len(non_null_vals)), random_state=42)
         else:
             sampled = non_null_vals.drop_duplicates().head(5)

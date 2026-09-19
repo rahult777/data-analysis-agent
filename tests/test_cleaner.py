@@ -7,10 +7,17 @@ Note: load_system_prompt and parse_json_response are already tested in
 test_profiler.py — not duplicated here.
 
 Integration tests requiring a live ANTHROPIC_API_KEY and Supabase are skipped.
+Group 7 runs cleaner_node with the Anthropic client, Supabase, Storage, the
+LangSmith tracer, the file loader and the parquet write mocked; it is a plain
+test driven by asyncio.run().
 """
 
+import asyncio
+import copy
+import io
 import json
 import pathlib
+from unittest.mock import DEFAULT, MagicMock, patch
 
 import numpy as np
 import pandas as pd
@@ -19,6 +26,7 @@ import pytest
 from backend.agents.cleaner import (
     analyze_missingness_patterns,
     build_cleaner_message,
+    cleaner_node,
     detect_interactions,
     execute_cleaning_operations,
 )
@@ -262,3 +270,108 @@ def test_cleaner_node_outlier_pause() -> None:
 @pytest.mark.skip(reason="Requires live Supabase Storage")
 def test_cleaner_parquet_upload() -> None:
     pass
+
+
+# ---------------------------------------------------------------------------
+# Group 6 — bool-dtype (True/False) columns
+# ---------------------------------------------------------------------------
+
+
+def _bool_df(n: int) -> pd.DataFrame:
+    """A bool column with n non-null values, plus a numeric column with gaps."""
+    return pd.DataFrame({
+        "flag": [i % 2 == 0 for i in range(n)],
+        "amount": [float(i) if i % 3 else np.nan for i in range(n)],
+    })
+
+
+def _cleaner_message(df: pd.DataFrame) -> dict:
+    return json.loads(build_cleaner_message(
+        df=df,
+        profile_report={},
+        domain_hypothesis=None,
+        provenance_hypothesis=None,
+        top_3_concerns=None,
+        user_pause_response=None,
+        missingness_patterns={},
+    ))
+
+
+@pytest.mark.parametrize("n", [4, 5, 50])
+def test_detect_interactions_bool_column_does_not_raise(n: int) -> None:
+    """bool.quantile() raises TypeError; 4 values is the old crash threshold here."""
+    result = detect_interactions(_bool_df(n), {})
+    assert isinstance(result, list)
+
+
+def test_build_cleaner_message_bool_column_does_not_raise() -> None:
+    """A bool column gets no IQR stats; a real numeric column still does."""
+    df = _bool_df(20)
+    df["count"] = list(range(19)) + [500]
+    column_info = _cleaner_message(df)["column_info"]
+
+    assert "outlier_count" not in column_info["flag"]
+    assert "outlier_bounds" not in column_info["flag"]
+    assert column_info["count"]["outlier_count"] == 1
+    assert "outlier_bounds" in column_info["count"]
+
+
+def test_execute_cleaning_outlier_flag_on_bool_column_is_skipped() -> None:
+    """Flagging outliers on a bool column is a no-op, like any non-numeric column."""
+    df = _bool_df(20)
+    decisions = [{"column_name": "flag", "action": "flag outliers", "issue": "outliers"}]
+    df_cleaned, excluded_cols, outlier_flagged = execute_cleaning_operations(df, decisions)
+
+    assert "flag_outlier_flag" not in df_cleaned.columns
+    assert outlier_flagged == {}
+
+
+def test_build_cleaner_message_imbalanced_bool_sample_shows_both_values() -> None:
+    """990 False / 10 True — a random sample of 5 is almost always all False."""
+    df = pd.DataFrame({"flag": [False] * 990 + [True] * 10})
+    sample = _cleaner_message(df)["column_info"]["flag"]["sample_values"]
+    assert set(sample) == {"True", "False"}
+
+
+def test_build_cleaner_message_bool_with_missing_values_uses_distinct_sampling() -> None:
+    """True/False with blanks loads from CSV as object dtype and keeps distinct-value sampling."""
+    csv = "id,flag\n" + "\n".join(
+        f"{i},{'True' if i < 990 else 'False' if i < 1000 else ''}" for i in range(1005)
+    )
+    df = pd.read_csv(io.StringIO(csv))
+    assert df["flag"].dtype == object
+
+    sample = _cleaner_message(df)["column_info"]["flag"]["sample_values"]
+    assert set(sample) == {"True", "False"}
+
+
+# ---------------------------------------------------------------------------
+# Group 7 — cleaner_node with mocked services
+# ---------------------------------------------------------------------------
+
+
+def test_cleaner_node_completes_with_bool_column() -> None:
+    """cleaner_node gets past detect_interactions to its LLM call and saves status=cleaned."""
+    captured: list[dict] = []
+    response = MagicMock()
+    response.content = [MagicMock(text=json.dumps({"decisions": []}))]
+    state = {"analysis_id": "test-analysis-id", "stored_filename": "bool.csv"}
+
+    with (
+        patch("backend.agents.cleaner.client") as mock_client,
+        patch("backend.agents.cleaner.get_supabase_client") as mock_get_supabase_client,
+        patch("backend.agents.cleaner.create_tracer"),
+        patch("backend.agents.cleaner.load_dataframe_from_uploads", return_value=_bool_df(20)),
+        patch("backend.agents.cleaner.upload_to_storage"),
+        patch("backend.agents.cleaner.cleanup_temp_file"),
+        patch.object(pd.DataFrame, "to_parquet"),
+    ):
+        mock_client.messages.create.return_value = response
+        mock_update = mock_get_supabase_client.return_value.table.return_value.update
+        mock_update.side_effect = lambda payload: (captured.append(copy.deepcopy(payload)), DEFAULT)[1]
+        result = asyncio.run(cleaner_node(state))
+
+    mock_client.messages.create.assert_called_once()
+    assert [payload["status"] for payload in captured] == ["cleaning", "cleaned"]
+    assert not any("error_message" in payload for payload in captured)
+    assert result["cleaning_report"]["summary"]["rows_after"] == 20
