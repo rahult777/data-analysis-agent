@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -81,19 +82,37 @@ async def load_cleaned_dataframe(analysis_id: str) -> pd.DataFrame:
         ) from exc
 
 
+def _is_id_column(name: str) -> bool:
+    """True if `name` contains "id" as a standalone name component —
+    exact match, or separated by _/-/space, or a camelCase Id/ID
+    boundary. Does NOT match "id" as a mere substring (e.g. "width",
+    "valid", "paid_amount" are NOT id columns).
+
+    Known, accepted limitations (not matched): an ID acronym immediately
+    followed by another capitalized word, anywhere in the name
+    ("IDCustomer", "CustomerIDNumber"), "uuid"/"guid", a trailing digit
+    or plural ("id1", "related_ids"), and separator-less concatenations
+    ("userid", "customerid", "USERID") — see decisions.md 2026-09-19."""
+    # Insert a boundary before a capital letter that follows a
+    # lowercase letter or digit (camelCase word boundary).
+    boundary_inserted = re.sub(r'(?<=[a-z0-9])(?=[A-Z])', '_', name)
+    tokens = re.split(r'[^a-zA-Z0-9]+', boundary_inserted)
+    return any(token.lower() == "id" for token in tokens if token)
+
+
 def classify_columns(
     df: pd.DataFrame,
 ) -> Tuple[List[str], List[str], Optional[str]]:
     """Classify columns into (numeric, categorical, datetime).
 
-    Numeric: pandas number dtypes, excluding any column whose name contains
-    "id" (case-insensitive) — IDs are stored as integers but are not numeric
-    in the analytical sense.
+    Numeric: pandas number dtypes, excluding columns whose name has "id" as a
+    standalone name component (see _is_id_column) — IDs are stored as integers
+    but are not numeric in the analytical sense.
     Categorical: object dtypes plus boolean columns.
     Datetime: the first column whose dtype name contains "datetime", or None.
     """
     raw_numeric = df.select_dtypes(include="number").columns.tolist()
-    numeric_columns = [c for c in raw_numeric if "id" not in c.lower()]
+    numeric_columns = [c for c in raw_numeric if not _is_id_column(c)]
 
     object_columns = df.select_dtypes(include="object").columns.tolist()
     bool_columns = df.select_dtypes(include="bool").columns.tolist()

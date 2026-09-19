@@ -18,6 +18,7 @@ import pandas as pd
 import pytest
 
 from backend.agents.analyzer import (
+    _is_id_column,
     build_analyzer_message,
     check_self_evaluation,
     classify_columns,
@@ -39,19 +40,69 @@ FIXTURES_DIR = pathlib.Path(__file__).parent / "fixtures"
 
 
 def test_classify_columns_numeric() -> None:
-    """Columns without 'id' in the name appear in numeric_cols.
+    """Columns without a standalone "id" name component appear in numeric_cols.
 
-    Note: sepal_width and petal_width are excluded because "width" contains
-    the substring "id" — the exclusion rule is a substring check, not a whole
-    word match. Only sepal_length and petal_length survive.
+    sepal_width and petal_width contain "id" only as a substring of "width",
+    so they are numeric (errors.md 2026-05-15).
     """
     df = pd.read_csv(FIXTURES_DIR / "iris.csv")
     numeric_cols, cat_cols, datetime_col = classify_columns(df)
     assert "sepal_length" in numeric_cols
     assert "petal_length" in numeric_cols
-    # sepal_width and petal_width contain "id" (in "width") — correctly excluded
-    assert "sepal_width" not in numeric_cols
-    assert "petal_width" not in numeric_cols
+    assert "sepal_width" in numeric_cols
+    assert "petal_width" in numeric_cols
+
+
+def test_classify_columns_iris_all_four_numeric() -> None:
+    """All four iris measurements are numeric, in file order."""
+    df = pd.read_csv(FIXTURES_DIR / "iris.csv")
+    numeric_cols, cat_cols, datetime_col = classify_columns(df)
+    assert numeric_cols == ["sepal_length", "sepal_width", "petal_length", "petal_width"]
+
+
+def test_classify_columns_applies_token_rule() -> None:
+    """classify_columns excludes id-like names and keeps substring false positives."""
+    df = pd.DataFrame({
+        "id": [1, 2, 3],
+        "CustomerID": [101, 102, 103],
+        "paid_amount": [9.5, 12.0, 3.25],
+        "humidity": [0.4, 0.55, 0.61],
+    })
+    numeric_cols, cat_cols, datetime_col = classify_columns(df)
+    assert numeric_cols == ["paid_amount", "humidity"]
+
+
+@pytest.mark.parametrize("name", [
+    "id", "ID", "Id", "customer_id", "customer-id", "customer id", "id_customer",
+    "CustomerId", "CustomerID", "Customer_Id",
+    "grid_id",  # excluded by its "_id" component; "grid" alone is not an id name
+])
+def test_is_id_column_true_positives(name: str) -> None:
+    assert _is_id_column(name) is True
+
+
+@pytest.mark.parametrize("name", [
+    "width", "valid", "paid_amount", "dividend", "residual", "humidity",
+    "rapid_response_time", "sepal_width", "petal_width", "avoid", "rigid", "arid",
+])
+def test_is_id_column_false_positives(name: str) -> None:
+    assert _is_id_column(name) is False
+
+
+@pytest.mark.parametrize("name", [
+    # ID acronym immediately followed by another capitalized word, anywhere in the
+    # name — there is no lowercase-to-uppercase boundary between "ID" and the next word.
+    "IDCustomer", "IDNumber", "CustomerIDNumber",
+    # uuid/guid values load as text, so they never reach the numeric filter.
+    "uuid", "guid",
+    # Trailing digit or plural.
+    "id1", "id2", "related_ids",
+    # Separator-less concatenation — indistinguishable from "valid"/"rapid" by tokens.
+    "userid", "customerid", "USERID",
+])
+def test_is_id_column_known_limitations(name: str) -> None:
+    """Documented, accepted misses (decisions.md 2026-09-19) — locked in, not solved."""
+    assert _is_id_column(name) is False
 
 
 def test_classify_columns_categorical() -> None:
@@ -140,6 +191,16 @@ def test_correlation_diagonal_never_in_strong_pairs() -> None:
     result = compute_correlation_matrix(df, numeric_cols)
     for pair in result["strong_pairs"]:
         assert pair["col1"] != pair["col2"]
+
+
+def test_correlation_iris_highest_pair_uses_recovered_columns() -> None:
+    """The width columns reach the correlation analysis: petal_length–petal_width is the top pair."""
+    df = pd.read_csv(FIXTURES_DIR / "iris.csv")
+    numeric_cols, cat_cols, datetime_col = classify_columns(df)
+    result = compute_correlation_matrix(df, numeric_cols)
+    assert result["highest_pair"] == ["petal_length", "petal_width"]
+    assert result["highest_value"] == pytest.approx(0.986, abs=1e-3)
+    assert len(result["strong_pairs"]) == 3
 
 
 def test_correlation_strong_pairs_threshold() -> None:
