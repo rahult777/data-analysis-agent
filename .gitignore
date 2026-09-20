@@ -26,6 +26,10 @@ build/
 .coverage
 htmlcov/
 
+# Runtime data — real user uploads and agent-generated outputs
+backend/uploads/
+backend/outputs/
+
 # IDEs
 .vscode/
 .idea/
