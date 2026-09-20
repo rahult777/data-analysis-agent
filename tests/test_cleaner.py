@@ -14,6 +14,7 @@ test driven by asyncio.run().
 
 import asyncio
 import copy
+import datetime
 import io
 import json
 import pathlib
@@ -29,7 +30,9 @@ from backend.agents.cleaner import (
     cleaner_node,
     detect_interactions,
     execute_cleaning_operations,
+    load_dataframe_from_uploads,
 )
+from backend.agents.profiler import load_dataframe
 
 FIXTURES_DIR = pathlib.Path(__file__).parent / "fixtures"
 
@@ -375,3 +378,146 @@ def test_cleaner_node_completes_with_bool_column() -> None:
     assert [payload["status"] for payload in captured] == ["cleaning", "cleaned"]
     assert not any("error_message" in payload for payload in captured)
     assert result["cleaning_report"]["summary"]["rows_after"] == 20
+
+
+# ---------------------------------------------------------------------------
+# Group 8 — non-string header labels in load_dataframe_from_uploads
+# ---------------------------------------------------------------------------
+
+UPLOADS_DIR = pathlib.Path("backend") / "uploads"
+
+DATE_HEADERS = [datetime.datetime(2024, 1, 1), datetime.datetime(2024, 2, 1)]
+DATE_HEADER_NAMES = ["2024-01-01 00:00:00", "2024-02-01 00:00:00"]
+
+
+def _stage_xlsx(path: pathlib.Path, columns: list) -> None:
+    frame = pd.DataFrame(
+        {index: [index + row + 0.5 for row in range(6)] for index in range(len(columns))}
+    )
+    frame.columns = pd.Index(columns)
+    frame.to_excel(path, index=False)
+
+
+@pytest.fixture
+def staged_upload():
+    """Write a file into backend/uploads — where both loaders look — and remove it after."""
+    created: list[pathlib.Path] = []
+
+    def _stage(filename: str, writer) -> str:
+        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        path = UPLOADS_DIR / filename
+        writer(path)
+        created.append(path)
+        return filename
+
+    yield _stage
+
+    for path in created:
+        path.unlink(missing_ok=True)
+
+
+def test_load_dataframe_from_uploads_stringifies_uniform_date_headers(staged_upload) -> None:
+    """All-date header cells load as a DatetimeIndex; str() must match parquet's form."""
+    name = staged_upload(
+        "test_cleaner_dates.xlsx", lambda path: _stage_xlsx(path, DATE_HEADERS)
+    )
+    df = asyncio.run(load_dataframe_from_uploads(name))
+
+    assert list(df.columns) == DATE_HEADER_NAMES
+    assert all(isinstance(column, str) for column in df.columns)
+
+
+def test_load_dataframe_from_uploads_stringifies_integer_headers(staged_upload) -> None:
+    """The Cleaner loads the original upload independently, so it needs the same fix."""
+    name = staged_upload(
+        "test_cleaner_ints.xlsx", lambda path: _stage_xlsx(path, [2021, 2022, 2023])
+    )
+    df = asyncio.run(load_dataframe_from_uploads(name))
+
+    assert list(df.columns) == ["2021", "2022", "2023"]
+
+
+def test_load_dataframe_from_uploads_stringifies_mixed_headers(staged_upload) -> None:
+    """A label row of `region | 2024-01-01 | 2024-02-01` — the reported failing shape."""
+    name = staged_upload(
+        "test_cleaner_mixed.xlsx",
+        lambda path: _stage_xlsx(path, pd.Index(["region", *DATE_HEADERS], dtype=object)),
+    )
+    df = asyncio.run(load_dataframe_from_uploads(name))
+
+    assert list(df.columns) == ["region", *DATE_HEADER_NAMES]
+
+
+def test_load_dataframe_from_uploads_leaves_csv_headers_unchanged(staged_upload) -> None:
+    """CSV headers are always parsed as strings — the CSV path must be a no-op."""
+    name = staged_upload(
+        "test_cleaner_headers.csv",
+        lambda path: path.write_text("2021,region\n1.0,north\n2.0,south\n"),
+    )
+    df = asyncio.run(load_dataframe_from_uploads(name))
+
+    assert list(df.columns) == ["2021", "region"]
+
+
+def test_load_dataframe_from_uploads_preserves_row_values_and_dtypes(staged_upload) -> None:
+    """Only the labels are normalized — the data itself is untouched."""
+    name = staged_upload(
+        "test_cleaner_values.xlsx", lambda path: _stage_xlsx(path, DATE_HEADERS)
+    )
+    df = asyncio.run(load_dataframe_from_uploads(name))
+
+    assert len(df) == 6
+    assert df[DATE_HEADER_NAMES[0]].tolist() == [0.5, 1.5, 2.5, 3.5, 4.5, 5.5]
+    assert all(str(dtype) == "float64" for dtype in df.dtypes)
+
+
+def test_build_cleaner_message_succeeds_on_date_header_upload(staged_upload) -> None:
+    """The regression: json.dumps raised TypeError on datetime dict keys."""
+    name = staged_upload(
+        "test_cleaner_message.xlsx", lambda path: _stage_xlsx(path, DATE_HEADERS)
+    )
+    df = asyncio.run(load_dataframe_from_uploads(name))
+
+    parsed = json.loads(
+        build_cleaner_message(df, {}, None, None, None, None, analyze_missingness_patterns(df))
+    )
+
+    assert list(parsed["column_info"].keys()) == DATE_HEADER_NAMES
+
+
+def test_load_dataframe_from_uploads_still_rejects_unsupported_extension(staged_upload) -> None:
+    """The restructured control flow must still raise, not fall through to a stringify."""
+    name = staged_upload(
+        "test_cleaner_unsupported.txt", lambda path: path.write_text("region\nnorth\n")
+    )
+
+    with pytest.raises(ValueError, match="Unsupported file extension"):
+        asyncio.run(load_dataframe_from_uploads(name))
+
+
+# ---------------------------------------------------------------------------
+# Group 9 — Profiler/Cleaner/parquet column-name agreement
+# ---------------------------------------------------------------------------
+
+
+def test_both_loaders_agree_with_parquet_on_date_header_names(staged_upload, tmp_path) -> None:
+    """The three agents must name the same column identically.
+
+    The Profiler and the Cleaner each load the upload themselves; the Analyzer
+    reads the Cleaner's parquet. str() is what pyarrow applies to a non-string
+    label, so map(str) — not astype(str), which drops the time component of a
+    DatetimeIndex — is what keeps all three in agreement.
+    """
+    name = staged_upload(
+        "test_shared_dates.xlsx", lambda path: _stage_xlsx(path, DATE_HEADERS)
+    )
+    profiler_df = asyncio.run(load_dataframe(name))
+    cleaner_df = asyncio.run(load_dataframe_from_uploads(name))
+
+    parquet_path = tmp_path / "cleaned.parquet"
+    cleaner_df.to_parquet(parquet_path, index=False)
+    analyzer_df = pd.read_parquet(parquet_path)
+
+    assert list(profiler_df.columns) == list(cleaner_df.columns)
+    assert list(analyzer_df.columns) == list(cleaner_df.columns)
+    assert list(analyzer_df.columns) == DATE_HEADER_NAMES

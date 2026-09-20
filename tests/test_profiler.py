@@ -13,6 +13,7 @@ tracer and the file loader mocked; it is a plain test driven by asyncio.run().
 
 import asyncio
 import copy
+import datetime
 import io
 import json
 import logging
@@ -27,6 +28,7 @@ from backend.agents.profiler import (
     apply_computed_column_stats,
     build_profiler_message,
     compute_column_stats,
+    load_dataframe,
     load_system_prompt,
     parse_json_response,
     profiler_node,
@@ -511,3 +513,121 @@ def test_build_profiler_message_bool_with_missing_values_uses_distinct_sampling(
 
     parsed = json.loads(build_profiler_message(df, None))
     assert set(parsed["column_info"]["flag"]["sample_values"]) == {"True", "False"}
+
+
+# ---------------------------------------------------------------------------
+# Group 10 — non-string header labels in load_dataframe
+# ---------------------------------------------------------------------------
+
+UPLOADS_DIR = pathlib.Path("backend") / "uploads"
+
+# Excel keeps a date header cell as datetime and a number header cell as int.
+# str() of a datetime column label is what parquet also produces, so these are
+# the names every downstream agent sees. See errors.md 2026-09-17.
+DATE_HEADERS = [datetime.datetime(2024, 1, 1), datetime.datetime(2024, 2, 1)]
+DATE_HEADER_NAMES = ["2024-01-01 00:00:00", "2024-02-01 00:00:00"]
+
+
+def _stage_xlsx(path: pathlib.Path, columns: list) -> None:
+    frame = pd.DataFrame(
+        {index: [index + row + 0.5 for row in range(6)] for index in range(len(columns))}
+    )
+    frame.columns = pd.Index(columns)
+    frame.to_excel(path, index=False)
+
+
+@pytest.fixture
+def staged_upload():
+    """Write a file into backend/uploads — where both loaders look — and remove it after."""
+    created: list[pathlib.Path] = []
+
+    def _stage(filename: str, writer) -> str:
+        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        path = UPLOADS_DIR / filename
+        writer(path)
+        created.append(path)
+        return filename
+
+    yield _stage
+
+    for path in created:
+        path.unlink(missing_ok=True)
+
+
+def test_load_dataframe_stringifies_uniform_date_headers(staged_upload) -> None:
+    """All-date header cells load as a DatetimeIndex; str() must match parquet's form."""
+    name = staged_upload(
+        "test_profiler_dates.xlsx", lambda path: _stage_xlsx(path, DATE_HEADERS)
+    )
+    df = asyncio.run(load_dataframe(name))
+
+    assert list(df.columns) == DATE_HEADER_NAMES
+    assert all(isinstance(column, str) for column in df.columns)
+
+
+def test_load_dataframe_stringifies_integer_headers(staged_upload) -> None:
+    """Year headers load as int labels, which no message builder can key a dict by safely."""
+    name = staged_upload(
+        "test_profiler_ints.xlsx", lambda path: _stage_xlsx(path, [2021, 2022, 2023])
+    )
+    df = asyncio.run(load_dataframe(name))
+
+    assert list(df.columns) == ["2021", "2022", "2023"]
+
+
+def test_load_dataframe_stringifies_mixed_string_and_date_headers(staged_upload) -> None:
+    """A label row of `region | 2024-01-01 | 2024-02-01` — the reported failing shape."""
+    name = staged_upload(
+        "test_profiler_mixed.xlsx",
+        lambda path: _stage_xlsx(path, pd.Index(["region", *DATE_HEADERS], dtype=object)),
+    )
+    df = asyncio.run(load_dataframe(name))
+
+    assert list(df.columns) == ["region", *DATE_HEADER_NAMES]
+
+
+def test_load_dataframe_leaves_ordinary_xlsx_headers_unchanged(staged_upload) -> None:
+    """Normalizing labels must not rewrite names that are already strings."""
+    name = staged_upload(
+        "test_profiler_plain.xlsx",
+        lambda path: _stage_xlsx(path, ["sepal_width", "petal_width"]),
+    )
+    df = asyncio.run(load_dataframe(name))
+
+    assert list(df.columns) == ["sepal_width", "petal_width"]
+
+
+def test_load_dataframe_leaves_csv_headers_unchanged(staged_upload) -> None:
+    """CSV headers are always parsed as strings — the CSV path must be a no-op."""
+    name = staged_upload(
+        "test_profiler_headers.csv",
+        lambda path: path.write_text("2021,region\n1.0,north\n2.0,south\n"),
+    )
+    df = asyncio.run(load_dataframe(name))
+
+    assert list(df.columns) == ["2021", "region"]
+
+
+def test_load_dataframe_preserves_row_values_and_dtypes(staged_upload) -> None:
+    """Only the labels are normalized — the data itself is untouched."""
+    name = staged_upload(
+        "test_profiler_values.xlsx", lambda path: _stage_xlsx(path, DATE_HEADERS)
+    )
+    df = asyncio.run(load_dataframe(name))
+
+    assert len(df) == 6
+    assert df[DATE_HEADER_NAMES[0]].tolist() == [0.5, 1.5, 2.5, 3.5, 4.5, 5.5]
+    assert all(str(dtype) == "float64" for dtype in df.dtypes)
+
+
+def test_build_profiler_message_succeeds_on_date_header_upload(staged_upload) -> None:
+    """The regression: json.dumps raised TypeError on datetime dict keys."""
+    name = staged_upload(
+        "test_profiler_message.xlsx", lambda path: _stage_xlsx(path, DATE_HEADERS)
+    )
+    df = asyncio.run(load_dataframe(name))
+
+    parsed = json.loads(build_profiler_message(df, None))
+
+    assert list(parsed["column_info"].keys()) == DATE_HEADER_NAMES
+    assert list(parsed["computed_column_stats"].keys()) == DATE_HEADER_NAMES

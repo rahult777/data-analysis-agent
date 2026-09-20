@@ -524,3 +524,38 @@ def test_analyzer_self_evaluation_loop() -> None:
 @pytest.mark.skip(reason="Requires live filesystem and Supabase")
 def test_analyzer_chart_generation() -> None:
     pass
+
+
+# ---------------------------------------------------------------------------
+# Group 11 — column names after the Cleaner's parquet round trip
+# ---------------------------------------------------------------------------
+
+
+def test_analyzer_handles_stringified_headers_after_parquet_roundtrip(tmp_path) -> None:
+    """classify_columns assumes every column name is a string — pin that assumption.
+
+    _is_id_column runs re.sub on the name and raises TypeError on a non-string
+    label, so an Excel upload with uniform integer (or date) headers would crash
+    the Analyzer if such a label could reach it. It cannot: the Analyzer's only
+    input is the Cleaner's parquet, and pyarrow stringifies non-string column
+    names on the way out. This test fails if that pyarrow behaviour ever changes.
+    It does NOT exercise the loader fix in cleaner.py — the round trip alone
+    already yields strings — see decisions.md 2026-09-20.
+    """
+    df = pd.DataFrame({2021: [1.0, 2.0, 3.0], 2022: [4.0, 5.0, 6.0]})
+    assert all(isinstance(column, int) for column in df.columns)
+    assert not df.isna().to_numpy().any()
+
+    with pytest.raises(TypeError):
+        _is_id_column(df.columns[0])
+
+    parquet_path = tmp_path / "cleaned.parquet"
+    # The exact call execute_cleaning_operations makes.
+    df.to_parquet(parquet_path, index=False)
+    loaded = pd.read_parquet(parquet_path)
+
+    assert list(loaded.columns) == ["2021", "2022"]
+    numeric_columns, categorical_columns, datetime_column = classify_columns(loaded)
+    assert numeric_columns == ["2021", "2022"]
+    assert categorical_columns == []
+    assert datetime_column is None

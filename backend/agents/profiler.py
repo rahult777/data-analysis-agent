@@ -74,14 +74,24 @@ async def load_dataframe(stored_filename: str) -> pd.DataFrame:
         )
     suffix = file_path.suffix.lower()
     if suffix == ".csv":
-        return await asyncio.to_thread(pd.read_csv, file_path)
+        df = await asyncio.to_thread(pd.read_csv, file_path)
     elif suffix in (".xls", ".xlsx"):
-        return await asyncio.to_thread(pd.read_excel, file_path)
+        df = await asyncio.to_thread(pd.read_excel, file_path)
     else:
         raise ValueError(
             f"Unsupported file extension '{suffix}' for '{file_path.name}'. "
             "Only .csv, .xls, and .xlsx files are supported."
         )
+    # Excel keeps date and number header cells as their native type, so a
+    # column label can be a datetime or an int. json.dumps coerces int,
+    # float and bool keys to JSON strings, so the LLM names a decision
+    # "2021" while the label is still int 2021 — execute_cleaning_operations
+    # then matches nothing and silently skips every decision for that
+    # column. A datetime key raises TypeError outright. map(str), not
+    # astype(str): it matches parquet's own stringification, so these
+    # names stay identical to the ones the Analyzer later reads back.
+    df.columns = df.columns.map(str)
+    return df
 
 
 # Same contract as analyzer._safe_stat; not imported because analyzer imports this module.
