@@ -1,19 +1,19 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
-import { AlertTriangle } from "lucide-react";
 
 import { AnalysisProgress } from "@/components/AnalysisProgress";
 import { AnalysisResults } from "@/components/AnalysisResults";
-import { Button } from "@/components/ui/button";
 
 export default function AnalysisPage() {
   const params = useParams<{ id: string }>();
-  const router = useRouter();
   const analysisId = params.id;
 
+  // Read access is public by analysis_id; a locally stored session_id only
+  // marks this browser as the uploader (a UI hint — the question and resume
+  // endpoints still enforce it).
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessionChecked, setSessionChecked] = useState<boolean>(false);
   const [isComplete, setIsComplete] = useState<boolean>(false);
@@ -40,32 +40,7 @@ export default function AnalysisPage() {
           </h1>
         </header>
 
-        {sessionChecked && sessionId === null && (
-          <motion.div
-            role="alert"
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.25, ease: "easeOut" }}
-            className="flex items-start gap-4 rounded-md border border-amber-500/30 bg-amber-500/10 px-5 py-5 text-amber-200 md:px-6 md:py-6"
-          >
-            <AlertTriangle className="size-5 mt-0.5 shrink-0" aria-hidden />
-            <div className="flex flex-col gap-4 flex-1 min-w-0">
-              <p className="text-sm">
-                Session not found. Please upload your file again.
-              </p>
-              <Button
-                type="button"
-                onClick={() => router.push("/")}
-                aria-label="Return to upload page"
-                className="self-start"
-              >
-                Return to upload
-              </Button>
-            </div>
-          </motion.div>
-        )}
-
-        {sessionId !== null && (
+        {sessionChecked && (
           <AnimatePresence mode="wait" initial={false}>
             {!isComplete ? (
               <motion.div
@@ -77,7 +52,7 @@ export default function AnalysisPage() {
               >
                 <AnalysisProgress
                   analysisId={analysisId}
-                  sessionId={sessionId}
+                  isOwner={sessionId !== null}
                   onComplete={() => setIsComplete(true)}
                 />
               </motion.div>

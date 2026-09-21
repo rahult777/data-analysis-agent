@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { motion } from "framer-motion";
 import { AlertTriangle, Clock, Loader2, Send } from "lucide-react";
 
@@ -23,8 +24,11 @@ export function QuestionInput({
   sessionId,
 }: {
   analysisId: string;
-  sessionId: string;
+  // null for read-only visitors: the form renders disabled with an
+  // explanation, since only the uploading browser can ask questions.
+  sessionId: string | null;
 }) {
+  const isOwner = sessionId !== null;
   const [value, setValue] = useState<string>("");
   const [items, setItems] = useState<SubmittedQuestion[]>([]);
   const [submitting, setSubmitting] = useState<boolean>(false);
@@ -41,7 +45,7 @@ export function QuestionInput({
   async function handleSubmit(e: React.FormEvent): Promise<void> {
     e.preventDefault();
     const question = value.trim();
-    if (!question || submitting) return;
+    if (sessionId === null || !question || submitting) return;
     setSubmitting(true);
     setSubmitError(null);
     try {
@@ -82,7 +86,6 @@ export function QuestionInput({
             <QuestionItem
               key={item.questionId}
               analysisId={analysisId}
-              sessionId={sessionId}
               questionId={item.questionId}
               question={item.question}
             />
@@ -95,14 +98,19 @@ export function QuestionInput({
           <Input
             value={value}
             onChange={(e) => setValue(e.target.value)}
-            placeholder="e.g. Which category has the highest average value?"
+            placeholder={
+              isOwner
+                ? "e.g. Which category has the highest average value?"
+                : "Read-only view"
+            }
             aria-label="Ask a question about this dataset"
-            disabled={submitting}
+            aria-describedby={isOwner ? undefined : "question-readonly-note"}
+            disabled={!isOwner || submitting}
             className="h-11 flex-1"
           />
           <Button
             type="submit"
-            disabled={submitting || value.trim().length === 0}
+            disabled={!isOwner || submitting || value.trim().length === 0}
             aria-label="Submit question"
             className="h-11 px-4"
           >
@@ -120,6 +128,20 @@ export function QuestionInput({
             <span>Ask</span>
           </Button>
         </div>
+        {!isOwner && (
+          <p id="question-readonly-note" className="text-sm text-muted-foreground">
+            You&apos;re viewing a read-only copy of this analysis. Questions can
+            only be asked from the browser that uploaded the file — to ask your
+            own,{" "}
+            <Link
+              href="/"
+              className="text-foreground underline underline-offset-4 hover:text-primary"
+            >
+              upload a file
+            </Link>
+            .
+          </p>
+        )}
         {submitError && (
           <p className="text-sm text-red-300" role="alert">
             {submitError}
@@ -132,7 +154,6 @@ export function QuestionInput({
 
 interface QuestionItemProps {
   analysisId: string;
-  sessionId: string;
   questionId: string;
   question: string;
 }
@@ -145,7 +166,6 @@ interface QuestionItemProps {
  */
 function QuestionItem({
   analysisId,
-  sessionId,
   questionId,
   question,
 }: QuestionItemProps) {
@@ -162,7 +182,7 @@ function QuestionItem({
     async function poll(): Promise<void> {
       polls += 1;
       try {
-        const res = await getQuestion(analysisId, sessionId, questionId);
+        const res = await getQuestion(analysisId, questionId);
         if (cancelled) return;
         setStatus(res.status);
         if (res.status === "complete" || res.status === "error") {
@@ -188,7 +208,7 @@ function QuestionItem({
       cancelled = true;
       if (intervalId) clearInterval(intervalId);
     };
-  }, [analysisId, sessionId, questionId]);
+  }, [analysisId, questionId]);
 
   const pending = status === "pending" || status === "answering";
 

@@ -60,6 +60,18 @@ _AGENT_MAP: dict[str, Optional[str]] = {
 }
 
 
+def _error_category(error_message: Optional[str]) -> Optional[str]:
+    """Reduce a stored error_message to its category for the public status route.
+
+    Agents store raw exception text after the prefix (f"SYSTEM_ERROR: {exc}"),
+    which can include server paths or database details. The frontend only needs
+    the category, so the detail never leaves the server.
+    """
+    if error_message is None:
+        return None
+    return "USER_ERROR" if error_message.startswith("USER_ERROR") else "SYSTEM_ERROR"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Path("backend/outputs/charts").mkdir(parents=True, exist_ok=True)
@@ -104,6 +116,33 @@ async def get_session(
     if session_id != record["session_id"]:
         raise HTTPException(status_code=403, detail="Invalid or missing session-id header.")
     return session_id
+
+
+# ---------------------------------------------------------------------------
+# Public-read dependency — read-only GET routes only
+# ---------------------------------------------------------------------------
+
+
+def _is_canonical_uuid(value: str) -> bool:
+    """True only for the canonical hyphenated form. uuid.UUID() alone also
+    accepts prefixes such as "urn:uuid:" that Postgres rejects with 22P02."""
+    try:
+        return str(uuid.UUID(value)) == value.lower()
+    except ValueError:
+        return False
+
+
+async def get_public_read_access(analysis_id: str) -> str:
+    """Allow read-only access to an analysis by its id alone.
+
+    analysis_id is a random UUID4 and is itself the capability for reads, so
+    no session-id header is required or checked. Every route that writes
+    state or can trigger an LLM call must keep using get_session. A malformed
+    id returns 404 instead of letting Postgres raise 22P02 (a 500).
+    """
+    if not _is_canonical_uuid(analysis_id):
+        raise HTTPException(status_code=404, detail="Analysis not found.")
+    return analysis_id
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +223,7 @@ async def upload_file(
 @app.get("/api/analysis/{analysis_id}/status", response_model=StatusResponse)
 async def get_status(
     analysis_id: str,
-    _session: str = Depends(get_session),
+    _access: str = Depends(get_public_read_access),
 ) -> StatusResponse:
     client = get_supabase_client()
     response = await asyncio.to_thread(
@@ -202,14 +241,14 @@ async def get_status(
         status=AnalysisStatus(status),
         current_agent=_AGENT_MAP.get(status),
         progress_pct=_PROGRESS_MAP.get(status, 0.0),
-        error_message=record.get("error_message"),
+        error_message=_error_category(record.get("error_message")),
     )
 
 
 @app.get("/api/analysis/{analysis_id}", response_model=AnalysisResponse)
 async def get_analysis(
     analysis_id: str,
-    _session: str = Depends(get_session),
+    _access: str = Depends(get_public_read_access),
 ) -> AnalysisResponse:
     client = get_supabase_client()
     response = await asyncio.to_thread(
@@ -277,8 +316,10 @@ async def post_question(
 async def get_question(
     analysis_id: str,
     question_id: str,
-    _session: str = Depends(get_session),
+    _access: str = Depends(get_public_read_access),
 ) -> QuestionResponse:
+    if not _is_canonical_uuid(question_id):
+        raise HTTPException(status_code=404, detail="Question not found")
     client = get_supabase_client()
     response = await asyncio.to_thread(
         lambda: client.table("questions")
@@ -344,7 +385,7 @@ async def resume_analysis(
 @app.get("/api/analysis/{analysis_id}/charts")
 async def get_charts(
     analysis_id: str,
-    _session: str = Depends(get_session),
+    _access: str = Depends(get_public_read_access),
 ) -> dict:
     client = get_supabase_client()
     response = await asyncio.to_thread(

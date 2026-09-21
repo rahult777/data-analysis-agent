@@ -18,7 +18,7 @@ The complete pipeline executes as follows:
 
 **Step 4:** Generate a UUID session_id. Create an analyses record in Supabase with status `profiling`, storing: session_id, original_filename, stored_filename (UUID-based to prevent conflicts), file_size, created_at, updated_at.
 
-**Step 5:** Return UploadResponse to the frontend containing analysis_id and session_id. The frontend stores session_id in local state for all subsequent requests.
+**Step 5:** Return UploadResponse to the frontend containing analysis_id and session_id. The frontend stores session_id in localStorage (`session_id_{analysis_id}`) on the uploading browser; it is sent only on the state-changing requests (POST question, POST resume).
 
 **Step 6:** The LangGraph pipeline starts asynchronously. The frontend begins polling `/api/analysis/{id}/status` every 3 seconds.
 
@@ -81,17 +81,17 @@ The pause states are **DB-polling nodes**, not LangGraph `interrupt()` — the i
 
 ## API Endpoints
 
-All endpoints except POST /api/upload require a `session-id` header. The backend validates this header matches the `session_id` stored in the analyses record before returning any data.
+Read-only GET endpoints are public by analysis_id: the UUID4 id is the access capability, and no `session-id` header is required or checked (dependency `get_public_read_access` in backend/main.py, which also returns 404 for a malformed id). Endpoints that change state or can trigger an LLM call — POST question and POST resume — require a `session-id` header matching the `session_id` stored in the analyses record (dependency `get_session`). POST /api/upload has no auth. See decisions.md 2026-09-21.
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | POST | `/api/upload` | Upload CSV or Excel. Returns analysis_id and session_id. | No |
-| GET | `/api/analysis/{id}/status` | Get current pipeline status and current_agent name. | Yes |
-| GET | `/api/analysis/{id}` | Get full analysis result including all agent outputs. | Yes |
+| GET | `/api/analysis/{id}/status` | Get current pipeline status and current_agent name. | No (public by id) |
+| GET | `/api/analysis/{id}` | Get full analysis result including all agent outputs. | No (public by id) |
 | POST | `/api/analysis/{id}/question` | Submit a custom question. Returns question_id with status pending. | Yes |
-| GET | `/api/analysis/{id}/question/{question_id}` | Poll a submitted question for its computed answer and pandas code. | Yes |
+| GET | `/api/analysis/{id}/question/{question_id}` | Poll a submitted question for its computed answer and pandas code. Filters on both ids. | No (public by id) |
 | POST | `/api/analysis/{id}/resume` | Submit the user's response to an active pause state (`{"response": {...}}`). Only valid when status is `domain_pause`, `missing_value_pause`, or `outlier_pause`; restores status to `profiling` or `cleaning` and lets the polling pause-wait node pick it up. | Yes |
-| GET | `/api/analysis/{id}/charts` | Get list of chart file paths for this analysis. | Yes |
+| GET | `/api/analysis/{id}/charts` | Get list of chart file paths for this analysis (not currently called by the frontend). | No (public by id) |
 | GET | `/charts/{filename}` | Serve chart image file. Handled by FastAPI StaticFiles mount. | No |
 
 ### POST /api/upload

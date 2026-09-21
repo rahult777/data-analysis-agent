@@ -17,7 +17,8 @@ import { QuestionInput } from "@/components/QuestionInput";
 
 interface AnalysisResultsProps {
   analysisId: string;
-  sessionId: string;
+  // null for read-only visitors (no uploader session in this browser).
+  sessionId: string | null;
 }
 
 type ViewState = "loading" | "error" | "loaded";
@@ -34,7 +35,7 @@ export function AnalysisResults({
     let cancelled = false;
     async function load(): Promise<void> {
       try {
-        const result = await getAnalysis(analysisId, sessionId);
+        const result = await getAnalysis(analysisId);
         if (cancelled) return;
         setData(result);
         setView("loaded");
@@ -47,7 +48,7 @@ export function AnalysisResults({
     return () => {
       cancelled = true;
     };
-  }, [analysisId, sessionId]);
+  }, [analysisId]);
 
   if (view === "loading") {
     return <ResultsSkeleton />;

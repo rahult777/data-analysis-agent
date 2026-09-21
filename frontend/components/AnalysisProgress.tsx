@@ -12,7 +12,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { AlertCircle, AlertTriangle, Check, Loader2 } from "lucide-react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
-import { getAnalysisStatus } from "@/lib/api";
+import { ApiError, getAnalysisStatus } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { AnalysisStatus } from "@/lib/types";
 
@@ -52,7 +52,9 @@ type StageState = "waiting" | "active-running" | "active-paused" | "complete";
 
 interface AnalysisProgressProps {
   analysisId: string;
-  sessionId: string;
+  // True when this browser holds the uploader's session_id. Read-only visitors
+  // see the same live progress, but error-card copy and actions are adjusted.
+  isOwner: boolean;
   onComplete?: () => void;
 }
 
@@ -79,7 +81,7 @@ function getStageState(
 
 export function AnalysisProgress({
   analysisId,
-  sessionId,
+  isOwner,
   onComplete,
 }: AnalysisProgressProps) {
   const router = useRouter();
@@ -96,15 +98,18 @@ export function AnalysisProgress({
   const [progressPct, setProgressPct] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [pollingError, setPollingError] = useState<boolean>(false);
+  const [notFound, setNotFound] = useState<boolean>(false);
 
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     let cancelled = false;
 
-    async function fetchStatus(): Promise<AnalysisStatus | null> {
+    // "not-found" is terminal: a 404 means the link matches no analysis, so
+    // polling stops instead of retrying forever.
+    async function fetchStatus(): Promise<AnalysisStatus | "not-found" | null> {
       try {
-        const data = await getAnalysisStatus(analysisId, sessionId);
+        const data = await getAnalysisStatus(analysisId);
         if (cancelled) return null;
         setStatus(data.status);
         setCurrentAgent(data.current_agent);
@@ -112,8 +117,12 @@ export function AnalysisProgress({
         setErrorMessage(data.error_message);
         setPollingError(false);
         return data.status;
-      } catch {
+      } catch (err) {
         if (cancelled) return null;
+        if (err instanceof ApiError && err.status === 404) {
+          setNotFound(true);
+          return "not-found";
+        }
         setPollingError(true);
         return null;
       }
@@ -122,7 +131,7 @@ export function AnalysisProgress({
     async function init() {
       const initialStatus = await fetchStatus();
       if (cancelled) return;
-      if (initialStatus === "error") return;
+      if (initialStatus === "error" || initialStatus === "not-found") return;
       if (initialStatus === "complete") {
         onCompleteRef.current?.();
         return;
@@ -135,7 +144,7 @@ export function AnalysisProgress({
             intervalRef.current = null;
           }
           onCompleteRef.current?.();
-        } else if (next === "error") {
+        } else if (next === "error" || next === "not-found") {
           if (intervalRef.current) {
             clearInterval(intervalRef.current);
             intervalRef.current = null;
@@ -153,13 +162,14 @@ export function AnalysisProgress({
         intervalRef.current = null;
       }
     };
-  }, [analysisId, sessionId]);
+  }, [analysisId]);
 
   // At "complete" the pipeline is shown fully finished (all stages green)
   // during the brief exit transition while the parent swaps in the results
   // view — the parent is notified via onComplete the moment status hits it.
-  let view: "loading" | "pipeline" | "error-card";
-  if (status === "error") view = "error-card";
+  let view: "loading" | "pipeline" | "error-card" | "not-found";
+  if (notFound) view = "not-found";
+  else if (status === "error") view = "error-card";
   else if (status === null) view = "loading";
   else if (status === "complete") view = "pipeline";
   else if (currentAgent === null) view = "loading";
@@ -238,8 +248,13 @@ export function AnalysisProgress({
         <ErrorCard
           key="error-card"
           errorMessage={errorMessage}
+          isOwner={isOwner}
           onTryAgain={() => router.push("/")}
         />
+      )}
+
+      {view === "not-found" && (
+        <NotFoundCard key="not-found" onUpload={() => router.push("/")} />
       )}
     </AnimatePresence>
   );
@@ -412,11 +427,15 @@ function StageIndicator({ state }: StageIndicatorProps) {
 
 interface ErrorCardProps {
   errorMessage: string | null;
+  isOwner: boolean;
   onTryAgain: () => void;
 }
 
-function ErrorCard({ errorMessage, onTryAgain }: ErrorCardProps) {
-  const isUserError = errorMessage?.startsWith("USER_ERROR:") ?? false;
+function ErrorCard({ errorMessage, isOwner, onTryAgain }: ErrorCardProps) {
+  if (!isOwner) return <VisitorErrorCard onUpload={onTryAgain} />;
+
+  // /status returns only the category ("USER_ERROR" | "SYSTEM_ERROR"), never detail.
+  const isUserError = errorMessage === "USER_ERROR";
 
   return (
     <motion.div
@@ -472,3 +491,79 @@ function ErrorCard({ errorMessage, onTryAgain }: ErrorCardProps) {
   );
 }
 
+// Read-only visitors did not upload this file, so the owner's "your file" /
+// "try again" copy would be wrong; they get a neutral explanation and a way
+// to start their own analysis. No Contact Support placeholder.
+function VisitorErrorCard({ onUpload }: { onUpload: () => void }) {
+  return (
+    <motion.div
+      role="alert"
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -8 }}
+      transition={{ duration: 0.25, ease: "easeOut" }}
+      className="flex items-start gap-4 rounded-md border border-amber-500/30 bg-amber-500/10 px-5 py-5 text-amber-200 md:px-6 md:py-6"
+    >
+      <AlertTriangle className="size-5 mt-0.5 shrink-0" aria-hidden />
+      <div className="flex flex-col gap-4 flex-1 min-w-0">
+        <div className="flex flex-col gap-1.5">
+          <h2
+            className="italic text-xl leading-tight"
+            style={{ fontFamily: "var(--font-display)" }}
+          >
+            This analysis didn&apos;t finish
+          </h2>
+          <p className="text-sm opacity-90">
+            The analysis at this link stopped with an error, so there are no
+            results to show.
+          </p>
+        </div>
+        <Button
+          type="button"
+          onClick={onUpload}
+          aria-label="Analyze your own file on the upload page"
+          className="self-start"
+        >
+          Analyze your own file
+        </Button>
+      </div>
+    </motion.div>
+  );
+}
+
+function NotFoundCard({ onUpload }: { onUpload: () => void }) {
+  return (
+    <motion.div
+      role="alert"
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -8 }}
+      transition={{ duration: 0.25, ease: "easeOut" }}
+      className="flex items-start gap-4 rounded-md border border-amber-500/30 bg-amber-500/10 px-5 py-5 text-amber-200 md:px-6 md:py-6"
+    >
+      <AlertTriangle className="size-5 mt-0.5 shrink-0" aria-hidden />
+      <div className="flex flex-col gap-4 flex-1 min-w-0">
+        <div className="flex flex-col gap-1.5">
+          <h2
+            className="italic text-xl leading-tight"
+            style={{ fontFamily: "var(--font-display)" }}
+          >
+            Analysis not found
+          </h2>
+          <p className="text-sm opacity-90">
+            This link doesn&apos;t match any analysis. It may be mistyped or
+            incomplete.
+          </p>
+        </div>
+        <Button
+          type="button"
+          onClick={onUpload}
+          aria-label="Go to the upload page"
+          className="self-start"
+        >
+          Upload a file
+        </Button>
+      </div>
+    </motion.div>
+  );
+}
