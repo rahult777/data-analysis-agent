@@ -82,7 +82,8 @@ def test_upload_wrong_file_type() -> None:
     )
     assert response.status_code == 400
     detail = response.json()["detail"].lower()
-    assert "unsupported" in detail or "file type" in detail
+    assert "user_error" in detail
+    assert "csv or excel file" in detail
 
 
 def test_upload_file_too_large() -> None:

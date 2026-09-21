@@ -39,14 +39,14 @@ export function CodeBlock({ code, language, className }: CodeBlockProps) {
       )}
     >
       <div className="flex items-center justify-between gap-2 border-b border-border/60 bg-card/40 px-3 py-1.5">
-        <span className="font-mono text-xs tracking-wide text-muted-foreground">
+        <span className="font-mono text-sm tracking-wide text-muted-foreground">
           {language ?? "code"}
         </span>
         <button
           type="button"
           onClick={handleCopy}
           aria-label={copied ? "Copied to clipboard" : "Copy code to clipboard"}
-          className="inline-flex h-7 items-center gap-1.5 rounded px-2 text-xs text-muted-foreground transition-colors hover:text-foreground max-sm:h-11"
+          className="inline-flex h-7 items-center gap-1.5 rounded px-2 text-sm text-muted-foreground transition-colors hover:text-foreground max-sm:h-11"
         >
           {copied ? (
             <>

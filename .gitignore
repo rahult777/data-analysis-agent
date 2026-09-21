@@ -29,6 +29,7 @@ htmlcov/
 # Runtime data — real user uploads and agent-generated outputs
 backend/uploads/
 backend/outputs/
+.playwright-mcp/
 
 # IDEs
 .vscode/

@@ -122,7 +122,7 @@ When status is `complete`, the full results are displayed.
 - File preview shown immediately on selection before the API call
 - "Start Analysis" button triggers the POST /api/upload call
 - Shows upload progress indicator during the API call
-- On success: navigates to /analysis/{id} with session_id stored in component state
+- On success: navigates to /analysis/{id} with session_id stored in localStorage under the key `session_id_{analysis_id}`; the Results page reads it back with the same key
 
 **Props:** None — self-contained component.
 

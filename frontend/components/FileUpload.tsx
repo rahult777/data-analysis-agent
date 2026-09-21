@@ -28,6 +28,9 @@ const VALID_EXTENSIONS: string[] = [".csv", ".xls", ".xlsx"];
 const CSV_PREVIEW_BYTES = 2048;
 const BYTES_PER_KB = 1024;
 const BYTES_PER_MB = BYTES_PER_KB * BYTES_PER_KB;
+const USER_ERROR_PREFIX = "USER_ERROR:";
+const SYSTEM_ERROR_PREFIX = "SYSTEM_ERROR:";
+const GENERIC_UPLOAD_ERROR = "Upload failed. Please try again.";
 
 type UserType = "business_owner" | "data_analyst" | "data_scientist";
 type ErrorKind = "user" | "api";
@@ -73,6 +76,25 @@ function getExtension(filename: string): string {
   return idx === -1 ? "" : filename.slice(idx).toLowerCase();
 }
 
+function classifyUploadError(err: unknown): UploadError {
+  const raw = err instanceof Error ? err.message.trim() : "";
+  if (raw.startsWith(USER_ERROR_PREFIX)) {
+    return {
+      type: "user",
+      message:
+        raw.slice(USER_ERROR_PREFIX.length).trim() || GENERIC_UPLOAD_ERROR,
+    };
+  }
+  if (raw.startsWith(SYSTEM_ERROR_PREFIX)) {
+    return {
+      type: "api",
+      message:
+        raw.slice(SYSTEM_ERROR_PREFIX.length).trim() || GENERIC_UPLOAD_ERROR,
+    };
+  }
+  return { type: "api", message: GENERIC_UPLOAD_ERROR };
+}
+
 export function FileUpload() {
   const router = useRouter();
 
@@ -84,6 +106,7 @@ export function FileUpload() {
   const [userType, setUserType] = useState<UserType | null>(null);
   const [columnCount, setColumnCount] = useState<number | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const errorRef = useRef<HTMLDivElement>(null);
 
   const isDragging = dragCounter > 0;
 
@@ -108,12 +131,17 @@ export function FileUpload() {
     };
   }, [file]);
 
+  useEffect(() => {
+    if (error === null) return;
+    errorRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [error]);
+
   function handleFileSelection(selectedFile: File): void {
     const ext = getExtension(selectedFile.name);
     if (!VALID_EXTENSIONS.includes(ext)) {
       setError({
         type: "user",
-        message: `Unsupported file type. Please upload ${VALID_EXTENSIONS.join(", ")}.`,
+        message: "Please upload a CSV or Excel file (.csv, .xls, .xlsx)",
       });
       return;
     }
@@ -127,7 +155,7 @@ export function FileUpload() {
     if (selectedFile.size > MAX_FILE_SIZE_BYTES) {
       setError({
         type: "user",
-        message: `File exceeds the ${formatBytes(MAX_FILE_SIZE_BYTES)} limit.`,
+        message: "This file is too large. Maximum size is 100MB.",
       });
       return;
     }
@@ -184,6 +212,17 @@ export function FileUpload() {
     setError(null);
   }
 
+  function handleErrorAction(): void {
+    // An api-type error means the upload failed, not the file: `file` is still
+    // populated (only handleChooseDifferent clears it), so retry the same upload.
+    // A user-type error means the file itself was rejected — reset to re-pick.
+    if (error?.type === "api") {
+      void handleUpload();
+      return;
+    }
+    handleChooseDifferent();
+  }
+
   function handleToggleUserType(value: UserType): void {
     setUserType((prev) => (prev === value ? null : value));
   }
@@ -204,9 +243,7 @@ export function FileUpload() {
       );
       router.push(`/analysis/${response.analysis_id}`);
     } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Upload failed. Please try again.";
-      setError({ type: "api", message });
+      setError(classifyUploadError(err));
     } finally {
       setIsUploading(false);
     }
@@ -244,11 +281,11 @@ export function FileUpload() {
         )}
       >
         <div className="flex items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-card/40 px-3 py-1 text-xs text-muted-foreground">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-card/40 px-3 py-1 text-sm text-muted-foreground">
             <FileText className="size-3.5" aria-hidden />
             CSV
           </span>
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-card/40 px-3 py-1 text-xs text-muted-foreground">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-card/40 px-3 py-1 text-sm text-muted-foreground">
             <FileSpreadsheet className="size-3.5" aria-hidden />
             XLSX
           </span>
@@ -281,7 +318,7 @@ export function FileUpload() {
       <div className="flex flex-col gap-2">
         <Label
           htmlFor="upload-context"
-          className="text-xs uppercase tracking-[0.2em] text-muted-foreground"
+          className="text-sm uppercase tracking-[0.2em] text-muted-foreground"
         >
           Context (optional)
         </Label>
@@ -297,7 +334,7 @@ export function FileUpload() {
       </div>
 
       <div className="flex flex-col gap-3">
-        <Label className="text-xs uppercase tracking-[0.2em] text-muted-foreground">
+        <Label className="text-sm uppercase tracking-[0.2em] text-muted-foreground">
           Who&apos;s analyzing this? (optional)
         </Label>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -321,7 +358,7 @@ export function FileUpload() {
                 className="border rounded-md p-4 min-h-[88px] text-left outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
               >
                 <p className="text-sm font-medium">{option.label}</p>
-                <p className="text-xs text-muted-foreground mt-1">
+                <p className="text-sm text-muted-foreground mt-1">
                   {option.description}
                 </p>
               </motion.button>
@@ -349,7 +386,7 @@ export function FileUpload() {
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium truncate">{file.name}</p>
-                <p className="text-xs text-muted-foreground mt-1">
+                <p className="text-sm text-muted-foreground mt-1">
                   {formatBytes(file.size)}
                   {columnCount !== null && ` · approx. ${columnCount} columns`}
                 </p>
@@ -400,6 +437,7 @@ export function FileUpload() {
       <AnimatePresence initial={false}>
         {error !== null && (
           <motion.div
+            ref={errorRef}
             key={`error-${error.type}`}
             role="alert"
             initial={{ opacity: 0, y: 4 }}
@@ -414,7 +452,21 @@ export function FileUpload() {
             )}
           >
             <AlertTriangle className="size-4 mt-0.5 shrink-0" aria-hidden />
-            <p>{error.message}</p>
+            <div className="flex flex-col gap-3 flex-1 min-w-0">
+              <p>{error.message}</p>
+              <div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="max-sm:h-11"
+                  disabled={isUploading}
+                  onClick={handleErrorAction}
+                >
+                  Try Again
+                </Button>
+              </div>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>

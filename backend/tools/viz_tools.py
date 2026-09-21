@@ -55,6 +55,13 @@ def _safe_name(name: str) -> str:
     return sanitized[:30]
 
 
+def _short_name(name: str, limit: int = 26) -> str:
+    """Truncate a long column name so a chart title stays readable."""
+    if len(name) <= limit:
+        return name
+    return name[: limit - 1] + "…"
+
+
 def generate_histogram(
     df: pd.DataFrame, column: str, analysis_id: str
 ) -> Optional[str]:
@@ -185,11 +192,17 @@ def generate_scatter_plot(
 ) -> Optional[str]:
     """Generate an interactive scatter plot for the highest-correlation column pair. Returns HTML filename or None."""
     try:
-        fig = px.scatter(
-            df,
-            x=x_column,
-            y=y_column,
-            title=f"{x_column} vs {y_column} (r={correlation:.2f})",
+        fig = px.scatter(df, x=x_column, y=y_column)
+        fig.update_layout(
+            title=dict(
+                text=(
+                    f"{_short_name(x_column)} vs<br>"
+                    f"{_short_name(y_column)} (r={correlation:.2f})"
+                ),
+                font=dict(size=14),
+                automargin=True,
+                yref="container",
+            )
         )
         filename = f"{analysis_id}_scatter_{_safe_name(x_column)}_{_safe_name(y_column)}.html"
         fig.write_html(str(CHARTS_DIR / filename))

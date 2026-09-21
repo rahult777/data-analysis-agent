@@ -26,11 +26,11 @@ def validate_file(filename: str, content: bytes) -> None:
     extension = Path(filename).suffix.lower()
     if extension not in _ALLOWED_EXTENSIONS:
         raise ValueError(
-            "USER_ERROR: Unsupported file type. Please upload a CSV or Excel file."
+            "USER_ERROR: Please upload a CSV or Excel file (.csv, .xls, .xlsx)"
         )
     if len(content) > MAX_FILE_SIZE:
         raise ValueError(
-            "USER_ERROR: File too large. Maximum supported file size is 100MB."
+            "USER_ERROR: This file is too large. Maximum size is 100MB."
         )
     if len(content) == 0:
         raise ValueError(

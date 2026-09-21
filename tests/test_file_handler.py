@@ -169,7 +169,7 @@ def test_unreadable_xls_passes_through(caplog: pytest.LogCaptureFixture) -> None
 def test_rejects_unsupported_extension() -> None:
     """Keeps the documented message (docs/infrastructure.md, pipeline Step 2)."""
     assert rejection_message("report.txt", b"hello world") == (
-        "USER_ERROR: Unsupported file type. Please upload a CSV or Excel file."
+        "USER_ERROR: Please upload a CSV or Excel file (.csv, .xls, .xlsx)"
     )
 
 
@@ -180,7 +180,7 @@ def test_rejects_oversized_file_without_parsing(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(file_handler, "MAX_FILE_SIZE", len(VALID_CSV) - 1)
 
     assert rejection_message("iris.csv", VALID_CSV) == (
-        "USER_ERROR: File too large. Maximum supported file size is 100MB."
+        "USER_ERROR: This file is too large. Maximum size is 100MB."
     )
     peek.assert_not_called()
 

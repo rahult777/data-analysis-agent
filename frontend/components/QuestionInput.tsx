@@ -121,7 +121,7 @@ export function QuestionInput({
           </Button>
         </div>
         {submitError && (
-          <p className="text-xs text-red-300" role="alert">
+          <p className="text-sm text-red-300" role="alert">
             {submitError}
           </p>
         )}
@@ -200,7 +200,7 @@ function QuestionItem({
       className="flex flex-col gap-3 rounded-md border border-border/60 bg-card/40 p-4"
     >
       <div className="flex flex-col gap-1">
-        <span className="text-xs uppercase tracking-wider text-muted-foreground">
+        <span className="text-sm uppercase tracking-wider text-muted-foreground">
           You asked
         </span>
         <p className="text-sm font-medium text-foreground">{question}</p>

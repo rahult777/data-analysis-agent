@@ -266,7 +266,7 @@ function AnalystPanel({
       ))}
       {references.length > 0 && (
         <div className="flex flex-col gap-2 pt-1">
-          <p className="text-xs uppercase tracking-wider text-muted-foreground">
+          <p className="text-sm uppercase tracking-wider text-muted-foreground">
             Referenced charts
           </p>
           <div className="flex flex-wrap gap-2">
@@ -274,7 +274,7 @@ function AnalystPanel({
               <a
                 key={filename}
                 href={`#${chartAnchorId(filename)}`}
-                className="inline-flex items-center rounded-full border border-border/60 bg-card/40 px-3 py-1 text-xs text-foreground/90 transition-colors hover:border-primary/50 hover:text-foreground max-sm:py-2.5"
+                className="inline-flex items-center rounded-full border border-border/60 bg-card/40 px-3 py-1 text-sm text-foreground/90 transition-colors hover:border-primary/50 hover:text-foreground max-sm:min-h-11"
               >
                 {parseChartFilename(filename).label}
               </a>
@@ -362,7 +362,7 @@ function TechnicalPanel({
     <div className="flex flex-col gap-6 pt-1">
       {decisions.length > 0 && (
         <div className="flex flex-col gap-2">
-          <p className="text-xs uppercase tracking-wider text-muted-foreground">
+          <p className="text-sm uppercase tracking-wider text-muted-foreground">
             Cleaning decisions
           </p>
           <ul className="flex flex-col gap-2">
@@ -373,7 +373,7 @@ function TechnicalPanel({
               >
                 <div className="flex flex-wrap items-center gap-2">
                   {d.column_name && (
-                    <span className="rounded bg-secondary px-1.5 py-0.5 font-mono text-xs text-secondary-foreground">
+                    <span className="rounded bg-secondary px-1.5 py-0.5 font-mono text-sm text-secondary-foreground">
                       {d.column_name}
                     </span>
                   )}
@@ -382,7 +382,7 @@ function TechnicalPanel({
                   </span>
                 </div>
                 {d.issue && (
-                  <p className="text-xs text-muted-foreground">Issue: {d.issue}</p>
+                  <p className="text-sm text-muted-foreground">Issue: {d.issue}</p>
                 )}
                 {d.reason && (
                   <p className="text-sm leading-relaxed text-foreground/80">
@@ -397,7 +397,7 @@ function TechnicalPanel({
 
       {statistical && (
         <div className="flex flex-col gap-2">
-          <p className="text-xs uppercase tracking-wider text-muted-foreground">
+          <p className="text-sm uppercase tracking-wider text-muted-foreground">
             Statistical methodology
           </p>
           <p className="whitespace-pre-line text-sm leading-relaxed text-foreground/90">
@@ -408,7 +408,7 @@ function TechnicalPanel({
 
       {codeBlocks.length > 0 && (
         <div className="flex flex-col gap-2">
-          <p className="text-xs uppercase tracking-wider text-muted-foreground">
+          <p className="text-sm uppercase tracking-wider text-muted-foreground">
             Code
           </p>
           <div className="flex flex-col gap-3">
@@ -466,7 +466,7 @@ function TriggerLabel({
       >
         {title}
       </span>
-      <span className="text-xs text-muted-foreground">{description}</span>
+      <span className="text-sm text-muted-foreground">{description}</span>
     </span>
   );
 }
@@ -474,7 +474,7 @@ function TriggerLabel({
 function Callout({ title, children }: { title: string; children: string }) {
   return (
     <div className="rounded-md border border-l-2 border-border/60 border-l-primary/50 bg-card/40 px-4 py-3">
-      <p className="mb-1 text-xs uppercase tracking-wider text-muted-foreground">
+      <p className="mb-1 text-sm uppercase tracking-wider text-muted-foreground">
         {title}
       </p>
       <p className="whitespace-pre-line text-sm leading-relaxed text-foreground/90">

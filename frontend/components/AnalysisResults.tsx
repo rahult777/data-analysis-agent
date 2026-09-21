@@ -102,7 +102,7 @@ function AnalysisHeader({
       className="flex flex-col gap-5"
     >
       <div className="flex flex-col gap-1.5">
-        <span className="font-mono text-xs tracking-wide text-muted-foreground">
+        <span className="font-mono text-sm tracking-wide text-muted-foreground">
           {filename}
         </span>
         <h2
@@ -131,7 +131,7 @@ function AnalysisHeader({
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex flex-col gap-1">
-      <dt className="text-xs uppercase tracking-wider text-muted-foreground">
+      <dt className="text-sm uppercase tracking-wider text-muted-foreground">
         {label}
       </dt>
       <dd className="font-mono text-2xl tabular-nums text-foreground">
