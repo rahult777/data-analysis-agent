@@ -12,6 +12,11 @@ import {
 } from "@/components/ui/accordion";
 import { CodeBlock } from "@/components/CodeBlock";
 import { chartAnchorId, parseChartFilename } from "@/components/ChartGrid";
+import {
+  CorrelationMatrix,
+  pairKey,
+  type CorrelationMatrixData,
+} from "@/components/CorrelationMatrix";
 
 // ---------------------------------------------------------------------------
 // Narrow shapes for the raw JSONB dicts (stored raw — see decisions.md
@@ -74,6 +79,45 @@ function readBullets(executiveSummary: Record<string, unknown> | null): Executiv
       recommended_action: asString(r.recommended_action),
     };
   });
+}
+
+// analysis_report.correlation_matrix is Python-computed (analyzer.py
+// compute_correlation_matrix): { matrix: dict-of-dicts, symmetric, diagonal
+// included, values number | null; strong_pairs: [{col1, col2, ...}] }. Not
+// .correlation, which is the LLM-authored qualitative object. JSONB does not
+// preserve DataFrame column order, so columns are sorted alphabetically
+// (decisions.md 2026-09-21). Never assumes a 1.0 diagonal — constant columns
+// store null there.
+function asFiniteNumber(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+function readCorrelationMatrix(
+  analysisReport: Record<string, unknown> | null,
+): CorrelationMatrixData | undefined {
+  const cm = asRecord(analysisReport?.correlation_matrix);
+  const matrix = asRecord(cm?.matrix);
+  if (!matrix) return undefined;
+
+  const columns = Object.keys(matrix).sort((a, b) => a.localeCompare(b));
+  if (columns.length < 2) return undefined;
+
+  const lookup = (a: string, b: string): number | null =>
+    asFiniteNumber(asRecord(matrix[a])?.[b]) ??
+    asFiniteNumber(asRecord(matrix[b])?.[a]);
+  const values = columns.map((row) => columns.map((col) => lookup(row, col)));
+
+  const strongPairs = new Set<string>();
+  if (Array.isArray(cm?.strong_pairs)) {
+    for (const p of cm.strong_pairs) {
+      const r = asRecord(p);
+      const col1 = typeof r?.col1 === "string" ? r.col1 : undefined;
+      const col2 = typeof r?.col2 === "string" ? r.col2 : undefined;
+      if (col1 && col2 && col1 !== col2) strongPairs.add(pairKey(col1, col2));
+    }
+  }
+
+  return { columns, values, strongPairs };
 }
 
 function readOpenQuestions(v: unknown): OpenQuestion[] {
@@ -169,10 +213,12 @@ export function InsightReportDetail({
   insightReport,
   cleaningDecisions,
   chartPaths,
+  analysisReport,
 }: {
   insightReport: Record<string, unknown> | null;
   cleaningDecisions: CleaningDecision[] | null;
   chartPaths: string[] | null;
+  analysisReport: Record<string, unknown> | null;
 }) {
   const analyst = asRecord(insightReport?.analyst_layer) as AnalystLayer | undefined;
   const technical = asRecord(insightReport?.technical_layer) as
@@ -182,6 +228,7 @@ export function InsightReportDetail({
   const userQuestionAddressed = asString(insightReport?.user_question_addressed);
   const decisions = cleaningDecisions ?? [];
   const availableCharts = chartPaths ?? [];
+  const correlationMatrix = readCorrelationMatrix(analysisReport);
 
   return (
     <Accordion multiple className="flex flex-col">
@@ -197,6 +244,7 @@ export function InsightReportDetail({
             analyst={analyst}
             userQuestionAddressed={userQuestionAddressed}
             availableCharts={availableCharts}
+            correlationMatrix={correlationMatrix}
           />
         </AccordionContent>
       </AccordionItem>
@@ -237,10 +285,12 @@ function AnalystPanel({
   analyst,
   userQuestionAddressed,
   availableCharts,
+  correlationMatrix,
 }: {
   analyst: AnalystLayer | undefined;
   userQuestionAddressed: string | undefined;
   availableCharts: string[];
+  correlationMatrix: CorrelationMatrixData | undefined;
 }) {
   const narrative = asString(analyst?.narrative);
   const paragraphs = narrative ? narrative.split(/\n\n+/).filter(Boolean) : [];
@@ -250,7 +300,18 @@ function AnalystPanel({
     availableCharts.includes(f),
   );
 
-  if (paragraphs.length === 0 && references.length === 0 && !userQuestionAddressed) {
+  // The existing PNG card's anchor — the caption links to it, it never
+  // replaces the "Correlation heatmap" reference pill below.
+  const heatmapFile = availableCharts.find(
+    (f) => parseChartFilename(f).kind === "heatmap" && parseChartFilename(f).format === "png",
+  );
+
+  if (
+    paragraphs.length === 0 &&
+    references.length === 0 &&
+    !userQuestionAddressed &&
+    !correlationMatrix
+  ) {
     return <EmptyNote>No analyst narrative was produced for this analysis.</EmptyNote>;
   }
 
@@ -264,6 +325,14 @@ function AnalystPanel({
           {p}
         </p>
       ))}
+      {correlationMatrix && (
+        <div className="pt-1">
+          <CorrelationMatrix
+            data={correlationMatrix}
+            heatmapAnchorId={heatmapFile ? chartAnchorId(heatmapFile) : undefined}
+          />
+        </div>
+      )}
       {references.length > 0 && (
         <div className="flex flex-col gap-2 pt-1">
           <p className="text-sm uppercase tracking-wider text-muted-foreground">

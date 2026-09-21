@@ -74,6 +74,7 @@ export function AnalysisResults({
         insightReport={data.insight_report}
         cleaningDecisions={data.cleaning_decisions}
         chartPaths={data.chart_paths}
+        analysisReport={data.analysis_report}
       />
 
       <QuestionInput analysisId={analysisId} sessionId={sessionId} />
