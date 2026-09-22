@@ -286,8 +286,12 @@ def _resumed_report() -> dict:
     }
 
 
-def run_resumed_pipeline(second_llm_payload: dict) -> tuple:
-    """Pause on the first Profiler call, answer 'correct', then return the second call's payload.
+def run_resumed_pipeline(
+    second_llm_payload: dict,
+    first_llm_payload: dict = DOMAIN_PAUSE_DATA,
+    answer: dict = CORRECT_ANSWER,
+) -> tuple:
+    """Pause on the first Profiler call, answer it (default 'correct'), then return the second call's payload.
 
     Returns (raised exception or final state, Cleaner mock, Profiler LLM mock, orchestrator updates).
     """
@@ -304,13 +308,13 @@ def run_resumed_pipeline(second_llm_payload: dict) -> tuple:
         ),
         patch("backend.agents.orchestrator.get_supabase_client", return_value=orchestrator_client),
         patch("backend.agents.orchestrator.create_tracer", return_value=BaseCallbackHandler()),
-        patch("backend.agents.orchestrator.check_for_pause_response", new=AsyncMock(return_value=CORRECT_ANSWER)),
+        patch("backend.agents.orchestrator.check_for_pause_response", new=AsyncMock(return_value=answer)),
         patch("backend.agents.orchestrator.asyncio.sleep", new=AsyncMock()),
         patch("backend.agents.orchestrator.cleaner_node", new=cleaner),
         patch("backend.agents.orchestrator.analyzer_node", new=AsyncMock(return_value={"error_message": None})),
         patch("backend.agents.orchestrator.explainer_node", new=AsyncMock(return_value={"error_message": None})),
     ):
-        llm.messages.create.side_effect = [_llm_reply(DOMAIN_PAUSE_DATA), _llm_reply(second_llm_payload)]
+        llm.messages.create.side_effect = [_llm_reply(first_llm_payload), _llm_reply(second_llm_payload)]
         initial_state = asyncio.run(build_initial_state("test-id", "ambiguous_domain.csv", None, None))
         try:
             outcome = asyncio.run(run_pipeline(initial_state))
@@ -355,3 +359,30 @@ def test_run_pipeline_domain_resume_that_repauses_errors_without_reaching_cleane
 def test_run_pipeline_integration():
     """Full pipeline integration test — skipped in unit test suite."""
     pass
+
+
+def test_run_pipeline_sub_80_full_report_is_gated_into_a_pause_then_confirmed_unknown():
+    """Build F2: a full ProfileReport at 35 with no pause signal still routes to domain_pause_wait,
+    stores the synthesized question, and a confirmed 'unknown' reaches the Cleaner without re-gating."""
+    first = {**_resumed_report(), "domain_hypothesis": "unknown", "domain_confidence_score": 35}
+    outcome, cleaner, create, updates = run_resumed_pipeline(
+        {**_resumed_report(), "domain_hypothesis": "unknown", "domain_confidence_score": 30},
+        first_llm_payload=first,
+        answer={"pause_type": "domain_pause", "option_id": "confirm"},
+    )
+
+    assert not isinstance(outcome, Exception), outcome
+    assert create.call_count == 2
+    pause_writes = [u for u in updates if u.get("status") == "domain_pause"]
+    assert len(pause_writes) == 1
+    stored = pause_writes[0]["pause_data"]
+    assert stored["type"] == "domain_confirmation_required"
+    assert stored["domain_hypothesis"] == "unknown"
+    assert stored["domain_confidence_score"] == 35
+    assert [option["id"] for option in stored["options"]] == ["confirm", "correct"]
+
+    cleaner.assert_awaited_once()
+    profile = cleaner.await_args.args[0]["profile_report"]
+    assert profile["domain_hypothesis"] == "unknown"
+    assert profile["domain_confidence_score"] == 35
+    assert profile["domain_resolution"]["source"] == "user_confirmed"

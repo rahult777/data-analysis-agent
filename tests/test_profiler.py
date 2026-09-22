@@ -25,7 +25,9 @@ import pandas as pd
 import pytest
 
 from backend.agents.profiler import (
+    DOMAIN_CONFIDENCE_THRESHOLD,
     apply_computed_column_stats,
+    apply_confidence_gate,
     apply_domain_resolution,
     build_domain_resolution,
     build_profiler_message,
@@ -328,6 +330,7 @@ def _bad_iris_profile_report() -> dict:
     setosa block — plus deliberately wrong dtype/missing_count values."""
     return {
         "domain_hypothesis": "Botany — iris flower measurements",
+        "domain_confidence_score": 97,
         "column_profiles": [
             {
                 "column_name": "sepal_length",
@@ -879,3 +882,167 @@ def test_profiler_node_without_pause_saves_no_domain_resolution(ambiguous_df: pd
     assert "domain_resolution" not in saved[0]
     assert saved[0]["domain_hypothesis"] == "education"
     assert saved[0]["domain_confidence_score"] == 91
+
+
+# ---------------------------------------------------------------------------
+# Group 12 — the <80 domain-confidence gate enforced in Python (Build F2)
+# ---------------------------------------------------------------------------
+
+FIRST_RUN_STATE = {"analysis_id": "test-analysis-id", "stored_filename": "ambiguous_domain.csv", "context": None}
+
+
+def _first_run_state() -> dict:
+    return copy.deepcopy(FIRST_RUN_STATE)
+
+
+def test_apply_confidence_gate_converts_sub_80_report_to_standard_pause() -> None:
+    report = _ambiguous_profile_report("operational performance tracking", 35)
+    report["domain_supporting_signals"] = ["period index 1-8", "generic metric columns"]
+
+    pause = apply_confidence_gate(report)
+
+    assert pause == {
+        "type": "domain_confirmation_required",
+        "domain_hypothesis": "operational performance tracking",
+        "domain_confidence_score": 35,
+        "supporting_signals": ["period index 1-8", "generic metric columns"],
+        "options": [
+            {
+                "id": "confirm",
+                "label": "Yes, this is operational performance tracking. Proceed.",
+                "action": "proceed_with_hypothesis",
+            },
+            {
+                "id": "correct",
+                "label": "No, the correct domain is something else.",
+                "action": "request_user_specified_domain",
+            },
+        ],
+    }
+    # The synthesized pause is a valid question for F1's resume path.
+    assert build_domain_resolution(pause, CONFIRM)["domain"] == "operational performance tracking"
+
+
+@pytest.mark.parametrize(
+    "score, pauses",
+    [(80, False), (91, False), (79, True), (79.5, True), (0, True)],
+    ids=["80-proceeds", "91-proceeds", "79-pauses", "79.5-pauses", "0-pauses"],
+)
+def test_apply_confidence_gate_threshold_boundary(score, pauses: bool) -> None:
+    report = _ambiguous_profile_report("education", score)
+    result = apply_confidence_gate(report)
+    if pauses:
+        assert result["type"] == "domain_confirmation_required"
+        assert result["domain_confidence_score"] == score
+    else:
+        assert result is report
+        assert result == _ambiguous_profile_report("education", score)
+    assert DOMAIN_CONFIDENCE_THRESHOLD == 80
+
+
+def test_apply_confidence_gate_passes_model_emitted_pause_through_untouched() -> None:
+    pause = copy.deepcopy(AMBIGUOUS_PAUSE)
+    assert apply_confidence_gate(pause) is pause
+    assert pause == AMBIGUOUS_PAUSE
+
+
+def test_apply_confidence_gate_missing_signals_become_empty_list() -> None:
+    report = _ambiguous_profile_report("education", 35)
+    del report["domain_supporting_signals"]
+    assert apply_confidence_gate(report)["supporting_signals"] == []
+
+
+@pytest.mark.parametrize(
+    "score",
+    ["missing", None, True, "35", float("nan"), float("inf")],
+    ids=["missing", "none", "bool", "string", "nan", "inf"],
+)
+def test_apply_confidence_gate_rejects_unusable_score(score) -> None:
+    report = _ambiguous_profile_report("education", 35)
+    if score == "missing":
+        del report["domain_confidence_score"]
+    else:
+        report["domain_confidence_score"] = score
+    with pytest.raises(ValueError, match="no usable domain_confidence_score"):
+        apply_confidence_gate(report)
+
+
+@pytest.mark.parametrize("hypothesis", ["", "   ", None], ids=["empty", "blank", "none"])
+def test_apply_confidence_gate_rejects_sub_80_report_with_no_hypothesis(hypothesis) -> None:
+    report = _ambiguous_profile_report("education", 35)
+    report["domain_hypothesis"] = hypothesis
+    with pytest.raises(ValueError, match="no domain_hypothesis to confirm"):
+        apply_confidence_gate(report)
+
+
+def test_profiler_node_first_run_sub_80_report_pauses_without_saving_a_profile(
+    ambiguous_df: pd.DataFrame,
+) -> None:
+    llm_output = _ambiguous_profile_report("operational performance tracking", 35)
+    result, captured, _ = _run_profiler_node(ambiguous_df, _first_run_state(), llm_output)
+
+    assert result["domain_pause_data"] == apply_confidence_gate(
+        _ambiguous_profile_report("operational performance tracking", 35)
+    )
+    assert result["domain_confirmed"] is False
+    assert result.get("profile_report") is None
+    assert not any("profile_report" in payload for payload in captured)
+
+
+def test_profiler_node_first_run_unusable_score_is_system_error(ambiguous_df: pd.DataFrame) -> None:
+    llm_output = _ambiguous_profile_report("education", 35)
+    del llm_output["domain_confidence_score"]
+    result, captured, _ = _run_profiler_node(ambiguous_df, _first_run_state(), llm_output)
+
+    assert isinstance(result, ValueError)
+    assert not any("profile_report" in payload for payload in captured)
+    assert captured[-1]["status"] == "error"
+    assert captured[-1]["error_message"].startswith("SYSTEM_ERROR: ProfileReport has no usable")
+
+
+@pytest.mark.parametrize("answer", [CONFIRM, CORRECT], ids=["confirm", "correct"])
+def test_profiler_node_resume_at_35_saves_profile_and_never_regates(
+    ambiguous_df: pd.DataFrame, answer: dict
+) -> None:
+    """Core expected behavior, not an edge case: a settled domain keeps a low score."""
+    state = _resume_state(answer)
+    state["answered_domain_pause"]["domain_confidence_score"] = 35
+    llm_output = _ambiguous_profile_report("model drifted domain", 35)
+    result, captured, _ = _run_profiler_node(ambiguous_df, state, llm_output)
+
+    assert not isinstance(result, Exception), result
+    saved = [payload["profile_report"] for payload in captured if "profile_report" in payload]
+    assert len(saved) == 1
+    assert saved[0]["domain_confidence_score"] == 35
+    assert result["domain_pause_data"] is None
+    assert result["domain_confirmed"] is True
+
+
+def test_profiler_node_unknown_domain_pauses_then_confirm_settles_unknown(ambiguous_df: pd.DataFrame) -> None:
+    """Option (i): 'unknown' goes through the same confirm/correct mechanism, text unchanged."""
+    first, _, _ = _run_profiler_node(ambiguous_df, _first_run_state(), _ambiguous_profile_report("unknown", 35))
+    pause = first["domain_pause_data"]
+    assert pause["domain_hypothesis"] == "unknown"
+    assert pause["domain_confidence_score"] == 35
+    assert [option["id"] for option in pause["options"]] == ["confirm", "correct"]
+
+    state = {**_first_run_state(), "domain_pause_data": None,
+             "answered_domain_pause": pause, "user_pause_response": CONFIRM}
+    resumed, captured, create = _run_profiler_node(ambiguous_df, state, _ambiguous_profile_report("unknown", 30))
+
+    assert json.loads(create.call_args.kwargs["messages"][0]["content"])["domain_resolution"]["domain"] == "unknown"
+    saved = [payload["profile_report"] for payload in captured if "profile_report" in payload]
+    assert len(saved) == 1
+    assert saved[0]["domain_hypothesis"] == "unknown"
+    assert saved[0]["domain_confidence_score"] == 35
+    assert saved[0]["domain_resolution"]["source"] == "user_confirmed"
+    assert saved[0]["domain_resolution"]["original_confidence_score"] == 35
+    assert resumed["domain_pause_data"] is None
+
+
+def test_apply_domain_resolution_confirm_restores_a_decimal_pause_score() -> None:
+    """Code Review (Build F2): the gate accepts 79.5, so confirm must keep 79.5, never the resume score."""
+    pause = apply_confidence_gate(_ambiguous_profile_report("education", 79.5))
+    report = _ambiguous_profile_report("education", 92)
+    apply_domain_resolution(report, build_domain_resolution(pause, CONFIRM))
+    assert report["domain_confidence_score"] == 79.5

@@ -262,9 +262,51 @@ def apply_domain_resolution(profile_report: dict, domain_resolution: dict) -> No
     """
     profile_report["domain_hypothesis"] = domain_resolution["domain"]
     score = domain_resolution.get("original_confidence_score")
-    if domain_resolution["source"] == "user_confirmed" and isinstance(score, int):
+    if (
+        domain_resolution["source"] == "user_confirmed"
+        and isinstance(score, (int, float))
+        and not isinstance(score, bool)
+    ):
         profile_report["domain_confidence_score"] = score
     profile_report["domain_resolution"] = domain_resolution
+
+
+DOMAIN_CONFIDENCE_THRESHOLD = 80  # profiler_system.md Step 2 / Section 8
+
+
+def apply_confidence_gate(parsed: dict) -> dict:
+    """Backstop for the <80 domain-confidence gate on a first (non-resume) call.
+
+    The prompt tells the model to self-gate; this converts a full ProfileReport
+    that arrives below the threshold anyway into the standard domain pause.
+    Never call it on a resume: a settled domain keeps its honest score and is
+    never re-gated.
+    """
+    if parsed.get("type") == "domain_confirmation_required":
+        return parsed
+    score = parsed.get("domain_confidence_score")
+    if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
+        raise ValueError(f"ProfileReport has no usable domain_confidence_score: {score!r}")
+    if score >= DOMAIN_CONFIDENCE_THRESHOLD:
+        return parsed
+    hypothesis = parsed.get("domain_hypothesis")
+    if not isinstance(hypothesis, str) or not hypothesis.strip():
+        raise ValueError("ProfileReport scored below the confidence gate with no domain_hypothesis to confirm.")
+    signals = parsed.get("domain_supporting_signals")
+    logger.warning(
+        "Profiler returned a full ProfileReport at domain_confidence_score %s (< %d); converted to a domain pause.",
+        score, DOMAIN_CONFIDENCE_THRESHOLD,
+    )
+    return {
+        "type": "domain_confirmation_required",
+        "domain_hypothesis": hypothesis,
+        "domain_confidence_score": score,
+        "supporting_signals": signals if isinstance(signals, list) else [],
+        "options": [
+            {"id": "confirm", "label": f"Yes, this is {hypothesis}. Proceed.", "action": "proceed_with_hypothesis"},
+            {"id": "correct", "label": "No, the correct domain is something else.", "action": "request_user_specified_domain"},
+        ],
+    }
 
 
 def parse_json_response(text: str) -> dict:
@@ -317,6 +359,8 @@ async def profiler_node(state: PipelineState) -> PipelineState:
         )
 
         parsed = parse_json_response(response.content[0].text)
+        if domain_resolution is None:
+            parsed = apply_confidence_gate(parsed)
 
         if parsed.get("type") == "domain_confirmation_required":
             if domain_resolution is not None:

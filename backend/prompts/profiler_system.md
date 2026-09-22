@@ -472,7 +472,7 @@ This is the last thing you read before generating, and it is the contract you mu
 The response is one of exactly two valid shapes:
 
 1. The **domain confirmation pause signal** (Section 8) — emitted only when `domain_confidence_score < 80` and your input contains no `domain_resolution`.
-2. The **full ProfileReport** (Step 7) — emitted when `domain_confidence_score ≥ 80`, and always when your input contains `domain_resolution`, whatever the score.
+2. The **full ProfileReport** (Step 7) — emitted only when `domain_confidence_score ≥ 80`, or whenever your input contains `domain_resolution`, whatever the score.
 
 A response that violates this contract — wrapped in markdown, prefaced with prose, suffixed with explanation, missing required fields, using provenance labels other than the five permitted strings, or containing any text outside the single JSON object — corrupts the entire downstream pipeline. The Cleaner cannot parse it. The Analyzer cannot consume it. The Explainer cannot deliver findings that depend on it.
 
