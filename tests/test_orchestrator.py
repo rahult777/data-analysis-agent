@@ -6,7 +6,11 @@ Unit tests cover routing logic and initial state construction.
 
 import asyncio
 import copy
+import json
+import pathlib
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pandas as pd
 
 import pytest
 from langchain_core.callbacks import BaseCallbackHandler
@@ -41,6 +45,7 @@ def test_build_initial_state_structure():
     assert state["domain_confirmed"] is False
     assert state["domain_confirmed"] is not None
     assert state["domain_pause_data"] is None
+    assert "answered_domain_pause" in state and state["answered_domain_pause"] is None
     assert state["user_pause_response"] is None
     assert state["missing_value_pause_data"] is None
     assert state["outlier_pause_data"] is None
@@ -75,13 +80,14 @@ def test_route_after_profiler_normal_second_run():
     assert route_after_profiler(state) == "clear_and_proceed"
 
 
-def test_route_after_profiler_edge_case_repeat():
-    """Edge case: user responded but profiler still returned domain_confirmation_required."""
+def test_route_after_profiler_edge_case_repeat_raises():
+    """User responded but the profiler still paused: raise — never proceed without a profile."""
     state = {
         "domain_pause_data": {"type": "domain_confirmation_required"},
-        "user_pause_response": {"confirmed_domain": "healthcare"},
+        "user_pause_response": {"pause_type": "domain_pause", "option_id": "confirm"},
     }
-    assert route_after_profiler(state) == "clear_and_proceed"
+    with pytest.raises(RuntimeError, match="without a profile"):
+        route_after_profiler(state)
 
 
 def test_route_after_cleaner_no_pause():
@@ -180,6 +186,17 @@ def test_domain_pause_wait_writes_status_and_pause_data_in_one_update():
     assert result["domain_pause_data"] is None
 
 
+def test_domain_pause_wait_carries_the_answered_question_forward():
+    """/resume clears the DB copy, so the answered question must survive in state."""
+    result, _ = run_wait_node(
+        domain_pause_wait_node,
+        {"analysis_id": "test-id", "domain_pause_data": DOMAIN_PAUSE_DATA},
+    )
+    assert result["answered_domain_pause"] == DOMAIN_PAUSE_DATA
+    assert result["domain_pause_data"] is None
+    assert result["user_pause_response"] == {"pause_type": "x"}
+
+
 @pytest.mark.parametrize(
     "state_key, pause_data, status",
     [
@@ -236,6 +253,102 @@ def test_failed_pause_write_surfaces_through_run_pipeline_system_error():
     assert updates[0]["pause_data"] == DOMAIN_PAUSE_DATA
     assert updates[1]["status"] == "error"
     assert updates[1]["error_message"] == "SYSTEM_ERROR: db write failed"
+
+
+# ---------------------------------------------------------------------------
+# Graph-level domain resume — real profiler_node, mocked LLM and services (Build F1)
+# ---------------------------------------------------------------------------
+
+FIXTURES_DIR = pathlib.Path(__file__).parent / "fixtures"
+CORRECT_ANSWER = {
+    "pause_type": "domain_pause",
+    "option_id": "correct",
+    "corrected_domain": "wholesale logistics",
+}
+
+
+def _llm_reply(payload: dict) -> MagicMock:
+    reply = MagicMock()
+    reply.content = [MagicMock(text=json.dumps(payload))]
+    return reply
+
+
+def _resumed_report() -> dict:
+    return {
+        "column_profiles": [],
+        "domain_hypothesis": "model drifted domain",
+        "domain_supporting_signals": ["s"],
+        "domain_confidence_score": 55,
+        "provenance_hypothesis": "manual entry",
+        "provenance_supporting_signals": ["mixed casing"],
+        "top_3_concerns": [{"issue": "c", "affected_columns": [], "why_it_matters": "w"}],
+        "top_3_patterns": [{"what_was_noticed": "p", "why_its_interesting": "i"}],
+    }
+
+
+def run_resumed_pipeline(second_llm_payload: dict) -> tuple:
+    """Pause on the first Profiler call, answer 'correct', then return the second call's payload.
+
+    Returns (raised exception or final state, Cleaner mock, Profiler LLM mock, orchestrator updates).
+    """
+    orchestrator_client, updates = make_orchestrator_supabase_mock()
+    # LangGraph 0.2.0 rejects a node update that writes no keys.
+    cleaner = AsyncMock(side_effect=lambda state: {"error_message": None})
+    with (
+        patch("backend.agents.profiler.client") as llm,
+        patch("backend.agents.profiler.get_supabase_client"),
+        patch("backend.agents.profiler.create_tracer"),
+        patch(
+            "backend.agents.profiler.load_dataframe",
+            new=AsyncMock(return_value=pd.read_csv(FIXTURES_DIR / "ambiguous_domain.csv")),
+        ),
+        patch("backend.agents.orchestrator.get_supabase_client", return_value=orchestrator_client),
+        patch("backend.agents.orchestrator.create_tracer", return_value=BaseCallbackHandler()),
+        patch("backend.agents.orchestrator.check_for_pause_response", new=AsyncMock(return_value=CORRECT_ANSWER)),
+        patch("backend.agents.orchestrator.asyncio.sleep", new=AsyncMock()),
+        patch("backend.agents.orchestrator.cleaner_node", new=cleaner),
+        patch("backend.agents.orchestrator.analyzer_node", new=AsyncMock(return_value={"error_message": None})),
+        patch("backend.agents.orchestrator.explainer_node", new=AsyncMock(return_value={"error_message": None})),
+    ):
+        llm.messages.create.side_effect = [_llm_reply(DOMAIN_PAUSE_DATA), _llm_reply(second_llm_payload)]
+        initial_state = asyncio.run(build_initial_state("test-id", "ambiguous_domain.csv", None, None))
+        try:
+            outcome = asyncio.run(run_pipeline(initial_state))
+        except Exception as exc:
+            outcome = exc
+    return outcome, cleaner, llm.messages.create, updates
+
+
+def test_run_pipeline_domain_resume_hands_cleaner_a_settled_profile():
+    """End to end through the graph: the Cleaner gets a real profile with the user's domain."""
+    outcome, cleaner, create, updates = run_resumed_pipeline(_resumed_report())
+
+    assert not isinstance(outcome, Exception), outcome
+    assert create.call_count == 2
+    resume_message = json.loads(create.call_args_list[1].kwargs["messages"][0]["content"])
+    assert resume_message["domain_resolution"]["domain"] == "wholesale logistics"
+    assert "domain_resolution" not in json.loads(create.call_args_list[0].kwargs["messages"][0]["content"])
+
+    cleaner.assert_awaited_once()
+    cleaner_state = cleaner.await_args.args[0]
+    assert cleaner_state["profile_report"] is not None
+    assert cleaner_state["profile_report"]["domain_hypothesis"] == "wholesale logistics"
+    assert cleaner_state["profile_report"]["domain_resolution"]["source"] == "user_corrected"
+    assert cleaner_state["profiler_domain_hypothesis"] == "wholesale logistics"
+    assert cleaner_state["profiler_provenance_hypothesis"] == "manual entry"
+    assert cleaner_state["profiler_top_3_concerns"]
+    assert cleaner_state["user_pause_response"] is None
+    assert updates[0]["status"] == "domain_pause"
+
+
+def test_run_pipeline_domain_resume_that_repauses_errors_without_reaching_cleaner():
+    outcome, cleaner, create, updates = run_resumed_pipeline(DOMAIN_PAUSE_DATA)
+
+    assert isinstance(outcome, ValueError)
+    assert create.call_count == 2
+    cleaner.assert_not_awaited()
+    assert [u["status"] for u in updates] == ["domain_pause", "error"]
+    assert "domain_pause" not in [u["status"] for u in updates[1:]]
 
 
 @pytest.mark.skip(reason="requires live LangGraph execution with real Supabase and file uploads")

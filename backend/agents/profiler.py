@@ -34,6 +34,7 @@ class PipelineState(TypedDict):
     profile_report: Optional[dict]
     domain_confirmed: bool
     domain_pause_data: Optional[dict]
+    answered_domain_pause: Optional[dict]
     cleaning_report: Optional[dict]
     analysis_report: Optional[dict]
     insight_report: Optional[dict]
@@ -146,7 +147,38 @@ def compute_column_stats(df: pd.DataFrame, columns: list[str]) -> dict[str, dict
     return stats
 
 
-def build_profiler_message(df: pd.DataFrame, context: Optional[str]) -> str:
+def build_domain_resolution(pause_data: Optional[dict], response: Optional[dict]) -> Optional[dict]:
+    """The settled domain from a domain-pause answer; None when this is not a resume."""
+    if not isinstance(response, dict) or response.get("pause_type") != "domain_pause":
+        return None
+    question = pause_data if isinstance(pause_data, dict) else {}
+    original = question.get("domain_hypothesis")
+    option_id = response.get("option_id")
+    if option_id == "confirm":
+        if not isinstance(original, str) or not original.strip():
+            raise ValueError("Domain confirmed, but the paused question recorded no domain_hypothesis.")
+        source, domain = "user_confirmed", original.strip()
+    elif option_id == "correct":
+        corrected = response.get("corrected_domain")
+        if not isinstance(corrected, str) or not corrected.strip():
+            raise ValueError("Domain correction received with an empty corrected_domain.")
+        source, domain = "user_corrected", corrected.strip()
+    else:
+        raise ValueError(f"Unrecognized domain-pause option_id: {option_id!r}")
+    return {
+        "source": source,
+        "domain": domain,
+        "original_hypothesis": original,
+        "original_confidence_score": question.get("domain_confidence_score"),
+        "original_supporting_signals": question.get("supporting_signals"),
+    }
+
+
+def build_profiler_message(
+    df: pd.DataFrame,
+    context: Optional[str],
+    domain_resolution: Optional[dict] = None,
+) -> str:
     # shared pandas operations will be extracted to data_tools.py in a later task
     total_cols = len(df.columns)
     columns = df.columns[:50].tolist()
@@ -185,6 +217,8 @@ def build_profiler_message(df: pd.DataFrame, context: Optional[str]) -> str:
         )
     if context:
         message_data["user_context"] = context
+    if domain_resolution is not None:
+        message_data["domain_resolution"] = domain_resolution
 
     return json.dumps(message_data, default=str)
 
@@ -217,6 +251,20 @@ def apply_computed_column_stats(
     missing = sorted(set(stats_by_name) - applied)
     if missing:
         logger.warning("ProfileReport has no column_profiles entry for: %s", missing)
+
+
+def apply_domain_resolution(profile_report: dict, domain_resolution: dict) -> None:
+    """Make the user's settled domain authoritative in the ProfileReport.
+
+    The score is never raised because the user answered: on confirm the pause
+    score is kept (same hypothesis, same evidence); on correct the model's
+    evidential score for the user's domain stands.
+    """
+    profile_report["domain_hypothesis"] = domain_resolution["domain"]
+    score = domain_resolution.get("original_confidence_score")
+    if domain_resolution["source"] == "user_confirmed" and isinstance(score, int):
+        profile_report["domain_confidence_score"] = score
+    profile_report["domain_resolution"] = domain_resolution
 
 
 def parse_json_response(text: str) -> dict:
@@ -254,7 +302,10 @@ async def profiler_node(state: PipelineState) -> PipelineState:
 
         df = await load_dataframe(state["stored_filename"])
         system_prompt = load_system_prompt("profiler")
-        user_message = build_profiler_message(df, state.get("context"))
+        domain_resolution = build_domain_resolution(
+            state.get("answered_domain_pause"), state.get("user_pause_response")
+        )
+        user_message = build_profiler_message(df, state.get("context"), domain_resolution)
 
         response = await asyncio.to_thread(
             lambda: client.messages.create(
@@ -268,6 +319,10 @@ async def profiler_node(state: PipelineState) -> PipelineState:
         parsed = parse_json_response(response.content[0].text)
 
         if parsed.get("type") == "domain_confirmation_required":
+            if domain_resolution is not None:
+                raise ValueError(
+                    "Profiler asked for domain confirmation again after the user answered."
+                )
             state["domain_pause_data"] = parsed
             state["domain_confirmed"] = False
             await asyncio.to_thread(
@@ -281,6 +336,8 @@ async def profiler_node(state: PipelineState) -> PipelineState:
 
         message_inputs = json.loads(user_message)
         apply_computed_column_stats(parsed, message_inputs["computed_column_stats"], message_inputs["column_info"])
+        if domain_resolution is not None:
+            apply_domain_resolution(parsed, domain_resolution)
 
         await asyncio.to_thread(
             lambda: get_supabase_client()

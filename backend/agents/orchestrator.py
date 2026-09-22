@@ -42,6 +42,7 @@ async def build_initial_state(
         profile_report=None,
         domain_confirmed=False,
         domain_pause_data=None,
+        answered_domain_pause=None,
         cleaning_report=None,
         analysis_report=None,
         insight_report=None,
@@ -116,6 +117,9 @@ async def domain_pause_wait_node(state: PipelineState) -> dict:
 
     return {
         "user_pause_response": response,
+        # /resume has already cleared the DB copy; the Profiler's resume call
+        # needs the question that was answered.
+        "answered_domain_pause": state.get("domain_pause_data"),
         "domain_pause_data": None,
     }
 
@@ -123,9 +127,9 @@ async def domain_pause_wait_node(state: PipelineState) -> dict:
 async def clear_user_pause_response_node(state: PipelineState) -> dict:
     """Clear user_pause_response so it never reaches the cleaner's LLM context.
 
-    Handles both the normal second-profiler-run path (profiler succeeded but
-    user_pause_response is still in state) and the edge-case repeat path
-    (profiler returned domain_confirmation_required again despite user response).
+    Handles the normal second-profiler-run path: the profiler succeeded but
+    user_pause_response is still in state. (A repeat domain pause after the
+    user answered no longer routes here — see route_after_profiler case (b).)
     """
     return {"user_pause_response": None}
 
@@ -187,7 +191,9 @@ def route_after_profiler(state: PipelineState) -> str:
     """Route from profiler based on all four possible pause-state combinations.
 
     (a) domain_pause_data set  + user_pause_response not set  → domain_pause_wait
-    (b) domain_pause_data set  + user_pause_response set      → clear_and_proceed
+    (b) domain_pause_data set  + user_pause_response set      → raise
+        profiler_node already raises when its resume call re-pauses; this is
+        defense in depth, since proceeding without a profile is always wrong.
     (c) domain_pause_data None + user_pause_response set      → clear_and_proceed
         CRITICAL: normal second-profiler-run path — profiler succeeded but
         user_pause_response is still in state and must be cleared before cleaner.
@@ -199,7 +205,10 @@ def route_after_profiler(state: PipelineState) -> str:
     if domain_pause_data is not None and user_pause_response is None:
         return "domain_pause_wait"
     if domain_pause_data is not None and user_pause_response is not None:
-        return "clear_and_proceed"
+        raise RuntimeError(
+            "Profiler requested domain confirmation again after the user answered; "
+            "refusing to continue without a profile."
+        )
     if domain_pause_data is None and user_pause_response is not None:
         return "clear_and_proceed"
     return "cleaner"

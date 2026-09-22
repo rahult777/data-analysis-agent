@@ -26,6 +26,8 @@ import pytest
 
 from backend.agents.profiler import (
     apply_computed_column_stats,
+    apply_domain_resolution,
+    build_domain_resolution,
     build_profiler_message,
     compute_column_stats,
     load_dataframe,
@@ -631,3 +633,249 @@ def test_build_profiler_message_succeeds_on_date_header_upload(staged_upload) ->
 
     assert list(parsed["column_info"].keys()) == DATE_HEADER_NAMES
     assert list(parsed["computed_column_stats"].keys()) == DATE_HEADER_NAMES
+
+
+# ---------------------------------------------------------------------------
+# Group 11 — consuming a domain-pause answer (Build F1)
+# ---------------------------------------------------------------------------
+
+AMBIGUOUS_PAUSE = {
+    "type": "domain_confirmation_required",
+    "domain_hypothesis": "operational performance tracking",
+    "domain_confidence_score": 41,
+    "supporting_signals": ["generic metric columns x1-x3", "period index 1-8"],
+    "options": [
+        {"id": "confirm", "label": "Yes. Proceed.", "action": "proceed_with_hypothesis"},
+        {"id": "correct", "label": "No.", "action": "request_user_specified_domain"},
+    ],
+}
+CONFIRM = {"pause_type": "domain_pause", "option_id": "confirm"}
+CORRECT = {
+    "pause_type": "domain_pause",
+    "option_id": "correct",
+    "corrected_domain": "  school classroom assessment records  ",
+}
+# Every ProfileReport key the Cleaner, Analyzer or Explainer reads (errors.md / decisions.md F1).
+DOWNSTREAM_KEYS = (
+    "domain_hypothesis",
+    "domain_supporting_signals",
+    "domain_confidence_score",
+    "provenance_hypothesis",
+    "provenance_supporting_signals",
+    "top_3_concerns",
+    "top_3_patterns",
+)
+
+
+@pytest.fixture
+def ambiguous_df() -> pd.DataFrame:
+    return pd.read_csv(FIXTURES_DIR / "ambiguous_domain.csv")
+
+
+def _ambiguous_profile_report(domain: str, score: int) -> dict:
+    """A full ProfileReport as the LLM might emit it on the resume call."""
+    return {
+        "column_profiles": [
+            {"column_name": name}
+            for name in ["ref", "period", "grp", "x1", "x2", "x3", "cat"]
+        ],
+        "duplicate_row_count": 0,
+        "data_quality_score": 0.97,
+        "domain_hypothesis": domain,
+        "domain_supporting_signals": ["period index"],
+        "domain_confidence_score": score,
+        "provenance_hypothesis": "system export",
+        "provenance_supporting_signals": ["consistent R### identifiers"],
+        "semantically_categorical_columns": [],
+        "co_emptiness_patterns": [],
+        "co_completeness_patterns": [],
+        "default_value_frequencies": [],
+        "potential_merge_artifacts": [],
+        "capability_assessment": {
+            "can_reliably_answer": [],
+            "can_partially_answer": [],
+            "cannot_answer": [],
+            "user_question_classification": None,
+        },
+        "top_3_concerns": [{"issue": "c", "affected_columns": ["x1"], "why_it_matters": "w"}] * 3,
+        "top_3_patterns": [{"what_was_noticed": "p", "why_its_interesting": "i"}] * 3,
+    }
+
+
+def _run_profiler_node(df: pd.DataFrame, state: dict, llm_payload: dict) -> tuple:
+    """Run profiler_node with every service mocked; return (result, saved payloads, llm mock)."""
+    captured: list[dict] = []
+    response = MagicMock()
+    response.content = [MagicMock(text=json.dumps(llm_payload))]
+    with (
+        patch("backend.agents.profiler.client") as mock_client,
+        patch("backend.agents.profiler.get_supabase_client") as mock_get_supabase_client,
+        patch("backend.agents.profiler.create_tracer"),
+        patch("backend.agents.profiler.load_dataframe", return_value=df),
+    ):
+        mock_client.messages.create.return_value = response
+        mock_update = mock_get_supabase_client.return_value.table.return_value.update
+        mock_update.side_effect = lambda payload: (captured.append(copy.deepcopy(payload)), DEFAULT)[1]
+        try:
+            result = asyncio.run(profiler_node(state))
+        except Exception as exc:  # returned so the caller can also inspect what was written
+            result = exc
+    return result, captured, mock_client.messages.create
+
+
+def _resume_state(response: dict) -> dict:
+    return {
+        "analysis_id": "test-analysis-id",
+        "stored_filename": "ambiguous_domain.csv",
+        "context": None,
+        "domain_pause_data": None,
+        "answered_domain_pause": copy.deepcopy(AMBIGUOUS_PAUSE),
+        "user_pause_response": response,
+    }
+
+
+def test_build_profiler_message_without_resolution_is_unchanged(ambiguous_df: pd.DataFrame) -> None:
+    """No resume: exactly the pre-F1 key set, and identical to passing None explicitly."""
+    default = build_profiler_message(ambiguous_df, None)
+    assert set(json.loads(default)) == {
+        "row_count", "column_count", "columns_included",
+        "first_5_rows", "column_info", "computed_column_stats",
+    }
+    assert build_profiler_message(ambiguous_df, None, None) == default
+
+
+def test_build_profiler_message_with_resolution_adds_only_that_key(ambiguous_df: pd.DataFrame) -> None:
+    resolution = build_domain_resolution(AMBIGUOUS_PAUSE, CONFIRM)
+    plain = json.loads(build_profiler_message(ambiguous_df, "ctx"))
+    resumed = json.loads(build_profiler_message(ambiguous_df, "ctx", resolution))
+    assert resumed.pop("domain_resolution") == resolution
+    assert resumed == plain
+
+
+def test_build_domain_resolution_returns_none_when_not_resuming() -> None:
+    assert build_domain_resolution(AMBIGUOUS_PAUSE, None) is None
+    assert build_domain_resolution(
+        AMBIGUOUS_PAUSE, {"pause_type": "missing_value_pause", "option_id": "impute"}
+    ) is None
+
+
+def test_build_domain_resolution_confirm_uses_original_hypothesis() -> None:
+    assert build_domain_resolution(AMBIGUOUS_PAUSE, CONFIRM) == {
+        "source": "user_confirmed",
+        "domain": "operational performance tracking",
+        "original_hypothesis": "operational performance tracking",
+        "original_confidence_score": 41,
+        "original_supporting_signals": AMBIGUOUS_PAUSE["supporting_signals"],
+    }
+
+
+def test_build_domain_resolution_correct_uses_stripped_correction() -> None:
+    resolution = build_domain_resolution(AMBIGUOUS_PAUSE, CORRECT)
+    assert resolution["source"] == "user_corrected"
+    assert resolution["domain"] == "school classroom assessment records"
+    assert resolution["original_hypothesis"] == "operational performance tracking"
+
+
+@pytest.mark.parametrize(
+    "pause_data, response, match",
+    [
+        (None, CONFIRM, "no domain_hypothesis"),
+        ({**AMBIGUOUS_PAUSE, "domain_hypothesis": "  "}, CONFIRM, "no domain_hypothesis"),
+        (AMBIGUOUS_PAUSE, {**CORRECT, "corrected_domain": "   "}, "empty corrected_domain"),
+        (AMBIGUOUS_PAUSE, {"pause_type": "domain_pause", "option_id": "correct"}, "empty corrected_domain"),
+        (AMBIGUOUS_PAUSE, {"pause_type": "domain_pause", "option_id": "maybe"}, "Unrecognized"),
+        (AMBIGUOUS_PAUSE, {"pause_type": "domain_pause"}, "Unrecognized"),
+    ],
+    ids=["confirm-no-question", "confirm-blank-hypothesis", "correct-blank",
+         "correct-missing", "unknown-option", "missing-option"],
+)
+def test_build_domain_resolution_rejects_unusable_answers(pause_data, response, match) -> None:
+    with pytest.raises(ValueError, match=match):
+        build_domain_resolution(pause_data, response)
+
+
+def test_apply_domain_resolution_confirm_restores_original_score() -> None:
+    report = _ambiguous_profile_report("something the model drifted to", 88)
+    resolution = build_domain_resolution(AMBIGUOUS_PAUSE, CONFIRM)
+    apply_domain_resolution(report, resolution)
+    assert report["domain_hypothesis"] == "operational performance tracking"
+    assert report["domain_confidence_score"] == 41
+    assert report["domain_resolution"] == resolution
+
+
+def test_apply_domain_resolution_correct_keeps_model_evidence_score() -> None:
+    report = _ambiguous_profile_report("school classroom assessment", 57)
+    resolution = build_domain_resolution(AMBIGUOUS_PAUSE, CORRECT)
+    apply_domain_resolution(report, resolution)
+    assert report["domain_hypothesis"] == "school classroom assessment records"
+    assert report["domain_confidence_score"] == 57
+    assert report["domain_resolution"] == resolution
+
+
+@pytest.mark.parametrize(
+    "answer, expected_domain, expected_score",
+    [
+        (CONFIRM, "operational performance tracking", 41),
+        (CORRECT, "school classroom assessment records", 57),
+    ],
+    ids=["confirm", "correct"],
+)
+def test_profiler_node_resume_saves_settled_domain_with_provenance(
+    ambiguous_df: pd.DataFrame, answer: dict, expected_domain: str, expected_score: int
+) -> None:
+    """A resume sends the resolution, never re-pauses, and saves a complete profile."""
+    llm_output = _ambiguous_profile_report("model drifted domain", 57)
+    result, captured, create = _run_profiler_node(ambiguous_df, _resume_state(answer), llm_output)
+
+    sent = json.loads(create.call_args.kwargs["messages"][0]["content"])
+    assert sent["domain_resolution"]["domain"] == expected_domain
+
+    saved = [payload["profile_report"] for payload in captured if "profile_report" in payload]
+    assert len(saved) == 1
+    report = saved[0]
+    for key in DOWNSTREAM_KEYS:
+        assert report.get(key) is not None, key
+    assert report["domain_hypothesis"] == expected_domain
+    assert report["domain_confidence_score"] == expected_score
+    assert report["domain_resolution"]["domain"] == expected_domain
+
+    assert result["profile_report"] == report
+    assert result["domain_pause_data"] is None
+    assert result["profiler_domain_hypothesis"] == expected_domain
+    assert result["profiler_provenance_hypothesis"] == "system export"
+    assert result["profiler_top_3_concerns"] and result["profiler_top_3_patterns"]
+
+
+def test_profiler_node_resume_that_repauses_raises_instead_of_looping(ambiguous_df: pd.DataFrame) -> None:
+    state = _resume_state(CORRECT)
+    result, captured, _ = _run_profiler_node(ambiguous_df, state, AMBIGUOUS_PAUSE)
+
+    assert isinstance(result, ValueError)
+    assert "again after the user answered" in str(result)
+    assert not any("profile_report" in payload for payload in captured)
+    assert captured[-1]["status"] == "error"
+    assert captured[-1]["error_message"].startswith("SYSTEM_ERROR: Profiler asked")
+    assert state["domain_pause_data"] is None
+
+
+def test_profiler_node_first_run_pause_is_unchanged(ambiguous_df: pd.DataFrame) -> None:
+    state = {"analysis_id": "test-analysis-id", "stored_filename": "ambiguous_domain.csv", "context": None}
+    result, captured, create = _run_profiler_node(ambiguous_df, state, AMBIGUOUS_PAUSE)
+
+    assert "domain_resolution" not in json.loads(create.call_args.kwargs["messages"][0]["content"])
+    assert result["domain_pause_data"] == AMBIGUOUS_PAUSE
+    assert result["domain_confirmed"] is False
+    assert not any("profile_report" in payload for payload in captured)
+
+
+def test_profiler_node_without_pause_saves_no_domain_resolution(ambiguous_df: pd.DataFrame) -> None:
+    """Stored-shape stability: a run that never paused carries no new key."""
+    state = {"analysis_id": "test-analysis-id", "stored_filename": "ambiguous_domain.csv", "context": None}
+    llm_output = _ambiguous_profile_report("education", 91)
+    result, captured, _ = _run_profiler_node(ambiguous_df, state, llm_output)
+
+    saved = [payload["profile_report"] for payload in captured if "profile_report" in payload]
+    assert len(saved) == 1
+    assert "domain_resolution" not in saved[0]
+    assert saved[0]["domain_hypothesis"] == "education"
+    assert saved[0]["domain_confidence_score"] == 91

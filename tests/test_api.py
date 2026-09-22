@@ -828,3 +828,50 @@ def test_full_pipeline_upload_and_run() -> None:
 @pytest.mark.skip(reason="Requires live services")
 def test_question_endpoint_with_live_data() -> None:
     pass
+
+
+@pytest.mark.parametrize(
+    "corrected_domain, expected_status",
+    [
+        ("x" * 200, 200),
+        ("  " + "x" * 200 + "  ", 200),
+        ("x" * 201, 400),
+    ],
+    ids=["exactly-200", "200-after-strip", "201"],
+)
+def test_resume_corrected_domain_length_cap(corrected_domain: str, expected_status: int) -> None:
+    """corrected_domain is capped at 200 characters (after stripping) before any write."""
+    response, update = post_resume(
+        {"status": "domain_pause", "pause_data": DOMAIN_PAUSE_DATA},
+        {"pause_type": "domain_pause", "option_id": "correct", "corrected_domain": corrected_domain},
+    )
+    assert response.status_code == expected_status
+    if expected_status == 400:
+        assert "at most 200 characters" in response.json()["detail"]
+        update.assert_not_called()
+    else:
+        update.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "pause_data", [None, {"type": "domain_confirmation_required"}], ids=["null", "no-options"]
+)
+@pytest.mark.parametrize(
+    "corrected_domain, expected_status",
+    [("wholesale logistics", 200), ("   ", 400), ("x" * 201, 400)],
+    ids=["valid", "blank", "over-cap"],
+)
+def test_resume_escape_hatch_still_checks_corrected_domain(
+    pause_data, corrected_domain: str, expected_status: int
+) -> None:
+    """With no stored option ids to check, a 'correct' answer's corrected_domain is still validated."""
+    response, update = post_resume(
+        {"status": "domain_pause", "pause_data": pause_data},
+        {"pause_type": "domain_pause", "option_id": "correct", "corrected_domain": corrected_domain},
+    )
+    assert response.status_code == expected_status
+    if expected_status == 400:
+        assert "corrected_domain" in response.json()["detail"]
+        update.assert_not_called()
+    else:
+        update.assert_called_once()

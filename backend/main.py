@@ -61,6 +61,8 @@ _AGENT_MAP: dict[str, Optional[str]] = {
 
 _PAUSE_STATUSES: tuple[str, ...] = ("domain_pause", "missing_value_pause", "outlier_pause")
 
+_MAX_CORRECTED_DOMAIN_LENGTH = 200
+
 
 def _error_category(error_message: Optional[str]) -> Optional[str]:
     """Reduce a stored error_message to its category for the public status route.
@@ -72,6 +74,30 @@ def _error_category(error_message: Optional[str]) -> Optional[str]:
     if error_message is None:
         return None
     return "USER_ERROR" if error_message.startswith("USER_ERROR") else "SYSTEM_ERROR"
+
+
+def _check_corrected_domain(response: dict) -> None:
+    """A 'correct' domain answer must carry a non-blank corrected_domain.
+
+    The correction enters the Profiler's LLM prompt and the publicly readable
+    profile_report, so it is also bounded here, at the boundary.
+    """
+    if response.get("option_id") != "correct":
+        return
+    corrected_domain = response.get("corrected_domain")
+    if not isinstance(corrected_domain, str) or not corrected_domain.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="response.corrected_domain is required when option_id is 'correct'.",
+        )
+    if len(corrected_domain.strip()) > _MAX_CORRECTED_DOMAIN_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "response.corrected_domain must be at most "
+                f"{_MAX_CORRECTED_DOMAIN_LENGTH} characters."
+            ),
+        )
 
 
 def _validate_pause_response(status: str, pause_data: Optional[dict], response: dict) -> None:
@@ -108,6 +134,10 @@ def _validate_pause_response(status: str, pause_data: Optional[dict], response: 
                 status_code=400,
                 detail=f"response.column_name must be '{stored_column}'.",
             )
+        # A correction can always be re-submitted valid, so checking it here
+        # cannot strand the analysis.
+        if status == "domain_pause":
+            _check_corrected_domain(response)
         logger.warning(
             "Resume for a %s with no stored option ids to validate against; "
             "option_id was not validated.",
@@ -120,14 +150,7 @@ def _validate_pause_response(status: str, pause_data: Optional[dict], response: 
             detail=f"response.option_id must be one of {option_ids}.",
         )
     if status == "domain_pause":
-        corrected_domain = response.get("corrected_domain")
-        if response.get("option_id") == "correct" and (
-            not isinstance(corrected_domain, str) or not corrected_domain.strip()
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail="response.corrected_domain is required when option_id is 'correct'.",
-            )
+        _check_corrected_domain(response)
     elif response.get("column_name") != pause_data.get("column_name"):
         raise HTTPException(
             status_code=400,
