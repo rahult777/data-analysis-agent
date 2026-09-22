@@ -1,4 +1,5 @@
 import type { Config } from "tailwindcss";
+import defaultTheme from "tailwindcss/defaultTheme";
 
 // globals.css defines every token as a complete oklch() color (some with
 // alpha), so the v3 channels + <alpha-value> pattern can't apply. Wrapping
@@ -17,6 +18,14 @@ const config: Config = {
   ],
   theme: {
     extend: {
+      // layout.tsx exposes DM Sans (body text, decisions.md 2026-05-16) as
+      // --font-sans via next/font. Its value holds only DM Sans and its
+      // metric-adjusted fallback, so v3's default stack stays as the final
+      // fallback. Instrument Serif (--font-display) is applied to headings by
+      // inline style and needs no mapping.
+      fontFamily: {
+        sans: ["var(--font-sans)", ...defaultTheme.fontFamily.sans],
+      },
       colors: {
         background: cssVarColor("background"),
         foreground: cssVarColor("foreground"),
