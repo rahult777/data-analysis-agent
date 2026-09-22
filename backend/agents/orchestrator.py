@@ -89,12 +89,14 @@ async def domain_pause_wait_node(state: PipelineState) -> dict:
 
     # Clear any leftover user_pause_response from a prior pause cycle before
     # polling — otherwise check_for_pause_response would read the stale value
-    # and return immediately with the wrong response.
+    # and return immediately with the wrong response. pause_data rides in the
+    # same update so the status never shows a pause without its question.
     await asyncio.to_thread(
         lambda: get_supabase_client()
         .table("analyses")
         .update({
             "status": "domain_pause",
+            "pause_data": state.get("domain_pause_data"),
             "user_pause_response": None,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         })
@@ -134,10 +136,13 @@ async def cleaner_pause_wait_node(state: PipelineState) -> dict:
 
     if state.get("missing_value_pause_data") is not None:
         status = "missing_value_pause"
+        pause_data = state["missing_value_pause_data"]
     elif state.get("outlier_pause_data") is not None:
         status = "outlier_pause"
+        pause_data = state["outlier_pause_data"]
     else:
         status = "missing_value_pause"
+        pause_data = None
         logger.warning(
             "cleaner_pause_wait_node: neither pause field set for analysis_id=%s, "
             "defaulting status to missing_value_pause",
@@ -151,6 +156,7 @@ async def cleaner_pause_wait_node(state: PipelineState) -> dict:
         .table("analyses")
         .update({
             "status": status,
+            "pause_data": pause_data,
             "user_pause_response": None,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         })

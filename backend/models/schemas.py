@@ -328,6 +328,9 @@ class StatusResponse(BaseModel):
     current_agent: str | None = None
     progress_pct: float | None = Field(default=None, ge=0.0, le=100.0)
     error_message: str | None = None
+    # The active pause question, raw LLM JSON passed through like the other
+    # agent-output fields (decisions.md 2026-06-04). Set only in pause statuses.
+    pause_data: dict | None = None
 
 
 class QuestionRequest(BaseModel):

@@ -16,6 +16,7 @@ from openpyxl import Workbook
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 from backend.main import app
+from backend.models.schemas import AnalysisStatus
 
 client = TestClient(app)
 
@@ -37,7 +38,12 @@ def make_supabase_mock(record: dict) -> MagicMock:
     execute_result = MagicMock()
     execute_result.data = [record]
     mock_client.table.return_value.select.return_value.eq.return_value.execute.return_value = execute_result
-    mock_client.table.return_value.update.return_value.eq.return_value.execute.return_value = execute_result
+    # The update builder is chainable across any number of .eq() / .is_() filters
+    # (resume's conditional write uses three), always ending in the same execute.
+    update_builder = mock_client.table.return_value.update.return_value
+    update_builder.eq.return_value = update_builder
+    update_builder.is_.return_value = update_builder
+    update_builder.execute.return_value = execute_result
     mock_client.table.return_value.insert.return_value.execute.return_value = execute_result
     return mock_client
 
@@ -151,6 +157,34 @@ def test_upload_header_only_xlsx_rejected() -> None:
 
 AID = "11111111-1111-4111-8111-111111111111"
 QID = "22222222-2222-4222-8222-222222222222"
+
+# Stored pause_data samples, in the raw LLM shapes (profiler_system.md §8,
+# cleaner_system.md §8.1-8.3), trimmed to the fields the API reads.
+DOMAIN_PAUSE_DATA = {
+    "type": "domain_confirmation_required",
+    "domain_hypothesis": "retail sales",
+    "domain_confidence_score": 62,
+    "supporting_signals": ["revenue column", "sales_rep column"],
+    "options": [
+        {"id": "confirm", "label": "Yes, this is retail sales. Proceed.", "action": "proceed_with_hypothesis"},
+        {"id": "correct", "label": "No, the correct domain is something else.", "action": "request_user_specified_domain"},
+    ],
+}
+MISSING_VALUE_PAUSE_DATA = {
+    "type": "missing_value_decision_required",
+    "column_name": "revenue",
+    "missing_pct": 35.0,
+    "missing_count": 70,
+    "total_rows": 200,
+    "options": [{"id": "impute"}, {"id": "exclude_column"}, {"id": "exclude_rows"}],
+}
+OUTLIER_PAUSE_DATA = {
+    "type": "outlier_decision_required",
+    "domain_context": "financial",
+    "column_name": "revenue",
+    "outlier_value": 750000,
+    "options": [{"id": "treat_as_valid"}, {"id": "flag_as_suspected_error"}],
+}
 
 
 def test_missing_session_header() -> None:
@@ -270,6 +304,51 @@ def test_status_error_message_is_category_only(stored: str | None, returned: str
         assert stored.split(":", 1)[1].strip() not in response.text
 
 
+@pytest.mark.parametrize(
+    "status, pause_data",
+    [
+        ("domain_pause", DOMAIN_PAUSE_DATA),
+        ("missing_value_pause", MISSING_VALUE_PAUSE_DATA),
+        ("outlier_pause", OUTLIER_PAUSE_DATA),
+    ],
+)
+def test_status_returns_pause_data_in_pause_states(status: str, pause_data: dict) -> None:
+    mock_client = make_supabase_mock(
+        {"id": AID, "status": status, "error_message": None, "pause_data": pause_data}
+    )
+    with patch("backend.main.get_supabase_client", return_value=mock_client):
+        response = client.get(f"/api/analysis/{AID}/status")
+    assert response.status_code == 200
+    assert response.json()["status"] == status
+    assert response.json()["pause_data"] == pause_data
+
+
+@pytest.mark.parametrize("status", ["profiling", "cleaning", "cleaned", "analyzing", "explaining", "complete", "error"])
+def test_status_hides_stale_pause_data_outside_pause_states(status: str) -> None:
+    """A stale stored pause_data is never returned once the status has left the pause."""
+    mock_client = make_supabase_mock(
+        {"id": AID, "status": status, "error_message": None, "pause_data": MISSING_VALUE_PAUSE_DATA}
+    )
+    with patch("backend.main.get_supabase_client", return_value=mock_client):
+        response = client.get(f"/api/analysis/{AID}/status")
+    assert response.status_code == 200
+    assert response.json()["pause_data"] is None
+
+
+def test_status_pause_data_same_for_owner_and_visitor() -> None:
+    """pause_data is descriptive content: the session-id header changes nothing."""
+    bodies = []
+    for headers in ({}, {"session-id": "wrong-session"}, {"session-id": "test-session"}):
+        mock_client = make_supabase_mock(
+            {"id": AID, "session_id": "test-session", "status": "domain_pause",
+             "error_message": None, "pause_data": DOMAIN_PAUSE_DATA}
+        )
+        with patch("backend.main.get_supabase_client", return_value=mock_client):
+            bodies.append(client.get(f"/api/analysis/{AID}/status", headers=headers).json())
+    assert bodies[0] == bodies[1] == bodies[2]
+    assert bodies[0]["pause_data"] == DOMAIN_PAUSE_DATA
+
+
 def test_status_not_found() -> None:
     """A well-formed but nonexistent analysis_id returns 404 from the status lookup."""
     mock_client = MagicMock()
@@ -313,17 +392,227 @@ def test_resume_valid_domain_pause() -> None:
             "id": "test-id",
             "session_id": "test-session",
             "status": "domain_pause",
-            "error_message": None,
+            "pause_data": DOMAIN_PAUSE_DATA,
         }
     )
     with patch("backend.main.get_supabase_client", return_value=mock_client):
         response = client.post(
             "/api/analysis/test-id/resume",
-            json={"response": {"decision": "confirm"}},
+            json={"response": {"pause_type": "domain_pause", "option_id": "confirm"}},
             headers={"session-id": "test-session"},
         )
     assert response.status_code == 200
     assert response.json()["status"] == "profiling"
+
+
+def post_resume(stored: dict, resume_body: dict) -> tuple:
+    """POST a resume against a mocked stored record; return (response, update mock)."""
+    mock_client = make_supabase_mock({"id": "test-id", "session_id": "test-session", **stored})
+    with patch("backend.main.get_supabase_client", return_value=mock_client):
+        response = client.post(
+            "/api/analysis/test-id/resume",
+            json={"response": resume_body},
+            headers={"session-id": "test-session"},
+        )
+    return response, mock_client.table.return_value.update
+
+
+@pytest.mark.parametrize(
+    "status, pause_data, resume_body, restore_status",
+    [
+        ("domain_pause", DOMAIN_PAUSE_DATA,
+         {"pause_type": "domain_pause", "option_id": "confirm"}, "profiling"),
+        ("domain_pause", DOMAIN_PAUSE_DATA,
+         {"pause_type": "domain_pause", "option_id": "correct", "corrected_domain": "wholesale logistics"},
+         "profiling"),
+        ("missing_value_pause", MISSING_VALUE_PAUSE_DATA,
+         {"pause_type": "missing_value_pause", "column_name": "revenue", "option_id": "exclude_rows"},
+         "cleaning"),
+        ("outlier_pause", OUTLIER_PAUSE_DATA,
+         {"pause_type": "outlier_pause", "column_name": "revenue", "option_id": "treat_as_valid"},
+         "cleaning"),
+    ],
+    ids=["domain-confirm", "domain-correct", "missing-value", "outlier"],
+)
+def test_resume_valid_response_clears_pause_data_in_one_update(
+    status: str, pause_data: dict, resume_body: dict, restore_status: str
+) -> None:
+    """A valid response is stored, pause_data cleared and status restored in a single update."""
+    response, update = post_resume({"status": status, "pause_data": pause_data}, resume_body)
+    assert response.status_code == 200
+    assert response.json()["status"] == restore_status
+    update.assert_called_once()
+    payload = update.call_args.args[0]
+    assert payload["user_pause_response"] == resume_body
+    assert "pause_data" in payload and payload["pause_data"] is None
+    assert payload["status"] == restore_status
+
+
+@pytest.mark.parametrize(
+    "status, pause_data, resume_body, detail_fragment",
+    [
+        ("missing_value_pause", MISSING_VALUE_PAUSE_DATA,
+         {"pause_type": "outlier_pause", "column_name": "revenue", "option_id": "impute"}, "pause_type"),
+        ("domain_pause", DOMAIN_PAUSE_DATA, {"option_id": "confirm"}, "pause_type"),
+        ("missing_value_pause", MISSING_VALUE_PAUSE_DATA,
+         {"pause_type": "missing_value_pause", "column_name": "revenue", "option_id": "preserve"}, "option_id"),
+        ("outlier_pause", OUTLIER_PAUSE_DATA,
+         {"pause_type": "outlier_pause", "column_name": "revenue", "option_id": "impute"}, "option_id"),
+        ("missing_value_pause", MISSING_VALUE_PAUSE_DATA,
+         {"pause_type": "missing_value_pause", "column_name": "notes", "option_id": "impute"}, "column_name"),
+        ("outlier_pause", OUTLIER_PAUSE_DATA,
+         {"pause_type": "outlier_pause", "option_id": "treat_as_valid"}, "column_name"),
+        ("domain_pause", DOMAIN_PAUSE_DATA,
+         {"pause_type": "domain_pause", "option_id": "correct", "corrected_domain": "   "}, "corrected_domain"),
+        ("domain_pause", DOMAIN_PAUSE_DATA,
+         {"pause_type": "domain_pause", "option_id": "correct"}, "corrected_domain"),
+    ],
+    ids=[
+        "wrong-pause-type", "missing-pause-type", "unknown-missing-value-option",
+        "unknown-outlier-option", "wrong-column", "missing-column",
+        "blank-corrected-domain", "missing-corrected-domain",
+    ],
+)
+def test_resume_invalid_response_rejected_before_update(
+    status: str, pause_data: dict, resume_body: dict, detail_fragment: str
+) -> None:
+    """An invalid response returns 400 and never reaches the update."""
+    response, update = post_resume({"status": status, "pause_data": pause_data}, resume_body)
+    assert response.status_code == 400
+    assert detail_fragment in response.json()["detail"]
+    update.assert_not_called()
+
+
+# Stored pause_data with nothing usable to validate option_id against. Before the
+# Code Review fix, the last three made every answer a 400 and stranded the
+# analysis (the wait node polls with no timeout).
+UNVALIDATABLE_PAUSE_DATA = {
+    "none": None,
+    "no-options-key": {"type": "missing_value_decision_required", "column_name": "revenue"},
+    "empty-options": {"type": "missing_value_decision_required", "column_name": "revenue", "options": []},
+    "options-without-ids": {
+        "type": "missing_value_decision_required",
+        "column_name": "revenue",
+        "options": [{"label": "Impute"}, {"id": None}, {"id": "   "}],
+    },
+}
+
+
+@pytest.mark.parametrize("stored_key", list(UNVALIDATABLE_PAUSE_DATA))
+def test_resume_unvalidatable_pause_data_accepts_matching_pause_type(stored_key: str) -> None:
+    """Escape hatch: with no usable stored option ids, option_id is not checked."""
+    resume_body = {"pause_type": "missing_value_pause", "column_name": "revenue", "option_id": "anything"}
+    response, update = post_resume(
+        {"status": "missing_value_pause", "pause_data": UNVALIDATABLE_PAUSE_DATA[stored_key]}, resume_body
+    )
+    assert response.status_code == 200
+    update.assert_called_once()
+    assert update.call_args.args[0]["user_pause_response"] == resume_body
+
+
+@pytest.mark.parametrize("stored_key", list(UNVALIDATABLE_PAUSE_DATA))
+def test_resume_unvalidatable_pause_data_still_checks_pause_type(stored_key: str) -> None:
+    response, update = post_resume(
+        {"status": "missing_value_pause", "pause_data": UNVALIDATABLE_PAUSE_DATA[stored_key]},
+        {"pause_type": "domain_pause", "option_id": "confirm"},
+    )
+    assert response.status_code == 400
+    update.assert_not_called()
+
+
+@pytest.mark.parametrize("status", ["missing_value_pause", "outlier_pause"])
+def test_resume_escape_hatch_still_rejects_mismatched_column(status: str) -> None:
+    """A stale tab's answer for another column is rejected even when option ids can't be checked."""
+    response, update = post_resume(
+        {"status": status, "pause_data": {"column_name": "revenue", "options": []}},
+        {"pause_type": status, "column_name": "notes", "option_id": "impute"},
+    )
+    assert response.status_code == 400
+    assert "column_name" in response.json()["detail"]
+    update.assert_not_called()
+
+
+@pytest.mark.parametrize("status", ["missing_value_pause", "outlier_pause"])
+def test_resume_escape_hatch_accepts_matching_column(status: str) -> None:
+    resume_body = {"pause_type": status, "column_name": "revenue", "option_id": "anything"}
+    response, update = post_resume(
+        {"status": status, "pause_data": {"column_name": "revenue", "options": []}}, resume_body
+    )
+    assert response.status_code == 200
+    update.assert_called_once()
+    assert update.call_args.args[0]["user_pause_response"] == resume_body
+
+
+def test_resume_missing_option_id_is_400_not_500() -> None:
+    """A stored option without an id must not let a response with no option_id through.
+
+    Guards the former KeyError: None used to be an allowed id, so a response with
+    no option_id passed the membership check and then crashed on
+    response["option_id"] (500).
+    """
+    stored = {**DOMAIN_PAUSE_DATA, "options": [*DOMAIN_PAUSE_DATA["options"], {"label": "no id"}]}
+    response, update = post_resume(
+        {"status": "domain_pause", "pause_data": stored},
+        {"pause_type": "domain_pause"},
+    )
+    assert response.status_code == 400
+    assert "option_id" in response.json()["detail"]
+    update.assert_not_called()
+
+
+def test_resume_write_is_conditional_on_validated_pause() -> None:
+    """The update matches id, the validated status, and the pause's updated_at."""
+    mock_client = make_supabase_mock(
+        {"id": "test-id", "session_id": "test-session", "status": "missing_value_pause",
+         "pause_data": MISSING_VALUE_PAUSE_DATA, "updated_at": "2026-09-22T03:50:37.123456+00:00"}
+    )
+    with patch("backend.main.get_supabase_client", return_value=mock_client):
+        response = client.post(
+            "/api/analysis/test-id/resume",
+            json={"response": {"pause_type": "missing_value_pause", "column_name": "revenue", "option_id": "impute"}},
+            headers={"session-id": "test-session"},
+        )
+    assert response.status_code == 200
+    filters = mock_client.table.return_value.update.return_value.eq.call_args_list
+    assert call("id", "test-id") in filters
+    assert call("status", "missing_value_pause") in filters
+    assert call("updated_at", "2026-09-22T03:50:37.123456+00:00") in filters
+
+
+def test_resume_write_with_null_updated_at_matches_null() -> None:
+    mock_client = make_supabase_mock(
+        {"id": "test-id", "session_id": "test-session", "status": "domain_pause",
+         "pause_data": DOMAIN_PAUSE_DATA, "updated_at": None}
+    )
+    with patch("backend.main.get_supabase_client", return_value=mock_client):
+        response = client.post(
+            "/api/analysis/test-id/resume",
+            json={"response": {"pause_type": "domain_pause", "option_id": "confirm"}},
+            headers={"session-id": "test-session"},
+        )
+    assert response.status_code == 200
+    update_builder = mock_client.table.return_value.update.return_value
+    update_builder.is_.assert_called_once_with("updated_at", "null")
+
+
+def test_resume_stale_response_returns_409() -> None:
+    """The pipeline left the validated pause before the write (e.g. re-paused on
+    another column): the conditional update matches no rows and the resume is a 409."""
+    mock_client = make_supabase_mock(
+        {"id": "test-id", "session_id": "test-session", "status": "missing_value_pause",
+         "pause_data": MISSING_VALUE_PAUSE_DATA, "updated_at": "2026-09-22T03:50:37.123456+00:00"}
+    )
+    stale_result = MagicMock()
+    stale_result.data = []
+    mock_client.table.return_value.update.return_value.execute.return_value = stale_result
+    with patch("backend.main.get_supabase_client", return_value=mock_client):
+        response = client.post(
+            "/api/analysis/test-id/resume",
+            json={"response": {"pause_type": "missing_value_pause", "column_name": "revenue", "option_id": "impute"}},
+            headers={"session-id": "test-session"},
+        )
+    assert response.status_code == 409
+    assert "no longer active" in response.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +742,18 @@ def test_public_get_analysis_returns_data_but_never_session_id() -> None:
     assert "session_id" not in body
     assert "stored_filename" not in body
     assert "correct-session" not in response.text
+
+
+@pytest.mark.parametrize("status", [s.value for s in AnalysisStatus])
+def test_get_analysis_never_includes_pause_data(status: str) -> None:
+    """Regression guard: pause_data lives only on GET /status, under every status."""
+    record = {**FULL_RECORD, "status": status, "pause_data": DOMAIN_PAUSE_DATA}
+    mock_client = make_supabase_mock(record)
+    with patch("backend.main.get_supabase_client", return_value=mock_client):
+        response = client.get(f"/api/analysis/{AID}")
+    assert response.status_code == 200
+    assert "pause_data" not in response.json()
+    assert "domain_confirmation_required" not in response.text
 
 
 @pytest.mark.parametrize("path", [f"/api/analysis/{AID}", f"/api/analysis/{AID}/charts"])

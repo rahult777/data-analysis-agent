@@ -59,6 +59,8 @@ _AGENT_MAP: dict[str, Optional[str]] = {
     "error": None,
 }
 
+_PAUSE_STATUSES: tuple[str, ...] = ("domain_pause", "missing_value_pause", "outlier_pause")
+
 
 def _error_category(error_message: Optional[str]) -> Optional[str]:
     """Reduce a stored error_message to its category for the public status route.
@@ -70,6 +72,67 @@ def _error_category(error_message: Optional[str]) -> Optional[str]:
     if error_message is None:
         return None
     return "USER_ERROR" if error_message.startswith("USER_ERROR") else "SYSTEM_ERROR"
+
+
+def _validate_pause_response(status: str, pause_data: Optional[dict], response: dict) -> None:
+    """Check a resume response against the pause question it answers.
+
+    Option ids and column_name are checked against the stored pause_data, not
+    hardcoded, because the question is raw LLM output. When there is no stored
+    question with usable option ids to check against, option_id is not checked
+    — rejecting every answer would strand the analysis, because the pause-wait
+    node polls with no timeout. column_name is still checked whenever a usable
+    one is stored: it is what rejects an answer from a stale tab, written for a
+    pause that is no longer the active one.
+    """
+    if response.get("pause_type") != status:
+        raise HTTPException(
+            status_code=400,
+            detail=f"response.pause_type must be '{status}' for the active pause.",
+        )
+    options = pause_data.get("options") if isinstance(pause_data, dict) else None
+    option_ids = [
+        option["id"]
+        for option in (options if isinstance(options, list) else [])
+        if isinstance(option, dict) and isinstance(option.get("id"), str) and option["id"].strip()
+    ]
+    if not option_ids:
+        stored_column = pause_data.get("column_name") if isinstance(pause_data, dict) else None
+        if (
+            status != "domain_pause"
+            and isinstance(stored_column, str)
+            and stored_column.strip()
+            and response.get("column_name") != stored_column
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"response.column_name must be '{stored_column}'.",
+            )
+        logger.warning(
+            "Resume for a %s with no stored option ids to validate against; "
+            "option_id was not validated.",
+            status,
+        )
+        return
+    if response.get("option_id") not in option_ids:
+        raise HTTPException(
+            status_code=400,
+            detail=f"response.option_id must be one of {option_ids}.",
+        )
+    if status == "domain_pause":
+        corrected_domain = response.get("corrected_domain")
+        if response.get("option_id") == "correct" and (
+            not isinstance(corrected_domain, str) or not corrected_domain.strip()
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="response.corrected_domain is required when option_id is 'correct'.",
+            )
+    elif response.get("column_name") != pause_data.get("column_name"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"response.column_name must be '{pause_data.get('column_name')}'.",
+        )
 
 
 @asynccontextmanager
@@ -228,7 +291,7 @@ async def get_status(
     client = get_supabase_client()
     response = await asyncio.to_thread(
         lambda: client.table("analyses")
-        .select("id, status, error_message")
+        .select("id, status, error_message, pause_data")
         .eq("id", analysis_id)
         .execute()
     )
@@ -242,6 +305,7 @@ async def get_status(
         current_agent=_AGENT_MAP.get(status),
         progress_pct=_PROGRESS_MAP.get(status, 0.0),
         error_message=_error_category(record.get("error_message")),
+        pause_data=record.get("pause_data") if status in _PAUSE_STATUSES else None,
     )
 
 
@@ -350,7 +414,7 @@ async def resume_analysis(
     client = get_supabase_client()
     response = await asyncio.to_thread(
         lambda: client.table("analyses")
-        .select("id, status, error_message")
+        .select("id, status, pause_data, updated_at")
         .eq("id", analysis_id)
         .execute()
     )
@@ -358,19 +422,44 @@ async def resume_analysis(
         raise HTTPException(status_code=404, detail="Analysis not found.")
     record = response.data[0]
     status = record["status"]
-    if status not in ("domain_pause", "missing_value_pause", "outlier_pause"):
+    if status not in _PAUSE_STATUSES:
         raise HTTPException(status_code=400, detail="Analysis is not in a pause state.")
+    _validate_pause_response(status, record.get("pause_data"), body.response)
     restore_status = "profiling" if status == "domain_pause" else "cleaning"
-    await asyncio.to_thread(
-        lambda: client.table("analyses")
+    # pause_data is cleared in the same update that leaves the pause status.
+    # The write is conditional on the pause read above: its status AND its
+    # updated_at, which the pause-wait node stamps when it writes each pause.
+    # Status alone is not enough — a Cleaner re-pause on another column repeats
+    # missing_value_pause. This covers only the pause changing between this
+    # request's read and its write (updates no rows → 409). An answer from a
+    # stale tab, written for an earlier pause, is caught instead by the
+    # column_name check in _validate_pause_response — but only when a usable
+    # column_name is stored and the active pause is on a different column. A
+    # stale answer to a re-pause on the same column, or to a pause with no
+    # stored pause_data, is accepted.
+    read_updated_at = record.get("updated_at")
+    query = (
+        client.table("analyses")
         .update({
             "user_pause_response": body.response,
+            "pause_data": None,
             "status": restore_status,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         })
         .eq("id", analysis_id)
-        .execute()
+        .eq("status", status)
     )
+    query = (
+        query.eq("updated_at", read_updated_at)
+        if read_updated_at is not None
+        else query.is_("updated_at", "null")
+    )
+    updated = await asyncio.to_thread(query.execute)
+    if not updated.data:
+        raise HTTPException(
+            status_code=409,
+            detail="The pause this response answers is no longer active. Refresh and try again.",
+        )
     # Pipeline continues automatically — the polling loop in pause wait nodes
     # detects user_pause_response and resumes execution.
     return StatusResponse(
