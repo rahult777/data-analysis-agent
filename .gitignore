@@ -37,3 +37,6 @@ backend/outputs/
 
 # macOS
 .DS_Store
+
+# Local live-validation harnesses and their saved state (never committed)
+.live/

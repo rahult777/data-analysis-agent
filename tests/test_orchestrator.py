@@ -10,6 +10,7 @@ import json
 import pathlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
 import pandas as pd
 
 import pytest
@@ -386,3 +387,182 @@ def test_run_pipeline_sub_80_full_report_is_gated_into_a_pause_then_confirmed_un
     assert profile["domain_hypothesis"] == "unknown"
     assert profile["domain_confidence_score"] == 35
     assert profile["domain_resolution"]["source"] == "user_confirmed"
+
+
+# ---------------------------------------------------------------------------
+# Graph-level Cleaner pauses — real cleaner_node and cleaner_pause_wait_node,
+# mocked LLM and services (Build F3)
+# ---------------------------------------------------------------------------
+
+from tests.test_cleaner import (  # noqa: E402
+    ADVERSARIAL_OUTLIERS,
+    ADVERSARIAL_REVENUE,
+    DEDUPE,
+    OUTLIER_ROWS,
+    _mv_question,
+    _outlier_question,
+    _report,
+)
+
+MESSY = FIXTURES_DIR / "messy_data.csv"
+PROFILE_STATE = {
+    "profile_report": {"domain_hypothesis": "retail"},
+    "profiler_domain_hypothesis": "retail",
+    "profiler_provenance_hypothesis": "system export",
+    "profiler_top_3_concerns": [],
+}
+
+
+def _answer(pause_type: str, option_id: str, column: str) -> dict:
+    return {"pause_type": pause_type, "option_id": option_id, "column_name": column}
+
+
+def run_cleaner_pauses(llm_payloads: list, answers: list, frame: pd.DataFrame | None = None) -> tuple:
+    """Run the graph from a finished profile through the Cleaner's pauses.
+
+    Returns (raised exception or final state, the Analyzer mock, the Cleaner LLM
+    mock, orchestrator updates, the frame the Cleaner wrote to parquet or None).
+    """
+    orchestrator_client, updates = make_orchestrator_supabase_mock()
+    saved: dict = {}
+    analyzer = AsyncMock(side_effect=lambda state: {"error_message": None})
+
+    def capture_parquet(frame: pd.DataFrame, *args, **kwargs) -> None:
+        saved["df"] = frame.copy()
+
+    with (
+        patch("backend.agents.orchestrator.profiler_node", new=AsyncMock(return_value=PROFILE_STATE)),
+        patch("backend.agents.cleaner.client") as llm,
+        patch("backend.agents.cleaner.get_supabase_client"),
+        patch("backend.agents.cleaner.create_tracer"),
+        patch(
+            "backend.agents.cleaner.load_dataframe_from_uploads",
+            new=AsyncMock(side_effect=lambda name: pd.read_csv(MESSY) if frame is None else frame.copy()),
+        ),
+        patch("backend.agents.cleaner.upload_to_storage"),
+        patch("backend.agents.cleaner.cleanup_temp_file"),
+        patch.object(pd.DataFrame, "to_parquet", autospec=True, side_effect=capture_parquet),
+        patch("backend.agents.orchestrator.get_supabase_client", return_value=orchestrator_client),
+        patch("backend.agents.orchestrator.create_tracer", return_value=BaseCallbackHandler()),
+        patch("backend.agents.orchestrator.check_for_pause_response", new=AsyncMock(side_effect=answers)),
+        patch("backend.agents.orchestrator.asyncio.sleep", new=AsyncMock()),
+        patch("backend.agents.orchestrator.analyzer_node", new=analyzer),
+        patch("backend.agents.orchestrator.explainer_node", new=AsyncMock(return_value={"error_message": None})),
+    ):
+        llm.messages.create.side_effect = [_llm_reply(payload) for payload in llm_payloads]
+        initial_state = asyncio.run(build_initial_state("test-id", "messy_data.csv", None, None))
+        try:
+            outcome = asyncio.run(run_pipeline(initial_state))
+        except Exception as exc:
+            outcome = exc
+    return outcome, analyzer, llm.messages.create, updates, saved.get("df")
+
+
+def _sent(create, call: int) -> dict:
+    return json.loads(create.call_args_list[call].kwargs["messages"][0]["content"])
+
+
+def test_cleaner_pause_wait_accumulates_every_answered_question():
+    earlier = {"pause_type": "missing_value_pause", "column_name": "revenue", "question": {"q": 1}, "response": {"r": 1}}
+    result, _ = run_wait_node(
+        cleaner_pause_wait_node,
+        {
+            "analysis_id": "test-id",
+            "missing_value_pause_data": None,
+            "outlier_pause_data": OUTLIER_PAUSE_DATA,
+            "answered_cleaner_pauses": [earlier],
+        },
+    )
+    assert result["answered_cleaner_pauses"] == [
+        earlier,
+        {"pause_type": "outlier_pause", "column_name": "revenue", "question": OUTLIER_PAUSE_DATA, "response": {"pause_type": "x"}},
+    ]
+
+
+def test_run_pipeline_three_cleaner_pauses_accumulate_and_every_choice_is_executed():
+    """revenue missing → notes missing → revenue outliers → report. Each answer reaches
+    every later call, revenue is never re-asked, and the saved frame reflects all three
+    choices exactly, whatever the model wrote about them."""
+    outcome, analyzer, create, updates, saved = run_cleaner_pauses(
+        [
+            _mv_question("revenue", "median"),
+            _mv_question("notes", "mode"),
+            _outlier_question("revenue"),
+            _report([DEDUPE, *ADVERSARIAL_REVENUE, *ADVERSARIAL_OUTLIERS]),
+        ],
+        [
+            _answer("missing_value_pause", "impute", "revenue"),
+            _answer("missing_value_pause", "preserve_missingness", "notes"),
+            _answer("outlier_pause", "flag_as_suspected_error", "revenue"),
+        ],
+    )
+
+    assert not isinstance(outcome, Exception), outcome
+    assert create.call_count == 4
+    assert "resolved_pauses" not in _sent(create, 0)
+    resolved = [(r["pause_type"], r["column_name"], r["option_id"]) for r in _sent(create, 3)["resolved_pauses"]]
+    assert resolved == [
+        ("missing_value_pause", "revenue", "impute"),
+        ("missing_value_pause", "notes", "preserve_missingness"),
+        ("outlier_pause", "revenue", "flag_as_suspected_error"),
+    ]
+    assert len(_sent(create, 1)["resolved_pauses"]) == 1
+
+    pauses = [u for u in updates if u.get("status") in ("missing_value_pause", "outlier_pause")]
+    assert [(u["status"], u["pause_data"]["column_name"]) for u in pauses] == [
+        ("missing_value_pause", "revenue"),
+        ("missing_value_pause", "notes"),
+        ("outlier_pause", "revenue"),
+    ]
+    assert pauses[0]["pause_data"]["options"][-1]["id"] == "preserve_missingness"
+    assert pauses[2]["pause_data"]["outlier_count"] == 4
+
+    deduped = pd.read_csv(MESSY).drop_duplicates()
+    assert len(saved) == 185
+    assert saved.index[saved["revenue"].isna()].tolist() == OUTLIER_ROWS
+    assert saved.index[saved["revenue_outlier_flag"] == 1].tolist() == OUTLIER_ROWS
+    assert saved["notes"].isna().sum() == deduped["notes"].isna().sum() == 84
+
+    analyzer.assert_awaited_once()
+    analyzer_state = analyzer.await_args.args[0]
+    assert len(analyzer_state["answered_cleaner_pauses"]) == 3
+    assert [r["option_chosen"] for r in analyzer_state["cleaner_user_decisions_incorporated"]] == [
+        "impute", "preserve_missingness", "flag_as_suspected_error",
+    ]
+
+
+def test_run_pipeline_cleaner_repeat_pause_errors_instead_of_looping():
+    """The logged loop: after both answers the model asks about revenue again."""
+    outcome, analyzer, create, updates, saved = run_cleaner_pauses(
+        [_mv_question("revenue"), _mv_question("notes", "mode"), _mv_question("revenue")],
+        [
+            _answer("missing_value_pause", "impute", "revenue"),
+            _answer("missing_value_pause", "preserve_missingness", "notes"),
+        ],
+    )
+
+    assert isinstance(outcome, ValueError)
+    assert "asked again" in str(outcome)
+    assert create.call_count == 3
+    analyzer.assert_not_awaited()
+    assert saved is None
+    assert [u["status"] for u in updates] == ["missing_value_pause", "missing_value_pause", "error"]
+
+
+def test_run_pipeline_survives_more_cleaner_pauses_than_langgraphs_default_step_limit():
+    """12 columns over 30% missing, each asked about once via the backstop: 24 pause
+    supersteps on top of the pipeline's own, past LangGraph's default limit of 25."""
+    columns = {f"c{i}": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, np.nan, np.nan, np.nan, np.nan] for i in range(12)}
+    frame = pd.DataFrame(columns)
+    outcome, analyzer, create, updates, saved = run_cleaner_pauses(
+        [_report([])] * 13,
+        [_answer("missing_value_pause", "preserve_missingness", f"c{i}") for i in range(12)],
+        frame=frame,
+    )
+    assert not isinstance(outcome, Exception), outcome
+    assert create.call_count == 13
+    assert [u["pause_data"]["column_name"] for u in updates if u.get("status") == "missing_value_pause"] == [
+        f"c{i}" for i in range(12)
+    ]
+    analyzer.assert_awaited_once()
+    assert saved.isna().sum().sum() == 12 * 4

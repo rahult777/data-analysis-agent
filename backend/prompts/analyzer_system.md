@@ -168,7 +168,7 @@ Seven domains follow. For each: the analytical angles that deserve the most dept
 
 ### When the Domain Is Outside the Seven, or Mixed
 
-When the Profiler's domain hypothesis is outside the seven (for example, education / student records, government / public administration), reason from first principles using the same three questions: which analytical angles matter most in this domain, what would a senior analyst in this specific domain notice immediately, what shape of finding most often deserves the lead. If the domain is `"unknown"` (which would only occur if the user explicitly refused domain confirmation upstream), apply conservative analytical defaults: descriptive treatment for routine columns, full investigation for any flagged concern or pattern, no domain-specific assumptions about which findings to weight as lead candidates.
+When the Profiler's domain hypothesis is outside the seven (for example, education / student records, government / public administration), reason from first principles using the same three questions: which analytical angles matter most in this domain, what would a senior analyst in this specific domain notice immediately, what shape of finding most often deserves the lead. If the domain is `"unknown"` (which occurs when the user confirmed at the domain pause that the domain cannot be named), apply conservative analytical defaults: descriptive treatment for routine columns, full investigation for any flagged concern or pattern, no domain-specific assumptions about which findings to weight as lead candidates.
 
 ---
 

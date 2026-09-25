@@ -22,6 +22,12 @@ from backend.utils.supabase_client import get_supabase_client
 
 logger = logging.getLogger(__name__)
 
+# LangGraph stops a run after 25 supersteps by default, and every Cleaner pause
+# costs two (cleaner_pause_wait -> cleaner), so a file needing about ten pauses
+# would fail after the user had answered them. Loops are bounded by the Cleaner's
+# repeat-pause guard (one pause per pause type and column), not by this limit.
+_RECURSION_LIMIT = 1000
+
 
 async def build_initial_state(
     analysis_id: str,
@@ -59,6 +65,7 @@ async def build_initial_state(
         missing_value_pause_data=None,
         outlier_pause_data=None,
         user_pause_response=None,
+        answered_cleaner_pauses=None,
         chart_paths=None,
         data_quality_score=None,
         analyzer_most_important_finding=None,
@@ -180,8 +187,21 @@ async def cleaner_pause_wait_node(state: PipelineState) -> dict:
             )
             break
 
+    # /resume clears the DB copy of the question, and the Cleaner's next run
+    # must honor every earlier answer, not only this one — so each answered
+    # question is kept, in order. Returns the whole list: the state key has no
+    # reducer, so a returned value replaces the previous one.
+    answered = list(state.get("answered_cleaner_pauses") or [])
+    answered.append({
+        "pause_type": status,
+        "column_name": pause_data.get("column_name") if isinstance(pause_data, dict) else None,
+        "question": pause_data,
+        "response": response,
+    })
+
     return {
         "user_pause_response": response,
+        "answered_cleaner_pauses": answered,
         "missing_value_pause_data": None,
         "outlier_pause_data": None,
     }
@@ -257,7 +277,7 @@ async def run_pipeline(initial_state: PipelineState) -> PipelineState:
     try:
         final_state = await graph.ainvoke(
             initial_state,
-            config={"callbacks": [tracer]},
+            config={"callbacks": [tracer], "recursion_limit": _RECURSION_LIMIT},
         )
         return final_state
     except Exception as exc:
