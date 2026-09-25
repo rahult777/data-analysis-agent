@@ -64,6 +64,22 @@ _OUTLIER_LABELS: dict[str, str] = {
     "treat_as_valid": "Treat the {n} outlier value(s) as valid data (legitimate large transaction or expected business event)",
     "flag_as_suspected_error": "Flag the {n} outlier value(s) as suspected data entry error or fraud; exclude from aggregate statistics pending investigation",
 }
+# The model is shown the first 50 columns only (build_cleaner_message), so only
+# those can be routed in outlier_review.
+_MESSAGE_COLUMN_LIMIT = 50
+_OUTLIER_ROUTINGS = ("medical", "financial", "none")
+# §8.2/§8.3's fixed first sentence of each domain note, for a pause Python writes.
+_OUTLIER_DOMAIN_SENTENCE: dict[str, str] = {
+    "medical": (
+        "In medical data, extreme values are often the most clinically significant data "
+        "points in the dataset rather than measurement errors."
+    ),
+    "financial": (
+        "In financial data, extreme values are often legitimate large transactions (corporate "
+        "treasury movements, end-of-quarter true-ups, wholesale orders), fraud signals, or data "
+        "integration errors at merge points."
+    ),
+}
 
 
 async def load_dataframe_from_uploads(stored_filename: str) -> pd.DataFrame:
@@ -216,8 +232,9 @@ def build_cleaner_message(
     resolved_pauses: Optional[list],
     missingness_patterns: dict,
     domain_resolution: Optional[dict] = None,
+    outlier_review_columns: Optional[list] = None,
 ) -> str:
-    columns = df.columns[:50].tolist()
+    columns = df.columns[:_MESSAGE_COLUMN_LIMIT].tolist()
     df_subset = df[columns]
 
     col_info: dict = {}
@@ -237,19 +254,12 @@ def build_cleaner_message(
         }
 
     for col in columns:
-        # is_numeric_dtype is True for bool, but bool has no quantile (same exclusion as profiler.compute_column_stats).
-        if pd.api.types.is_numeric_dtype(df_subset[col]) and not pd.api.types.is_bool_dtype(df_subset[col]):
-            series = df_subset[col].dropna()
-            if len(series) > 4:
-                q1 = float(series.quantile(0.25))
-                q3 = float(series.quantile(0.75))
-                iqr = q3 - q1
-                lower = q1 - 1.5 * iqr
-                upper = q3 + 1.5 * iqr
-                col_info[col]["outlier_count"] = int(
-                    ((series < lower) | (series > upper)).sum()
-                )
-                col_info[col]["outlier_bounds"] = {"lower": lower, "upper": upper}
+        # The same bounds and mask the outlier pause, outlier_review and the
+        # apply step use, so the model and Python count the same values.
+        bounds = _iqr_bounds(df_subset[col])
+        if bounds is not None:
+            col_info[col]["outlier_count"] = int(_iqr_outlier_mask(df_subset[col]).sum())
+            col_info[col]["outlier_bounds"] = {"lower": bounds[0], "upper": bounds[1]}
 
     message_data: dict = {
         "row_count": len(df),
@@ -282,6 +292,10 @@ def build_cleaner_message(
 
     if resolved_pauses:
         message_data["resolved_pauses"] = resolved_pauses
+
+    # The columns the report's outlier_review must route (cleaner_system.md §8.3).
+    if outlier_review_columns is not None:
+        message_data["outlier_review_columns"] = outlier_review_columns
 
     return json.dumps(message_data, default=str)
 
@@ -549,19 +563,96 @@ def _is_numeric_column(series: pd.Series) -> bool:
     return pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series)
 
 
-def _iqr_outlier_mask(series: pd.Series) -> pd.Series:
-    """True where a value lies outside the 1.5×IQR bounds build_cleaner_message reports.
+def _iqr_bounds(series: pd.Series) -> Optional[tuple[float, float]]:
+    """The 1.5×IQR (lower, upper) bounds, or None when the column gets no outlier check.
 
-    Same bounds and the same "more than 4 recorded values" rule, so the values a
-    user answers about are exactly the ones the model was shown.
+    None for a non-numeric column (bool counts as non-numeric: it has no
+    quantile, the same exclusion as profiler.compute_column_stats) and for one
+    with 4 or fewer recorded values.
     """
     values = series.dropna()
     if not _is_numeric_column(series) or len(values) <= 4:
-        return pd.Series(False, index=series.index)
+        return None
     q1 = float(values.quantile(0.25))
     q3 = float(values.quantile(0.75))
     iqr = q3 - q1
-    return (series < q1 - 1.5 * iqr) | (series > q3 + 1.5 * iqr)
+    return q1 - 1.5 * iqr, q3 + 1.5 * iqr
+
+
+def _iqr_outlier_mask(series: pd.Series) -> pd.Series:
+    """True where a value lies outside the 1.5×IQR bounds build_cleaner_message reports.
+
+    The one outlier definition behind the message's counts, outlier_review, the
+    outlier pause, the outlier records and apply_user_decisions, so the values a
+    user answers about are exactly the ones the model was shown. (The keyword
+    router's OUTLIER FLAG branch for the model's own decisions still computes
+    its own bounds on the partly cleaned frame — errors.md 2026-09-25, IQR.)
+    """
+    bounds = _iqr_bounds(series)
+    if bounds is None:
+        return pd.Series(False, index=series.index)
+    lower, upper = bounds
+    return (series < lower) | (series > upper)
+
+
+def _outlier_facts(series: pd.Series, mask: pd.Series, representative: object = None) -> dict:
+    """What an outlier pause or record states about a column, computed from the mask.
+
+    Mean and standard deviation are over the finite recorded values (pandas'
+    default sample std, as the Profiler reports them), so an infinite value is
+    counted as an outlier but never turns a statistic into inf or NaN, which
+    the saved JSON cannot hold. The representative value is `representative`
+    when it is one of the flagged finite values (the model's own choice, which
+    its note text describes), otherwise the flagged finite value furthest from
+    the mean; its signed distance in SDs is Python's. Any of value,
+    sd_distance, mean and std is None when it cannot be computed.
+    """
+    recorded = series.dropna().astype(float)
+    finite = recorded[np.isfinite(recorded)]
+    mean = float(finite.mean()) if len(finite) else None
+    std = float(finite.std()) if len(finite) > 1 else None
+    flagged = series[mask].astype(float)
+    finite_flagged = flagged[np.isfinite(flagged)]
+    if (
+        isinstance(representative, (int, float, np.integer, np.floating))
+        and not isinstance(representative, bool)
+        and float(representative) in set(finite_flagged.tolist())
+    ):
+        value = float(representative)
+    elif len(finite_flagged) and mean is not None:
+        value = float(finite_flagged.loc[(finite_flagged - mean).abs().idxmax()])
+    else:
+        value = None
+    lower, upper = _iqr_bounds(series)
+    return {
+        "count": int(mask.sum()),
+        "lower": lower,
+        "upper": upper,
+        "min": float(flagged.min()),
+        "max": float(flagged.max()),
+        "value": value,
+        "sd_distance": round((value - mean) / std, 2) if value is not None and mean is not None and std else None,
+        "mean": mean,
+        "std": std,
+    }
+
+
+def _outlier_extreme_clause(facts: dict) -> str:
+    """"; the most extreme, v, is d SD from the column mean of m" — or "" when not computable."""
+    if facts["sd_distance"] is None:
+        return ""
+    return (
+        f"; the most extreme, {_format_value(facts['value'])}, is {facts['sd_distance']} SD from "
+        f"the column mean of {_format_value(facts['mean'])}"
+    )
+
+
+def _outlier_facts_sentence(facts: dict) -> str:
+    return (
+        f"{facts['count']} value(s) lie outside the IQR bounds ({_format_value(facts['lower'])} to "
+        f"{_format_value(facts['upper'])}), from {_format_value(facts['min'])} to "
+        f"{_format_value(facts['max'])}{_outlier_extreme_clause(facts)}."
+    )
 
 
 def _missing_counts(df: pd.DataFrame, column: str) -> tuple[int, float, int]:
@@ -700,7 +791,8 @@ def validate_cleaner_pause(parsed: dict, df: pd.DataFrame, answered: list) -> di
     note_field = _OUTLIER_NOTE_FIELD[domain_context]
     if _is_blank(parsed.get(note_field)):
         raise ValueError(f"Outlier pause on '{column}' has no {note_field}.")
-    outlier_count = int(_iqr_outlier_mask(df[column]).sum())
+    mask = _iqr_outlier_mask(df[column])
+    outlier_count = int(mask.sum())
     if outlier_count == 0:
         raise ValueError(
             f"Outlier pause on '{column}', but the column has no values outside the IQR bounds."
@@ -709,7 +801,18 @@ def validate_cleaner_pause(parsed: dict, df: pd.DataFrame, answered: list) -> di
         {**option, "label": _OUTLIER_LABELS[option["id"]].format(n=outlier_count)}
         for option in options
     ]
-    return {**parsed, "outlier_count": outlier_count, "options": stored_options}
+    # Every number the user reads beside the options is Python's, from the same
+    # mask the apply step will act on (the model's note text keeps its own).
+    facts = _outlier_facts(df[column], mask, parsed.get("outlier_value"))
+    return {
+        **parsed,
+        "outlier_count": outlier_count,
+        "outlier_value": facts["value"],
+        "sd_distance": facts["sd_distance"],
+        "column_mean": facts["mean"],
+        "column_std": facts["std"],
+        "options": stored_options,
+    }
 
 
 def apply_missingness_backstop(
@@ -805,6 +908,257 @@ def apply_missingness_backstop(
     return parsed
 
 
+def _same_value(after: object, before: object) -> bool:
+    """Value equality that never raises (a categorical, a string or pd.NA after cleaning)."""
+    try:
+        return bool(after == before)
+    except (TypeError, ValueError):
+        return False
+
+
+def _answered_outlier_columns(answered: list) -> set:
+    return {
+        entry.get("column_name")
+        for entry in answered
+        if entry.get("pause_type") == _OUTLIER_PAUSE
+    }
+
+
+def _outlier_review_columns(df: pd.DataFrame, answered: list) -> dict:
+    """The columns the report's outlier_review must route, each with its outlier mask.
+
+    The one source for the message's `outlier_review_columns`, the routing
+    check, the outlier backstop and the outlier records: the columns the model
+    is shown (the first 50) that have values outside the IQR bounds on the raw
+    upload, less those the user excluded or already answered an outlier pause
+    on. Insertion order is column order.
+    """
+    skip = _excluded_by_answer(answered) | _answered_outlier_columns(answered)
+    required: dict = {}
+    for column in df.columns[:_MESSAGE_COLUMN_LIMIT]:
+        if column in skip:
+            continue
+        mask = _iqr_outlier_mask(df[column])
+        if mask.any():
+            required[column] = mask
+    return required
+
+
+def normalize_outlier_review(parsed: dict, required: dict) -> tuple[dict, dict]:
+    """Read a report's outlier_review against the required columns. Never raises.
+
+    Returns (routing, unrouted): routing maps each required column that has one
+    valid routing to "medical", "financial" or "none"; unrouted maps every other
+    required column to why it has none — no field, no entry, a value outside
+    the three, or conflicting entries. Python never guesses a routing. Entries
+    for columns that need none (not in the data, no outliers under the mask,
+    beyond the first 50, excluded or already answered) are ignored.
+    """
+    review = parsed.get("outlier_review")
+    if not isinstance(review, list):
+        return {}, {column: "The report had no outlier_review." for column in required}
+    contexts: dict = {}
+    for entry in review:
+        column = entry.get("column_name") if isinstance(entry, dict) else None
+        if not isinstance(column, str) or column not in required:
+            logger.warning("Ignored an outlier_review entry that routes no required column: %r", entry)
+            continue
+        contexts.setdefault(column, []).append(entry.get("domain_context"))
+    routing: dict = {}
+    unrouted: dict = {}
+    for column in required:
+        given = contexts.get(column)
+        if not given:
+            unrouted[column] = "The report's outlier_review had no entry for this column."
+        elif any(context not in _OUTLIER_ROUTINGS for context in given):
+            invalid = next(context for context in given if context not in _OUTLIER_ROUTINGS)
+            unrouted[column] = (
+                f"The report's outlier_review gave domain_context {invalid!r}, which is not "
+                "medical, financial or none."
+            )
+        elif len(set(given)) > 1:
+            unrouted[column] = (
+                f"The report's outlier_review had conflicting entries for this column ({sorted(set(given))})."
+            )
+        else:
+            routing[column] = given[0]
+    return routing, unrouted
+
+
+def _outlier_consequence(option_id: str, column: str) -> str:
+    """What each outlier option runs (apply_user_decisions), and nothing more."""
+    flag_column = f"{column}_outlier_flag"
+    if option_id in _OUTLIER_KEEP_IDS:
+        return (
+            f"the values stay in `{column}` and in every statistic; their rows are marked "
+            f"in `{flag_column}`"
+        )
+    return (
+        f"the values are set to missing in `{column}`, so they drop out of every statistic; "
+        f"their rows are kept and marked in `{flag_column}`"
+    )
+
+
+def apply_outlier_backstop(parsed: dict, df: pd.DataFrame, required: dict, routing: dict) -> dict:
+    """Turn a report that routed a column to an outlier pause it never emitted into that pause.
+
+    Unlike the missing-value backstop, this enforces the Cleaner's own routing
+    judgment rather than replacing it: whether a column's outliers need the
+    medical or financial pause is the Cleaner's call (cleaner_system.md §8.2,
+    §8.3, Step 8), and Python only holds the report to it. A column routed
+    "none" is never paused. A model pause passes through untouched. Otherwise
+    the first required column routed medical or financial becomes that pause,
+    with the fixed option ids and Python's numbers from the raw-upload mask,
+    and the report is discarded.
+    """
+    if parsed.get("type") in _PAUSE_STATUS_BY_TYPE:
+        return parsed
+    for column, mask in required.items():
+        context = routing.get(column)
+        if context not in _OUTLIER_OPTION_IDS:
+            continue
+        facts = _outlier_facts(df[column], mask)
+        logger.warning(
+            "Cleaner routed '%s' as %s in its outlier review but returned a full report; "
+            "converted to an outlier pause.",
+            column, context,
+        )
+        return {
+            "type": "outlier_decision_required",
+            "domain_context": context,
+            "column_name": column,
+            "outlier_value": facts["value"],
+            "outlier_count": facts["count"],
+            "sd_distance": facts["sd_distance"],
+            "column_mean": facts["mean"],
+            "column_std": facts["std"],
+            _OUTLIER_NOTE_FIELD[context]: (
+                f"Not assessed. The Cleaner routed `{column}` as {context} in its outlier review "
+                "but did not ask about it, so the system generated this question and made no "
+                f"column-specific interpretation of these values. {_OUTLIER_DOMAIN_SENTENCE[context]} "
+                f"{_outlier_facts_sentence(facts)}"
+            ),
+            "options": [
+                {
+                    "id": option_id,
+                    "label": _OUTLIER_LABELS[option_id].format(n=facts["count"]),
+                    "consequence": _outlier_consequence(option_id, column),
+                }
+                for option_id in _OUTLIER_OPTION_IDS[context]
+            ],
+        }
+    return parsed
+
+
+def build_outlier_records(
+    df_raw: pd.DataFrame,
+    df_cleaned: pd.DataFrame,
+    required: dict,
+    routing: dict,
+    unrouted: dict,
+) -> list:
+    """One system-written decision per required column: its routing and its true final state.
+
+    Written after every cleaning operation has run, and never executed or
+    filtered. It replaces what filter_user_decided dropped on a user-decided
+    column, and it is the one statement the report makes about a column the
+    Cleaner routed "none" or did not route. Its state is computed from the
+    cleaned data, so where a Cleaner decision (still routed by keyword)
+    describes the same values differently, this record is the accurate one.
+    """
+    records: list = []
+    for column, mask in required.items():
+        if column not in df_cleaned.columns:
+            continue  # removed by the Cleaner's own decision, which records it
+        facts = _outlier_facts(df_raw[column], mask)
+        present = mask[mask].index.intersection(df_cleaned.index)
+        unchanged = sum(
+            _same_value(after, before)
+            for after, before in zip(df_cleaned.loc[present, column], df_raw.loc[present, column])
+        )
+        state = f"{unchanged} of the {facts['count']} value(s) are unchanged"
+        if unchanged < facts["count"]:
+            state += (
+                f"; {facts['count'] - unchanged} were removed with their rows or changed by other "
+                "cleaning decisions"
+            )
+        flag_column = f"{column}_outlier_flag"
+        if flag_column in df_cleaned.columns:
+            marked = int((df_cleaned.loc[present, flag_column] == 1).sum())
+            state += f"; {marked} of them are marked in `{flag_column}`"
+            total = int((df_cleaned[flag_column] == 1).sum())
+            if total != marked:
+                state += f", which marks {total} row(s) in all"
+        else:
+            state += "; they are not flagged"
+        computed = (
+            f"Computed from the cleaned data: {state}. Recorded by the system, not written by the "
+            "Cleaner; where a Cleaner decision describes these values differently, this record is "
+            "the accurate one."
+        )
+        if routing.get(column) == "none":
+            action = (
+                "Outlier review: the Cleaner routed these values 'none' (no user decision "
+                "needed), so no question was asked."
+            )
+            reason = (
+                f"{computed} The routing is the Cleaner's judgment, not a check: the system asks "
+                "the user about outliers only when the Cleaner routes a column medical or financial."
+            )
+        else:
+            why = unrouted.get(column) or (
+                f"The Cleaner routed this column {routing.get(column)!r}, but no pause was asked."
+            )
+            action = (
+                f"Not reviewed: the Cleaner's report gave no valid outlier routing for `{column}`, "
+                "so no question was asked about these values."
+            )
+            reason = (
+                f"{computed} {why} Treat these values as unreviewed: they may be data errors or "
+                "genuine extremes."
+            )
+        issue = (
+            f"{facts['count']} value(s) in `{column}` lie outside the IQR bounds "
+            f"({_format_value(facts['lower'])} to {_format_value(facts['upper'])})"
+            f"{_outlier_extreme_clause(facts)}"
+        )
+        records.append({"column_name": column, "issue": issue, "action": action, "reason": reason})
+    return records
+
+
+def summarize_outlier_review(
+    df_raw: pd.DataFrame,
+    df_cleaned: pd.DataFrame,
+    answered: list,
+    routing: dict,
+) -> list:
+    """The saved cleaning_report.outlier_review_summary: every column with outliers the
+    model was shown, how it was routed, and how it was resolved. A different key
+    and shape from the model's outlier_review ({column_name, domain_context})."""
+    excluded = _excluded_by_answer(answered)
+    answered_contexts = {
+        entry.get("column_name"): (entry.get("question") or {}).get("domain_context")
+        for entry in answered
+        if entry.get("pause_type") == _OUTLIER_PAUSE
+    }
+    summary: list = []
+    for column in df_raw.columns[:_MESSAGE_COLUMN_LIMIT]:
+        if not _iqr_outlier_mask(df_raw[column]).any():
+            continue
+        if column in excluded:  # supersedes an earlier outlier answer (apply_user_decisions)
+            context, resolution = None, "excluded_by_user"
+        elif column in answered_contexts:
+            context, resolution = answered_contexts[column], "user_decision"
+        elif column not in df_cleaned.columns:
+            context, resolution = routing.get(column), "column_removed"
+        elif routing.get(column) == "none":
+            context, resolution = "none", "routed_none"
+        else:
+            context, resolution = routing.get(column), "unreviewed"
+        summary.append({"column_name": column, "routing": context, "resolution": resolution})
+    return summary
+
+
 def build_cleaner_resolutions(answered: list) -> list:
     """One resolution per answered Cleaner pause: the chosen option, taken from the question.
 
@@ -847,6 +1201,9 @@ def filter_user_decided(decisions: list, resolutions: list) -> list:
     which the router reads as a mean fill. A legitimate model decision on the
     column (a type conversion, a fill of a different gap) is lost with it, but
     it is also absent from the report, so the report still matches what ran.
+    That includes the model's outlier decision on a column whose missing values
+    the user decided: build_outlier_records states those outliers' routing and
+    true final state instead.
     """
     decided_columns = {r["column_name"] for r in resolutions}
     kept: list = []
@@ -1054,6 +1411,8 @@ async def cleaner_node(state: PipelineState) -> dict:
             for r in resolutions
             if r["pause_type"] == _OUTLIER_PAUSE and r["column_name"] in df.columns
         }
+        # The columns whose outliers the report must route, from the same mask.
+        review_columns = await asyncio.to_thread(_outlier_review_columns, df, answered)
 
         user_message = build_cleaner_message(
             df=df,
@@ -1072,6 +1431,7 @@ async def cleaner_node(state: PipelineState) -> dict:
             ],
             missingness_patterns=missingness_patterns,
             domain_resolution=profile_report.get("domain_resolution"),
+            outlier_review_columns=list(review_columns),
         )
         system_prompt = load_system_prompt("cleaner")
 
@@ -1088,6 +1448,8 @@ async def cleaner_node(state: PipelineState) -> dict:
         parsed = apply_missingness_backstop(
             parsed, df, answered, domain_hypothesis, provenance_hypothesis
         )
+        routing, unrouted = normalize_outlier_review(parsed, review_columns)
+        parsed = apply_outlier_backstop(parsed, df, review_columns, routing)
 
         pause_type = _PAUSE_STATUS_BY_TYPE.get(parsed.get("type"))
         if pause_type is not None:
@@ -1113,9 +1475,18 @@ async def cleaner_node(state: PipelineState) -> dict:
             user_outliers_flagged,
             user_decisions_incorporated,
         ) = await asyncio.to_thread(apply_user_decisions, df_cleaned, resolutions, outlier_masks)
-        decisions_data = decisions_data + user_decisions
+        # Appended last: never executed, never filtered (build_outlier_records).
+        outlier_records = await asyncio.to_thread(
+            build_outlier_records, df, df_cleaned, review_columns, routing, unrouted
+        )
+        decisions_data = decisions_data + user_decisions + outlier_records
         excluded_columns = excluded_columns + user_excluded_columns
         outlier_flagged = {**outlier_flagged, **user_outliers_flagged}
+
+        # Its own key: the model's outlier_review has a different shape.
+        outlier_review_summary = await asyncio.to_thread(
+            summarize_outlier_review, df, df_cleaned, answered, routing
+        )
 
         rows_after = len(df_cleaned)
         cols_after = len(df_cleaned.columns)
@@ -1178,6 +1549,7 @@ async def cleaner_node(state: PipelineState) -> dict:
             "re_profile_verification": re_profile,
             "interactions_detected": interactions,
             "user_decisions_incorporated": user_decisions_incorporated,
+            "outlier_review_summary": outlier_review_summary,
         }
 
         await asyncio.to_thread(

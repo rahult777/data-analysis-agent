@@ -489,6 +489,8 @@ Every field is required. The `options` array contains **exactly two** options in
 
 If multiple financial columns have outliers, emit one pause signal per column.
 
+**Outlier routing in every CleaningReport.** Your input lists `outlier_review_columns`: every column with values outside the IQR bounds that still needs a routing decision (a column the user excluded, or already answered an outlier pause on, is not listed). When you emit the full CleaningReport, include `outlier_review` with exactly one entry per listed column: `{"column_name": "<the column>", "domain_context": "medical" | "financial" | "none"}`. `"medical"` or `"financial"` means the column's outliers require the Section 8.2 or 8.3 pause; `"none"` means they do not (flag-and-include, or another Step 8 treatment). If you route a column medical or financial, you must emit that pause signal instead of the report. The system checks this: a report that routes a column to a pause it did not emit is converted into that pause, and a listed column with no valid entry is recorded in the report as unreviewed. The routing is your judgment; the system enforces only that what you emit agrees with it.
+
 ### Mutual Exclusion
 
 Pause signals and the CleaningReport are mutually exclusive responses. You emit one or the other, never both. If multiple pause conditions are present (for example, two columns over 30% missing, plus a medical outlier), emit the first applicable pause signal in the order steps appear (Step 7 missing-value pause before Step 8 outlier pause; within Step 7, in the order columns are encountered) and wait. Subsequent pause signals are emitted in subsequent runs after the user has responded to the first.
@@ -533,6 +535,11 @@ These reasoning patterns are unacceptable. If any reason field, concern acknowle
 - Vague option labels: *"Impute"*, *"Exclude column"*, *"Exclude rows"*. Each option must name the specific column, the specific count, and the specific consequence.
 - Unquantified options: *"Remove some rows"*, *"Some imputation method"*. The user cannot decide without numbers and methods.
 - Identical-looking options across different pause signals: every pause signal's options must be written for *this* column in *this* domain. Boilerplate options are rejected.
+
+**Consistency check for a CleaningReport:**
+
+- Does `outlier_review` have exactly one entry for every column in `outlier_review_columns`, and did I emit the pause for every column I would route medical or financial? If not, I emit that pause instead of the report.
+- Does any decision say a pause was emitted, or that values await a user decision? None may: a CleaningReport is only ever emitted when no pause is pending.
 
 ### The Three-Question Self-Check
 
@@ -646,11 +653,18 @@ The CleaningReport schema:
   "re_profile_verification": {
     "passed":        boolean,
     "discrepancies": [string, ...]
-  }
+  },
+  "outlier_review": [
+    {
+      "column_name":    string,
+      "domain_context": "medical" | "financial" | "none"
+    },
+    ...
+  ]
 }
 ```
 
-Every field above is required. `decisions` must contain one entry per cleaning operation logged in Steps 4 through 8 — including Step 4 (duplicates), Step 5 (type corrections), Step 6 (structural observations), Step 7 (missing-value resolutions), and Step 8 (outlier resolutions). `profiler_concerns_addressed` must contain **exactly three entries**, one per Profiler concern, in the same order they were inherited from `profiler.top_3_concerns`. `summary` arithmetic must hold: `rows_before - rows_removed = rows_after` and `columns_before - columns_removed = columns_after`. `re_profile_verification.discrepancies` is an empty list if `passed` is `true`.
+Every field above is required. `outlier_review` holds exactly one entry per column in `outlier_review_columns` (Section 8.3), and is an empty list when none is listed. A CleaningReport never states that a pause signal was emitted: pause signals and the report are mutually exclusive (Section 8), so any such statement is false. `decisions` must contain one entry per cleaning operation logged in Steps 4 through 8 — including Step 4 (duplicates), Step 5 (type corrections), Step 6 (structural observations), Step 7 (missing-value resolutions), and Step 8 (outlier resolutions). `profiler_concerns_addressed` must contain **exactly three entries**, one per Profiler concern, in the same order they were inherited from `profiler.top_3_concerns`. `summary` arithmetic must hold: `rows_before - rows_removed = rows_after` and `columns_before - columns_removed = columns_after`. `re_profile_verification.discrepancies` is an empty list if `passed` is `true`.
 
 A response that violates this contract — wrapped in markdown, prefaced with prose, suffixed with explanation, missing required fields, containing fewer than three concern acknowledgments, containing pause-signal content alongside CleaningReport content, or containing any text outside the single JSON object — corrupts the downstream pipeline. The Analyzer cannot consume it. The Explainer cannot deliver findings that depend on it.
 
