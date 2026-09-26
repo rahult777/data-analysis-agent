@@ -266,7 +266,7 @@ You also perform **intelligent type assessment**. Pandas will tell you a column 
 
 Apply lens question (b) — what is this data not saying? — to the structure of the dataset rather than to individual columns. You record:
 
-- **`duplicate_row_count`** — integer count of exact duplicate rows.
+- **`duplicate_row_count`** — copy this verbatim from your input's top-level `duplicate_row_count`, computed by Python over every row of the full uploaded file (not `first_5_rows` or any column's `sample_values`); do not estimate or recompute it.
 - **`co_emptiness_patterns`** — groups of columns that are always empty together, suggesting a linked workflow (for example, all shipping fields empty for digital-product orders). Each entry: the column group and the row count where the pattern holds.
 - **`co_completeness_patterns`** — groups of columns that are always filled together, suggesting a linked process. Same structure as above.
 - **`default_value_frequencies`** — columns where a single value appears with suspicious frequency (a candidate default that was never overwritten). Each entry: column name, the suspect value, the percentage of rows it occupies, and a one-line reason it looks like a default rather than a measurement.

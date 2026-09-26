@@ -18,6 +18,8 @@ import io
 import json
 import logging
 import pathlib
+import uuid
+from typing import Callable
 from unittest.mock import DEFAULT, MagicMock, patch
 
 import numpy as np
@@ -741,7 +743,7 @@ def test_build_profiler_message_without_resolution_is_unchanged(ambiguous_df: pd
     """No resume: exactly the pre-F1 key set, and identical to passing None explicitly."""
     default = build_profiler_message(ambiguous_df, None)
     assert set(json.loads(default)) == {
-        "row_count", "column_count", "columns_included",
+        "row_count", "column_count", "duplicate_row_count", "columns_included",
         "first_5_rows", "column_info", "computed_column_stats",
     }
     assert build_profiler_message(ambiguous_df, None, None) == default
@@ -1046,3 +1048,123 @@ def test_apply_domain_resolution_confirm_restores_a_decimal_pause_score() -> Non
     report = _ambiguous_profile_report("education", 92)
     apply_domain_resolution(report, build_domain_resolution(pause, CONFIRM))
     assert report["domain_confidence_score"] == 79.5
+
+
+# ---------------------------------------------------------------------------
+# Group 14 — duplicate_row_count computed by Python over the full frame
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def messy_df() -> pd.DataFrame:
+    return pd.read_csv(FIXTURES_DIR / "messy_data.csv")
+
+
+StageUpload = Callable[[str, Callable[[pathlib.Path], None]], str]
+
+
+def _stage_fixture(staged_upload: StageUpload, name: str) -> str:
+    """Stage a fixture under a unique name, so no real upload in backend/uploads is touched."""
+    source = FIXTURES_DIR / name
+    return staged_upload(f"{uuid.uuid4().hex}_{name}", lambda path: path.write_bytes(source.read_bytes()))
+
+
+def test_build_profiler_message_duplicate_row_count_is_zero_on_iris(iris_df: pd.DataFrame) -> None:
+    assert json.loads(build_profiler_message(iris_df, None))["duplicate_row_count"] == 0
+
+
+def test_build_profiler_message_uses_a_given_duplicate_row_count(messy_df: pd.DataFrame) -> None:
+    """profiler_node passes the count it computed once; the message must carry exactly that."""
+    parsed = json.loads(build_profiler_message(messy_df, None, None, 7))
+    assert parsed["duplicate_row_count"] == 7
+
+
+def test_build_profiler_message_counts_duplicates_that_contain_missing_values() -> None:
+    """pandas treats NaN in the same position as equal for duplicated()."""
+    df = pd.DataFrame({"a": [1.0, 1.0, 2.0], "b": [np.nan, np.nan, 3.0], "c": ["x", "x", None]})
+    assert json.loads(build_profiler_message(df, None))["duplicate_row_count"] == 1
+
+
+def test_build_profiler_message_duplicate_count_uses_every_column_not_the_first_50() -> None:
+    """Rows 0 and 1 agree in the first 50 columns and differ only in col_50: not duplicates."""
+    data = {f"col_{i}": [1, 1, 2] for i in range(55)}
+    data["col_50"] = [1, 2, 2]
+    wide_df = pd.DataFrame(data)
+    assert int(wide_df[wide_df.columns[:50]].duplicated().sum()) == 1  # what the 50-column subset would say
+
+    parsed = json.loads(build_profiler_message(wide_df, None))
+    assert parsed["columns_included"] == 50
+    assert parsed["duplicate_row_count"] == 0
+
+
+def test_load_dataframe_then_message_counts_15_duplicates_on_messy_data(staged_upload: StageUpload) -> None:
+    filename = _stage_fixture(staged_upload, "messy_data.csv")
+    df = asyncio.run(load_dataframe(filename))
+    assert json.loads(build_profiler_message(df, None))["duplicate_row_count"] == 15
+
+
+@pytest.mark.parametrize("fixture_name, expected", [("messy_data.csv", 15), ("iris.csv", 0)])
+def test_profiler_and_cleaner_count_the_same_duplicates(
+    staged_upload: StageUpload, fixture_name: str, expected: int
+) -> None:
+    """Each agent loads the upload with its own loader; the profile and the cleaning record must agree."""
+    from backend.agents.cleaner import load_dataframe_from_uploads, remove_duplicate_rows
+
+    filename = _stage_fixture(staged_upload, fixture_name)
+    profiler_df = asyncio.run(load_dataframe(filename))
+    cleaner_df = asyncio.run(load_dataframe_from_uploads(filename))
+
+    profiler_count = json.loads(build_profiler_message(profiler_df, None))["duplicate_row_count"]
+    _, _, entry = remove_duplicate_rows(cleaner_df)
+    assert profiler_count == entry["facts"]["duplicate_rows"] == expected
+
+
+def test_profiler_node_saves_python_duplicate_count_over_the_models(messy_df: pd.DataFrame) -> None:
+    """The live failure: the model wrote 0 on messy_data.csv; the saved profile must say 15."""
+    state = {"analysis_id": "test-analysis-id", "stored_filename": "messy_data.csv", "context": None}
+    llm_output = _ambiguous_profile_report("retail sales", 91)
+    llm_output["duplicate_row_count"] = 0
+    result, captured, create = _run_profiler_node(messy_df, state, llm_output)
+
+    assert json.loads(create.call_args.kwargs["messages"][0]["content"])["duplicate_row_count"] == 15
+    saved = [payload["profile_report"] for payload in captured if "profile_report" in payload]
+    assert len(saved) == 1
+    assert saved[0]["duplicate_row_count"] == 15
+    assert result["profile_report"]["duplicate_row_count"] == 15
+
+
+def test_profiler_node_resume_saves_python_duplicate_count(ambiguous_df: pd.DataFrame) -> None:
+    """The domain-pause resume (F1) goes through the same overwrite before its save."""
+    llm_output = _ambiguous_profile_report("model drifted domain", 57)
+    llm_output["duplicate_row_count"] = 7
+    result, captured, _ = _run_profiler_node(ambiguous_df, _resume_state(CONFIRM), llm_output)
+
+    saved = [payload["profile_report"] for payload in captured if "profile_report" in payload]
+    assert len(saved) == 1
+    assert saved[0]["duplicate_row_count"] == 0
+    assert saved[0]["domain_resolution"]["source"] == "user_confirmed"
+    assert result["profile_report"]["duplicate_row_count"] == 0
+
+
+def test_profiler_node_sets_duplicate_count_when_the_model_omits_it(messy_df: pd.DataFrame) -> None:
+    state = {"analysis_id": "test-analysis-id", "stored_filename": "messy_data.csv", "context": None}
+    llm_output = _ambiguous_profile_report("retail sales", 91)
+    del llm_output["duplicate_row_count"]
+    _, captured, _ = _run_profiler_node(messy_df, state, llm_output)
+
+    saved = [payload["profile_report"] for payload in captured if "profile_report" in payload]
+    assert saved[0]["duplicate_row_count"] == 15
+
+
+def test_profiler_node_counts_duplicates_over_every_column_of_a_wide_file() -> None:
+    """The count profiler_node computes and passes in, not only the message's fallback, uses every column."""
+    data = {f"col_{i}": [1, 1, 2, 2] for i in range(55)}
+    data["col_50"] = [1, 2, 3, 3]  # rows 0/1 differ only after the 50th column; rows 2/3 are exact duplicates
+    wide_df = pd.DataFrame(data)
+    state = {"analysis_id": "test-analysis-id", "stored_filename": "wide.csv", "context": None}
+    llm_output = _ambiguous_profile_report("sensor readings", 91)
+    _, captured, create = _run_profiler_node(wide_df, state, llm_output)
+
+    assert json.loads(create.call_args.kwargs["messages"][0]["content"])["duplicate_row_count"] == 1
+    saved = [payload["profile_report"] for payload in captured if "profile_report" in payload]
+    assert saved[0]["duplicate_row_count"] == 1

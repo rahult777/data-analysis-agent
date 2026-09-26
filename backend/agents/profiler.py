@@ -179,6 +179,7 @@ def build_profiler_message(
     df: pd.DataFrame,
     context: Optional[str],
     domain_resolution: Optional[dict] = None,
+    duplicate_row_count: Optional[int] = None,
 ) -> str:
     # shared pandas operations will be extracted to data_tools.py in a later task
     total_cols = len(df.columns)
@@ -206,6 +207,11 @@ def build_profiler_message(
     message_data: dict = {
         "row_count": len(df),
         "column_count": total_cols,
+        # Every column of the full frame, never df_subset: cleaner.remove_duplicate_rows
+        # uses the same definition, so the profile and the cleaning record agree.
+        "duplicate_row_count": (
+            duplicate_row_count if duplicate_row_count is not None else int(df.duplicated().sum())
+        ),
         "columns_included": len(columns),
         "first_5_rows": rows,
         "column_info": col_info,
@@ -348,7 +354,10 @@ async def profiler_node(state: PipelineState) -> PipelineState:
         domain_resolution = build_domain_resolution(
             state.get("answered_domain_pause"), state.get("user_pause_response")
         )
-        user_message = build_profiler_message(df, state.get("context"), domain_resolution)
+        duplicate_row_count = await asyncio.to_thread(lambda: int(df.duplicated().sum()))
+        user_message = build_profiler_message(
+            df, state.get("context"), domain_resolution, duplicate_row_count
+        )
 
         response = await asyncio.to_thread(
             lambda: client.messages.create(
@@ -381,6 +390,7 @@ async def profiler_node(state: PipelineState) -> PipelineState:
 
         message_inputs = json.loads(user_message)
         apply_computed_column_stats(parsed, message_inputs["computed_column_stats"], message_inputs["column_info"])
+        parsed["duplicate_row_count"] = message_inputs["duplicate_row_count"]
         if domain_resolution is not None:
             apply_domain_resolution(parsed, domain_resolution)
 
