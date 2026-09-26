@@ -285,7 +285,7 @@ tests/
   test_explainer.py
   test_api.py
   fixtures/
-    iris.csv                      150 rows, 5 columns, clean.
+    iris.csv                      15 rows, 5 columns, clean.
                                   Basic functionality tests.
     messy_data.csv                30% missing values, duplicate rows.
                                   Cleaning tests.

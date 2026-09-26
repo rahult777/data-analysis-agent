@@ -189,7 +189,7 @@ When writing the system prompt, switch to Opus model for the full depth of reaso
 
 ## Test Fixture
 
-Basic functionality: `tests/fixtures/iris.csv` (150 rows, 5 columns, clean data)
+Basic functionality: `tests/fixtures/iris.csv` (15 rows, 5 columns, clean data)
 Cleaning tests: `tests/fixtures/messy_data.csv` (30% missing values, duplicate rows)
 Time series tests: `tests/fixtures/time_series_data.csv` (date column, numeric values over time)
 
