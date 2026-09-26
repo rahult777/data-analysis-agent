@@ -7,7 +7,9 @@ executes cleaning operations, and produces a fully documented CleaningReport.
 import asyncio
 import json
 import logging
-import re
+import math
+import warnings
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -80,6 +82,49 @@ _OUTLIER_DOMAIN_SENTENCE: dict[str, str] = {
         "integration errors at merge points."
     ),
 }
+# The Cleaner's own decisions (cleaner_system.md, "The Operations"): a closed set,
+# each checked and run by Python. Nothing is executed from a decision's wording.
+_MODEL_OPERATIONS = (
+    "convert_type", "standardize_values", "fill_missing", "leave_missing", "flag_outliers", "note",
+)
+# Changes the prompt reserves for the system (duplicates, Step 4) or the user
+# (rows, columns and outlier values, Step 9), named so a request gets a precise refusal.
+_RESERVED_OPERATIONS: dict[str, str] = {
+    **dict.fromkeys(
+        ("drop_rows", "remove_rows", "exclude_rows", "delete_rows"),
+        "removing rows is decided only by the user, at a missing-value pause",
+    ),
+    **dict.fromkeys(
+        ("drop_column", "remove_column", "exclude_column", "delete_column"),
+        "removing a column is decided only by the user, at a missing-value pause",
+    ),
+    **dict.fromkeys(
+        ("remove_outliers", "drop_outliers", "exclude_outliers", "delete_outliers"),
+        "removing or excluding outlier values is decided only by the user, at an outlier pause",
+    ),
+    **dict.fromkeys(
+        ("remove_duplicates", "drop_duplicates", "dedupe", "deduplicate"),
+        "the system removes exact duplicate rows itself",
+    ),
+}
+_CONVERT_TARGETS = ("string", "numeric", "integer", "datetime")
+_FILL_METHODS = ("median", "mean", "mode", "constant")
+# A text column with at most this many distinct values is sent in full
+# (distinct_values), so standardize_values only ever maps values the model saw.
+_DISTINCT_VALUES_LIMIT = 30
+# When each operation runs. The user's pause choices run between "fill" and "flag".
+_PHASE_OF: dict[str, str] = {
+    "convert_type": "convert",
+    "standardize_values": "standardize",
+    "fill_missing": "fill",
+    "leave_missing": "fill",
+    "flag_outliers": "flag",
+    "note": "note",
+}
+_MODEL_PHASES_BEFORE_USER = ("convert", "standardize", "fill")
+_MODEL_PHASES_AFTER_USER = ("flag",)
+# Under the SDK's non-streaming ceiling (3600 s × 16000 / 128000 = 450 s < 600 s).
+_CLEANER_MAX_TOKENS = 16000
 
 
 async def load_dataframe_from_uploads(stored_filename: str) -> pd.DataFrame:
@@ -101,9 +146,9 @@ async def load_dataframe_from_uploads(stored_filename: str) -> pd.DataFrame:
     # Excel keeps date and number header cells as their native type, so a
     # column label can be a datetime or an int. json.dumps coerces int,
     # float and bool keys to JSON strings, so the LLM names a decision
-    # "2021" while the label is still int 2021 — execute_cleaning_operations
-    # then matches nothing and silently skips every decision for that
-    # column. A datetime key raises TypeError outright. map(str), not
+    # "2021" while the label is still int 2021 — the decision's column then
+    # matches nothing and no decision for that column can run. A datetime
+    # key raises TypeError outright. map(str), not
     # astype(str): it matches parquet's own stringification, so these
     # names stay identical to the ones the Analyzer later reads back.
     df.columns = df.columns.map(str)
@@ -233,7 +278,12 @@ def build_cleaner_message(
     missingness_patterns: dict,
     domain_resolution: Optional[dict] = None,
     outlier_review_columns: Optional[list] = None,
+    interactions: Optional[list] = None,
+    distinct_values: Optional[dict] = None,
+    duplicate_row_count: Optional[int] = None,
 ) -> str:
+    """The Cleaner's user message. `distinct_values` and `duplicate_row_count` are
+    computed here when not given (cleaner_node passes the ones it already has)."""
     columns = df.columns[:_MESSAGE_COLUMN_LIMIT].tolist()
     df_subset = df[columns]
 
@@ -261,20 +311,32 @@ def build_cleaner_message(
             col_info[col]["outlier_count"] = int(_iqr_outlier_mask(df_subset[col]).sum())
             col_info[col]["outlier_bounds"] = {"lower": bounds[0], "upper": bounds[1]}
 
+    semantically_categorical = (profile_report or {}).get("semantically_categorical_columns")
     message_data: dict = {
         "row_count": len(df),
         "column_count": len(df.columns),
         "columns_included": len(columns),
         "column_info": col_info,
+        "distinct_values": distinct_values if distinct_values is not None else _distinct_value_columns(df),
         "domain_hypothesis": domain_hypothesis,
         "provenance_hypothesis": provenance_hypothesis,
         "top_3_concerns": top_3_concerns or [],
+        # The Profiler's judgment (Step 5); its other structural fields are
+        # whole-table claims from a sample and are not sent (decisions.md, Build G).
+        "semantically_categorical_columns": (
+            semantically_categorical if isinstance(semantically_categorical, list) else []
+        ),
+        # Computed by the system over every row, never the Profiler's copy (0 on
+        # messy_data.csv against 15 real duplicates).
+        "duplicate_row_count": (
+            duplicate_row_count if duplicate_row_count is not None else int(df.duplicated().sum())
+        ),
         "missingness_patterns": missingness_patterns,
+        "interactions_detected": interactions or [],
     }
 
     if profile_report:
         message_data["profile_summary"] = {
-            "structural_observations": profile_report.get("structural_observations"),
             "top_3_patterns": profile_report.get("top_3_patterns"),
         }
 
@@ -369,181 +431,13 @@ def detect_interactions(df: pd.DataFrame, profile_report: dict) -> list:
     return interactions
 
 
-def classify_cleaning_decision(decision: dict) -> str:
-    """Name the operation execute_cleaning_operations will run for a decision.
+def re_profile_dataframe(df: pd.DataFrame, discrepancies: Optional[list] = None) -> dict:
+    """Counts on the cleaned frame, plus every operation whose own check failed.
 
-    The routing reads keywords in the decision's action and issue text, in a
-    fixed order; the first match wins. It is a heuristic over model-written
-    prose, so the returned name says what the text will trigger, not what the
-    model meant (errors.md 2026-09-25).
+    `passed` still means "no missing value remains" (a pessimistic, pre-existing
+    meaning, logged in errors.md); `discrepancies` lists each executed operation
+    that did not have the effect it should have (run_model_operations).
     """
-    if decision.get("column_name") is None:
-        return "dedupe"
-    action_lower = (decision.get("action", "") or "").lower()
-    issue_lower = (decision.get("issue", "") or "").lower()
-    combined = action_lower + " " + issue_lower
-    if "median" in combined:
-        return "median"
-    if "mean" in combined and "median" not in combined:
-        return "mean"
-    if "mode" in combined:
-        return "mode"
-    if any(
-        kw in combined
-        for kw in ("fill with", "impute with", "replace with", "set to", "replace missing")
-    ):
-        return "fill"
-    if any(
-        kw in combined
-        for kw in (
-            "drop column", "exclude column", "remove column",
-            "exclude from analysis", "drop from dataset",
-        )
-    ):
-        return "drop_column"
-    if any(
-        kw in combined
-        for kw in (
-            "drop rows", "remove rows", "drop records",
-            "remove records", "exclude rows",
-        )
-    ):
-        return "drop_rows"
-    if any(kw in combined for kw in ("convert", "cast", "change type", "dtype", "type to")):
-        return "dtype"
-    if "outlier" in combined or "flag" in combined:
-        if not any(kw in combined for kw in ("remove", "delete", "drop")):
-            return "outlier_flag"
-        return "outlier_noop"
-    return "unmatched"
-
-
-def execute_cleaning_operations(
-    df: pd.DataFrame,
-    decisions: list,
-) -> tuple[pd.DataFrame, list, dict]:
-    df = df.copy()
-    excluded_columns: list = []
-    outlier_flagged: dict = {}
-
-    for decision in decisions:
-        col = decision.get("column_name")
-        action = decision.get("action", "") or ""
-        issue = decision.get("issue", "") or ""
-        action_lower = action.lower()
-        issue_lower = issue.lower()
-        combined = action_lower + " " + issue_lower
-        op = classify_cleaning_decision(decision)
-
-        # 1. DUPLICATE REMOVAL — column_name is null for dataset-level decisions
-        if op == "dedupe":
-            before = len(df)
-            df = df.drop_duplicates()
-            after = len(df)
-            if before != after:
-                logger.info("Removed %d duplicate rows", before - after)
-            continue
-
-        if col not in df.columns:
-            logger.warning(
-                "Skipped decision — column '%s' not found in dataframe", col
-            )
-            continue
-
-        # 2. MEDIAN FILL
-        if op == "median":
-            if pd.api.types.is_numeric_dtype(df[col]):
-                df[col] = df[col].fillna(df[col].median())
-            continue
-
-        # 3. MEAN FILL (not median)
-        if op == "mean":
-            if pd.api.types.is_numeric_dtype(df[col]):
-                df[col] = df[col].fillna(df[col].mean())
-            continue
-
-        # 4. MODE FILL
-        if op == "mode":
-            mode_vals = df[col].mode()
-            if len(mode_vals) > 0:
-                df[col] = df[col].fillna(mode_vals.iloc[0])
-            continue
-
-        # 5. SPECIFIC VALUE FILL
-        if op == "fill":
-            match = re.search(
-                r"(?:fill|impute|replace|set)\s+(?:missing\s+)?(?:with|to)"
-                r"\s+['\"]?([^'\"]+)['\"]?",
-                action_lower,
-            )
-            if match:
-                raw_val = match.group(1).strip()
-                try:
-                    if pd.api.types.is_numeric_dtype(df[col]):
-                        fill_val = float(raw_val) if "." in raw_val else int(raw_val)
-                    else:
-                        fill_val = raw_val
-                    df[col] = df[col].fillna(fill_val)
-                except (ValueError, TypeError):
-                    df[col] = df[col].fillna(raw_val)
-            continue
-
-        # 6. DROP COLUMN
-        if op == "drop_column":
-            df = df.drop(columns=[col])
-            excluded_columns.append(col)
-            continue
-
-        # 7. DROP ROWS
-        if op == "drop_rows":
-            df = df.dropna(subset=[col])
-            continue
-
-        # 8. DTYPE CONVERT
-        if op == "dtype":
-            try:
-                if any(kw in combined for kw in ("string", "str", "object", "text")):
-                    df[col] = df[col].where(df[col].isna(), df[col].astype(str))
-                elif "category" in combined:
-                    df[col] = df[col].astype("category")
-                elif any(kw in combined for kw in ("float", "decimal", "numeric")):
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
-                elif any(kw in combined for kw in ("int", "integer")):
-                    df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
-                elif any(kw in combined for kw in ("datetime", "date", "timestamp")):
-                    df[col] = pd.to_datetime(df[col], errors="coerce")
-            except Exception as e:
-                logger.warning("DTYPE CONVERT failed for column '%s': %s", col, e)
-            continue
-
-        # 9. OUTLIER FLAG — annotate without removing
-        if op in ("outlier_flag", "outlier_noop"):
-            if op == "outlier_flag":
-                if pd.api.types.is_numeric_dtype(df[col]) and not pd.api.types.is_bool_dtype(df[col]):
-                    series = df[col].dropna()
-                    if len(series) > 4:
-                        q1 = series.quantile(0.25)
-                        q3 = series.quantile(0.75)
-                        iqr = q3 - q1
-                        lower = q1 - 1.5 * iqr
-                        upper = q3 + 1.5 * iqr
-                        flag_col = f"{col}_outlier_flag"
-                        df[flag_col] = (
-                            (df[col] < lower) | (df[col] > upper)
-                        ).astype(int)
-                        outlier_flagged[col] = int(df[flag_col].sum())
-            continue
-
-        logger.warning(
-            "Skipped decision — no matching operation rule: column=%s, action=%s",
-            col,
-            action,
-        )
-
-    return df, excluded_columns, outlier_flagged
-
-
-def re_profile_dataframe(df: pd.DataFrame) -> dict:
     missing_counts = {
         col: int(df[col].isna().sum())
         for col in df.columns
@@ -556,11 +450,35 @@ def re_profile_dataframe(df: pd.DataFrame) -> dict:
         "missing_counts": missing_counts,
         "columns_with_missing": columns_with_missing,
         "passed": len(columns_with_missing) == 0,
+        "discrepancies": list(discrepancies or []),
     }
 
 
 def _is_numeric_column(series: pd.Series) -> bool:
     return pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series)
+
+
+def _is_text_column(series: pd.Series) -> bool:
+    """Object or string dtype whose recorded values are all str (an all-missing one counts)."""
+    if not (series.dtype == object or isinstance(series.dtype, pd.StringDtype)):
+        return False
+    return pd.api.types.infer_dtype(series, skipna=True) in ("string", "empty")
+
+
+def _distinct_value_columns(df: pd.DataFrame) -> dict:
+    """{column: {value: count}}, most frequent first, for every text column the model
+    is shown (the first 50) with 1 to 30 distinct recorded values. The one source for
+    the message's distinct_values and the check that standardize_values only maps a
+    column whose every value the model saw."""
+    shown: dict = {}
+    for column in df.columns[:_MESSAGE_COLUMN_LIMIT]:
+        series = df[column]
+        if not _is_text_column(series):
+            continue
+        counts = series.value_counts(dropna=True)
+        if 0 < len(counts) <= _DISTINCT_VALUES_LIMIT:
+            shown[column] = {str(value): int(count) for value, count in counts.items()}
+    return shown
 
 
 def _iqr_bounds(series: pd.Series) -> Optional[tuple[float, float]]:
@@ -583,10 +501,10 @@ def _iqr_outlier_mask(series: pd.Series) -> pd.Series:
     """True where a value lies outside the 1.5×IQR bounds build_cleaner_message reports.
 
     The one outlier definition behind the message's counts, outlier_review, the
-    outlier pause, the outlier records and apply_user_decisions, so the values a
-    user answers about are exactly the ones the model was shown. (The keyword
-    router's OUTLIER FLAG branch for the model's own decisions still computes
-    its own bounds on the partly cleaned frame — errors.md 2026-09-25, IQR.)
+    outlier pause, the outlier records, apply_user_decisions and the Cleaner's
+    flag_outliers, so the values a user answers about and the rows the Cleaner
+    marks are exactly the ones the model was shown. (detect_interactions still
+    computes its own bounds — errors.md 2026-09-25, IQR.)
     """
     bounds = _iqr_bounds(series)
     if bounds is None:
@@ -692,6 +610,16 @@ def _excluded_by_answer(answered: list) -> set:
         for entry in answered
         if entry.get("pause_type") == _MISSING_VALUE_PAUSE
         and (entry.get("response") or {}).get("option_id") == "exclude_column"
+    }
+
+
+def _excluded_by_resolution(resolutions: list) -> set:
+    """The columns the user excluded, read from build_cleaner_resolutions' output (the
+    same rule as _excluded_by_answer, which reads the raw answered pauses)."""
+    return {
+        r["column_name"]
+        for r in resolutions
+        if r["pause_type"] == _MISSING_VALUE_PAUSE and r["option_id"] == "exclude_column"
     }
 
 
@@ -1063,7 +991,7 @@ def build_outlier_records(
     filtered. It replaces what filter_user_decided dropped on a user-decided
     column, and it is the one statement the report makes about a column the
     Cleaner routed "none" or did not route. Its state is computed from the
-    cleaned data, so where a Cleaner decision (still routed by keyword)
+    cleaned data, so where the Cleaner's own text (its reasoning, or a note)
     describes the same values differently, this record is the accurate one.
     """
     records: list = []
@@ -1191,32 +1119,97 @@ def build_cleaner_resolutions(answered: list) -> list:
     return resolutions
 
 
-def filter_user_decided(decisions: list, resolutions: list) -> list:
-    """Drop every model decision on a column the user decided; Python executes and records those.
+def filter_user_decided(decisions: list, resolutions: list) -> tuple[list, list]:
+    """Keep the Cleaner's decisions that may run beside the user's choices; return (kept, dropped).
 
-    The model's text would otherwise be routed by keyword and could run a
-    different operation than the user chose, or none, while the report claimed
-    the choice (errors.md 2026-09-25). Scoped by column, not by the guessed
-    operation: an outlier issue must state its SD distance "from the mean",
-    which the router reads as a mean fill. A legitimate model decision on the
-    column (a type conversion, a fill of a different gap) is lost with it, but
-    it is also absent from the report, so the report still matches what ran.
-    That includes the model's outlier decision on a column whose missing values
-    the user decided: build_outlier_records states those outliers' routing and
-    true final state instead.
+    Python executes and records the user's choices itself (apply_user_decisions).
+    On a column the user decided, the Cleaner keeps a `note`; a `flag_outliers`
+    when the user answered only the missing-value pause there (the flag adds its
+    own column and changes no value); and a `fill_missing` or `leave_missing` when
+    the user answered only the outlier pause there — its smaller gaps are then
+    handled and recorded, not silently dropped. Fills run before the user's
+    outlier choices (_MODEL_PHASES_BEFORE_USER), so a fill touches only the
+    originally missing values and the values the user excludes as outliers stay
+    missing. Everything else would restate the user's choice (cleaner_system.md
+    §8.4) or change the column the user was asked about — a conversion to text
+    before the user's median would raise after the user had answered. Every
+    decision on a column the user excluded is dropped. The operation is read from
+    the decision's `operation` field only, never from its wording.
     """
-    decided_columns = {r["column_name"] for r in resolutions}
+    decided = {r["column_name"] for r in resolutions}
+    excluded = _excluded_by_resolution(resolutions)
+    outlier_answered = {r["column_name"] for r in resolutions if r["pause_type"] == _OUTLIER_PAUSE}
+    missing_answered = {r["column_name"] for r in resolutions if r["pause_type"] == _MISSING_VALUE_PAUSE}
     kept: list = []
+    dropped: list = []
     for decision in decisions:
-        column = decision.get("column_name")
-        if column in decided_columns:
-            logger.warning(
-                "Dropped the Cleaner's own decision on user-decided column '%s' (%s): %r",
-                column, classify_cleaning_decision(decision), decision.get("action"),
+        column = decision.get("column_name") if isinstance(decision, dict) else None
+        column = column if isinstance(column, str) else None  # anything else is rejected later
+        operation = decision.get("operation") if isinstance(decision, dict) else None
+        allowed = (
+            column not in decided
+            or (
+                column not in excluded
+                and (
+                    operation == "note"
+                    or (operation == "flag_outliers" and column not in outlier_answered)
+                    or (operation in ("fill_missing", "leave_missing") and column not in missing_answered)
+                )
             )
+        )
+        if allowed:
+            kept.append(decision)
             continue
-        kept.append(decision)
-    return kept
+        logger.warning(
+            "Dropped the Cleaner's own decision on user-decided column '%s' (operation %r): %r",
+            column, operation, decision.get("action"),
+        )
+        dropped.append(decision)
+    return kept, dropped
+
+
+# Shared primitives: the one implementation of each change to the data, used by
+# the user's pause choices (apply_user_decisions) and the Cleaner's own
+# operations (run_model_operations). Each returns a new frame; the caller checks
+# preconditions and writes the record.
+
+
+def _impute_value(series: pd.Series, method: str) -> object:
+    """The median, mean or mode of a column's recorded values."""
+    recorded = series.dropna()
+    return {
+        "median": lambda: recorded.median(),
+        "mean": lambda: recorded.mean(),
+        "mode": lambda: recorded.mode().iloc[0],
+    }[method]()
+
+
+def _fill_missing(df: pd.DataFrame, column: str, value: object) -> pd.DataFrame:
+    df = df.copy()
+    df[column] = df[column].fillna(value)
+    return df
+
+
+def _drop_column(df: pd.DataFrame, column: str) -> pd.DataFrame:
+    return df.drop(columns=[column])
+
+
+def _drop_rows_missing(df: pd.DataFrame, column: str) -> pd.DataFrame:
+    return df.dropna(subset=[column])
+
+
+def _mark_rows(df: pd.DataFrame, flag_column: str, mask: pd.Series) -> pd.DataFrame:
+    """Write a 0/1 flag column from a mask already aligned to df's index."""
+    df = df.copy()
+    df[flag_column] = mask.astype(int)
+    return df
+
+
+def _set_missing(df: pd.DataFrame, column: str, mask: pd.Series) -> pd.DataFrame:
+    """Set the masked values of a column to missing; rows are kept."""
+    df = df.copy()
+    df.loc[mask, column] = np.nan
+    return df
 
 
 def apply_user_decisions(
@@ -1243,11 +1236,7 @@ def apply_user_decisions(
     ordered = [r for r in resolutions if r["pause_type"] == _MISSING_VALUE_PAUSE] + [
         r for r in resolutions if r["pause_type"] == _OUTLIER_PAUSE
     ]
-    user_excluded = {
-        r["column_name"]
-        for r in resolutions
-        if r["pause_type"] == _MISSING_VALUE_PAUSE and r["option_id"] == "exclude_column"
-    }
+    user_excluded = _excluded_by_resolution(resolutions)
     for resolution in ordered:
         column = resolution["column_name"]
         option_id = resolution["option_id"]
@@ -1292,24 +1281,20 @@ def apply_user_decisions(
                     raise ValueError(f"Cannot impute '{column}' with the {method_id}: not numeric.")
                 if method_id not in _IMPUTE_METHODS or len(recorded) == 0:
                     raise ValueError(f"Cannot impute '{column}' with {method_id!r}.")
-                value = {
-                    "median": lambda: recorded.median(),
-                    "mean": lambda: recorded.mean(),
-                    "mode": lambda: recorded.mode().iloc[0],
-                }[method_id]()
-                df[column] = df[column].fillna(value)
+                value = _impute_value(df[column], method_id)
+                df = _fill_missing(df, column, value)
                 action = (
                     f"imputed the {missing_count} missing values in `{column}` with the "
                     f"{method_id} ({_format_value(value)})"
                 )
                 reason += f" The user accepted this method's assumption: {option.get('assumption')}"
             elif option_id == "exclude_column":
-                df = df.drop(columns=[column])
+                df = _drop_column(df, column)
                 excluded_columns.append(column)
                 action = f"excluded `{column}` from the dataset and from analysis"
             elif option_id == "exclude_rows":
                 rows_before = len(df)
-                df = df.dropna(subset=[column])
+                df = _drop_rows_missing(df, column)
                 action = f"removed the {rows_before - len(df)} rows where `{column}` was missing"
             elif option_id == _PRESERVE_OPTION_ID:
                 action = (
@@ -1333,14 +1318,14 @@ def apply_user_decisions(
                 else "none remaining"
             )
             flag_column = f"{column}_outlier_flag"
-            df[flag_column] = mask.astype(int)
+            df = _mark_rows(df, flag_column, mask)
             if option_id in _OUTLIER_KEEP_IDS:
                 action = (
                     f"kept the {outlier_count} outlier value(s) in `{column}` as valid data; "
                     f"marked in `{flag_column}`"
                 )
             elif option_id in ("flag_as_suspected_error", "exclude_pending_clinical_review"):
-                df.loc[mask, column] = np.nan
+                df = _set_missing(df, column, mask)
                 pending = (
                     "pending clinical review"
                     if option_id == "exclude_pending_clinical_review"
@@ -1369,6 +1354,735 @@ def apply_user_decisions(
             "resolution_summary": action,
         })
     return df, decisions, excluded_columns, outliers_flagged, record
+
+
+def remove_duplicate_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, dict, dict]:
+    """The system's Step 4: remove exact duplicate rows before any other cleaning.
+
+    Always runs, with Python's own count; the Cleaner neither decides nor
+    reports it, so a false "no duplicates" claim cannot reach the report.
+    Returns (frame, decision record, operations entry). The first occurrence of
+    each row is kept with its index label, which the outlier masks rely on.
+    """
+    rows_before = len(df)
+    duplicated = df.duplicated()
+    count = int(duplicated.sum())
+    cleaned = df[~duplicated]  # what drop_duplicates() does, with the mask computed once
+    if count:
+        issue = f"{count} exact duplicate row(s) (identical in every column) in the uploaded data"
+        action = f"System step: removed the {count} exact duplicate rows, keeping the first occurrence of each"
+    else:
+        issue = "No exact duplicate rows in the uploaded data"
+        action = "System step: checked for exact duplicate rows and found none; nothing removed"
+    record = {
+        "column_name": None,
+        "issue": issue,
+        "action": action,
+        "reason": (
+            "Recorded by the system, not written by the Cleaner. Exact duplicates are removed "
+            "before any other cleaning, so that every count, fill value and statistic describes "
+            f"each record once; {rows_before} rows became {len(cleaned)}."
+        ),
+    }
+    entry = {
+        "source": "system",
+        "operation": "remove_duplicates",
+        "column_name": None,
+        "params": {},
+        "status": "executed",
+        "detail": action,
+        "facts": {"duplicate_rows": count, "rows_before": rows_before, "rows_after": len(cleaned)},
+    }
+    return cleaned, record, entry
+
+
+def _is_scalar_constant(value: object) -> bool:
+    if isinstance(value, str):
+        return True
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def _param_problem(operation: str, params: dict, df: pd.DataFrame) -> Optional[str]:
+    """Why a decision's params do not fit its operation, or None. Shape only: whether
+    the operation is possible for the column's data is checked when it runs."""
+    if operation == "convert_type":
+        if params.get("to") not in _CONVERT_TARGETS:
+            return f"params.to must be one of {list(_CONVERT_TARGETS)}, got {params.get('to')!r}"
+    elif operation == "standardize_values":
+        mapping = params.get("mapping")
+        if not isinstance(mapping, dict) or not mapping:
+            return "params.mapping must be a non-empty object of {existing value: replacement}"
+        if not all(isinstance(k, str) for k in mapping) or not all(
+            isinstance(v, str) and v.strip() for v in mapping.values()
+        ):
+            return "every params.mapping key and replacement must be non-empty text"
+    elif operation == "fill_missing":
+        method = params.get("method")
+        if method not in _FILL_METHODS:
+            return f"params.method must be one of {list(_FILL_METHODS)}, got {method!r}"
+        if method == "constant" and not _is_scalar_constant(params.get("value")):
+            return f"a constant fill needs params.value as text or a finite number, got {params.get('value')!r}"
+    elif operation == "note" and "columns" in params:
+        columns = params["columns"]
+        if not isinstance(columns, list) or not all(isinstance(c, str) and c in df.columns for c in columns):
+            return "params.columns must list columns that are in the data"
+    return None
+
+
+def _reject(item: dict, detail: str, contract: bool = False) -> None:
+    item["status"] = "not_executed"
+    item["detail"] = detail
+    item["contract"] = contract
+
+
+def plan_model_decisions(decisions: object, df: pd.DataFrame, numbers: Optional[list] = None) -> list:
+    """Check every Cleaner decision's operation before anything runs. Never raises.
+
+    One item per decision, in the Cleaner's order: "planned", or "not_executed"
+    with the reason. `numbers` gives each decision's position in the Cleaner's
+    full report (before filter_user_decided), so "decision 3" in a record means
+    the report's third decision. `contract` marks a decision with no valid operation
+    (missing, unknown, reserved, malformed params, or no usable column); a
+    decision without a column is shown only as a note naming two or more
+    columns (`printed`), so dataset-level prose like "no duplicate rows
+    present" never reaches the report. Contradicting decisions on one column
+    (two fills, a fill and leave_missing, two conversions, two mappings) are
+    all refused; an exact repeat is refused as a repeat. Nothing is guessed.
+    """
+    items: list = []
+    for position, decision in enumerate(decisions if isinstance(decisions, list) else []):
+        item = {
+            "index": numbers[position] if numbers is not None else position,
+            "decision": decision if isinstance(decision, dict) else {},
+            "column_name": None,
+            "operation": None,
+            "params": {},
+            "status": "planned",
+            "detail": "",
+            "contract": False,
+            "printed": False,
+            "facts": {},
+            "verification": None,
+        }
+        items.append(item)
+        if not isinstance(decision, dict):
+            _reject(item, "the decision is not an object", contract=True)
+            continue
+        column = decision.get("column_name")
+        operation = decision.get("operation")
+        params = decision.get("params", {})
+        params = {} if params is None else params
+        item["column_name"] = column if isinstance(column, str) else None
+        item["operation"] = operation if isinstance(operation, str) else None
+        item["params"] = params if isinstance(params, dict) else {}
+        item["printed"] = isinstance(column, str) and bool(column.strip())
+        if not isinstance(operation, str) or not operation.strip():
+            _reject(item, "the decision names no operation", contract=True)
+        elif operation in _RESERVED_OPERATIONS:
+            _reject(item, f"'{operation}' is not an operation the Cleaner can run: {_RESERVED_OPERATIONS[operation]}", contract=True)
+        elif operation not in _MODEL_OPERATIONS:
+            _reject(item, f"'{operation}' is not one of the Cleaner's operations ({', '.join(_MODEL_OPERATIONS)})", contract=True)
+        elif not isinstance(params, dict):
+            _reject(item, "its params are not an object", contract=True)
+        elif column is None:
+            columns = params.get("columns")
+            if operation == "note" and isinstance(columns, list) and len(columns) >= 2 and not _param_problem(operation, params, df):
+                item["printed"] = True
+            else:
+                _reject(item, "a decision with no column can only be a note naming two or more columns", contract=True)
+        elif not isinstance(column, str) or column not in df.columns:
+            _reject(item, f"there is no column {column!r} in the data", contract=True)
+        else:
+            problem = _param_problem(operation, params, df)
+            if problem:
+                _reject(item, problem, contract=True)
+
+    by_column: dict = {}
+    for item in items:
+        if item["status"] == "planned" and item["operation"] != "note":
+            by_column.setdefault(item["column_name"], []).append(item)
+    for column, group in by_column.items():
+        seen: dict = {}
+        unique: list = []
+        for item in group:
+            key = (item["operation"], json.dumps(item["params"], sort_keys=True, default=str))
+            if key in seen:
+                _reject(item, f"it repeats decision {seen[key] + 1} on `{column}`")
+                continue
+            seen[key] = item["index"]
+            unique.append(item)
+        conflicting: list = []
+        for kinds in (("fill_missing", "leave_missing"), ("convert_type",), ("standardize_values",)):
+            members = [item for item in unique if item["operation"] in kinds]
+            if len(members) > 1:
+                conflicting.append(members)
+        for members in conflicting:
+            numbers = ", ".join(str(item["index"] + 1) for item in members)
+            for item in members:
+                _reject(
+                    item,
+                    f"decisions {numbers} on `{column}` contradict each other "
+                    f"({', '.join(_describe_request(m) for m in members)}), so none of them was run",
+                )
+    return items
+
+
+def _describe_request(item: dict) -> str:
+    """The requested operation, rendered from its structured fields only."""
+    operation, params = item["operation"], item["params"]
+    if operation is None:
+        return "a decision with no operation"
+    if operation == "convert_type":
+        return f"convert_type to {params.get('to')}"
+    if operation == "fill_missing":
+        if params.get("method") == "constant":
+            return f"fill_missing with the value {params.get('value')!r}"
+        return f"fill_missing with the {params.get('method')}"
+    if operation == "standardize_values" and isinstance(params.get("mapping"), dict):
+        return f"standardize_values ({len(params['mapping'])} value(s) to replace)"
+    if operation in _MODEL_OPERATIONS:
+        return operation
+    return f"the operation {operation!r}"
+
+
+def _examples(values: pd.Series) -> str:
+    return ", ".join(repr(v) for v in values.drop_duplicates().head(5).tolist())
+
+
+def _run_convert(
+    df: pd.DataFrame, item: dict, df_raw: pd.DataFrame, shown: dict, excluded: dict
+) -> pd.DataFrame:
+    column, target = item["column_name"], item["params"]["to"]
+    series = df[column]
+    before = str(series.dtype)
+    recorded = int(series.notna().sum())
+    if pd.api.types.is_bool_dtype(series):
+        _reject(item, f"`{column}` holds True/False values, which are not converted")
+        return df
+    if target == "string":
+        if _is_text_column(series):
+            _reject(item, f"`{column}` is already stored as text")
+            return df
+        # Built explicitly as object: `where` would keep a datetime64 or Int64 dtype.
+        converted = pd.Series(
+            np.where(series.isna(), np.nan, series.astype(str)), index=series.index, dtype=object
+        )
+    elif target in ("numeric", "integer"):
+        if pd.api.types.is_datetime64_any_dtype(series):
+            _reject(item, f"`{column}` holds dates, which are not converted to numbers")
+            return df
+        if target == "numeric" and _is_numeric_column(series):
+            _reject(item, f"`{column}` is already numeric ({before})")
+            return df
+        if target == "integer" and pd.api.types.is_integer_dtype(series):
+            _reject(item, f"`{column}` already holds whole numbers ({before})")
+            return df
+        numbers = series if _is_numeric_column(series) else pd.to_numeric(series, errors="coerce")
+        lost = series.notna() & numbers.isna()
+        if lost.any():
+            _reject(
+                item,
+                f"{int(lost.sum())} recorded value(s) in `{column}` are not numbers "
+                f"(e.g. {_examples(series[lost])}), and converting would erase them",
+            )
+            return df
+        if target == "integer":
+            recorded_numbers = numbers.dropna().astype(float)
+            fractional = recorded_numbers[~np.isfinite(recorded_numbers) | (recorded_numbers % 1 != 0)]
+            if len(fractional):
+                _reject(
+                    item,
+                    f"{len(fractional)} value(s) in `{column}` are not whole numbers "
+                    f"(e.g. {_examples(fractional)})",
+                )
+                return df
+            converted = numbers.astype("Int64")
+        else:
+            converted = numbers
+    else:  # datetime
+        if pd.api.types.is_datetime64_any_dtype(series):
+            _reject(item, f"`{column}` is already stored as dates ({before})")
+            return df
+        if not _is_text_column(series):
+            _reject(item, f"only text is converted to dates; `{column}` is {before}")
+            return df
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            converted = pd.to_datetime(series, errors="coerce")
+        lost = series.notna() & converted.isna()
+        if lost.any():
+            _reject(
+                item,
+                f"{int(lost.sum())} recorded value(s) in `{column}` are not dates "
+                f"(e.g. {_examples(series[lost])}), and converting would erase them",
+            )
+            return df
+    df = df.copy()
+    df[column] = converted
+    matches = {
+        "string": _is_text_column,
+        "numeric": _is_numeric_column,
+        "integer": pd.api.types.is_integer_dtype,
+        "datetime": pd.api.types.is_datetime64_any_dtype,
+    }[target](df[column])
+    kept = int(df[column].notna().sum())
+    if not matches or kept != recorded:
+        item["verification"] = (
+            f"`{column}` is {df[column].dtype} with {kept} of {recorded} recorded values after the conversion"
+        )
+    item["status"] = "executed"
+    item["facts"] = {"dtype_before": before, "dtype_after": str(df[column].dtype), "recorded": recorded}
+    return df
+
+
+def _run_standardize(
+    df: pd.DataFrame, item: dict, df_raw: pd.DataFrame, shown: dict, excluded: dict
+) -> pd.DataFrame:
+    column, mapping = item["column_name"], item["params"]["mapping"]
+    series = df[column]
+    if column not in shown:
+        _reject(
+            item,
+            f"the Cleaner was not shown every value of `{column}` (only text columns with at most "
+            f"{_DISTINCT_VALUES_LIMIT} distinct values are sent in full)",
+        )
+        return df
+    if not _is_text_column(series):
+        _reject(item, f"`{column}` is no longer a text column (it is {series.dtype})")
+        return df
+    # Checked against the values the model was shown (the uploaded data), so a
+    # variant that only occurred in a removed duplicate row is not an error.
+    unknown = [key for key in mapping if key not in shown[column]]
+    if unknown:
+        _reject(
+            item,
+            f"{len(unknown)} of the values to replace are not in `{column}` "
+            f"({', '.join(repr(k) for k in unknown[:5])}), so nothing was replaced",
+        )
+        return df
+    changes = {key: value for key, value in mapping.items() if key != value}
+    counts = {key: int((series == key).sum()) for key in changes}
+    if not changes or not sum(counts.values()):
+        _reject(item, f"none of the mapped values of `{column}` would change")
+        return df
+    distinct_before = int(series.nunique())
+    df = df.copy()
+    df[column] = series.map(lambda value: changes.get(value, value) if isinstance(value, str) else value)
+    remaining = [key for key in changes if key not in changes.values() and (df[column] == key).any()]
+    if remaining or int(df[column].notna().sum()) != int(series.notna().sum()):
+        item["verification"] = f"values still present in `{column}` after the replacement: {remaining}"
+    item["status"] = "executed"
+    item["facts"] = {
+        "replaced": {key: {"to": changes[key], "cells": counts[key]} for key in changes},
+        "cells_changed": sum(counts.values()),
+        "distinct_before": distinct_before,
+        "distinct_after": int(df[column].nunique()),
+    }
+    return df
+
+
+def _constant_problem(series: pd.Series, column: str, value: object) -> Optional[str]:
+    if pd.api.types.is_bool_dtype(series):
+        return f"`{column}` holds True/False values, which are not filled with a constant"
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return f"`{column}` holds dates, which are not filled with a constant"
+    if _is_numeric_column(series):
+        if isinstance(value, str):
+            return f"`{column}` is numeric ({series.dtype}), so the fill value must be a number; {value!r} is text"
+        if pd.api.types.is_integer_dtype(series) and float(value) % 1 != 0:
+            return f"`{column}` holds whole numbers ({series.dtype}), so the fill value must be one; {value!r} is not"
+        return None
+    if _is_text_column(series):
+        if not isinstance(value, str):
+            return f"`{column}` is text, so the fill value must be text; {value!r} is a number"
+        return None
+    return f"`{column}` is {series.dtype}, which is not filled with a constant"
+
+
+def _run_fill(
+    df: pd.DataFrame, item: dict, df_raw: pd.DataFrame, shown: dict, excluded: dict
+) -> pd.DataFrame:
+    column = item["column_name"]
+    series = df[column]
+    missing = int(series.isna().sum())
+    if item["operation"] == "leave_missing":
+        if missing == 0:
+            _reject(item, f"`{column}` has no missing values, so there were none to leave")
+            return df
+        item["status"] = "executed"
+        item["facts"] = {"missing": missing, "rows": len(df)}
+        # The rows left missing, re-checked on the final frame (build_model_records):
+        # a user's exclude_rows may later remove some of them, which is not a failure.
+        item["missing_rows"] = series.index[series.isna()]
+        return df
+    method = item["params"]["method"]
+    if missing == 0:
+        _reject(item, f"`{column}` has no missing values")
+        return df
+    # Where the user excluded this column's outliers as errors, the fill value is
+    # computed without them: the fill runs before the user's choice is applied, and
+    # a value built from rejected errors was never shown to the user.
+    excluded_mask = excluded.get(column)
+    basis = series
+    excluded_count = 0
+    if excluded_mask is not None:
+        aligned = excluded_mask.reindex(series.index, fill_value=False).astype(bool)
+        excluded_count = int(aligned.sum())
+        basis = series[~aligned]
+    recorded = basis.dropna()
+    if method in ("median", "mean", "mode") and len(recorded) == 0:
+        _reject(item, f"`{column}` has no recorded values to compute a {method} from")
+        return df
+    if method in ("median", "mean"):
+        if not _is_numeric_column(series):
+            _reject(item, f"{method} imputation needs a numeric column; `{column}` is {series.dtype}")
+            return df
+        value = _impute_value(basis, method)
+        if pd.api.types.is_integer_dtype(series):
+            if float(value) % 1 != 0:
+                _reject(
+                    item,
+                    f"the {method} of `{column}` is {_format_value(value)}, not a whole number, "
+                    f"and the column holds whole numbers ({series.dtype})",
+                )
+                return df
+            value = int(value)
+    elif method == "mode":
+        value = _impute_value(basis, "mode")
+    else:
+        value = item["params"]["value"]
+        problem = _constant_problem(series, column, value)
+        if problem:
+            _reject(item, problem)
+            return df
+    dtype_before = str(series.dtype)
+    df = _fill_missing(df, column, value)
+    remaining = int(df[column].isna().sum())
+    # A numeric column must stay numeric; pandas may legitimately narrow an object
+    # column (True/False values with gaps become bool once filled).
+    if remaining or (_is_numeric_column(series) and not _is_numeric_column(df[column])):
+        item["verification"] = (
+            f"`{column}` has {remaining} missing value(s) and dtype {df[column].dtype} "
+            f"(was {dtype_before}) after the fill"
+        )
+    item["status"] = "executed"
+    item["facts"] = {
+        "missing": missing,
+        "rows": len(df),
+        "value": value if isinstance(value, str) else _format_value(value),
+        "excluded_outliers": excluded_count if method != "constant" else 0,
+    }
+    return df
+
+
+def _run_flag(
+    df: pd.DataFrame, item: dict, df_raw: pd.DataFrame, shown: dict, excluded: dict
+) -> pd.DataFrame:
+    column = item["column_name"]
+    flag_column = f"{column}_outlier_flag"
+    if flag_column in df.columns:
+        _reject(item, f"a column named `{flag_column}` already exists")
+        return df
+    if not _is_numeric_column(df_raw[column]):
+        _reject(item, f"`{column}` is not numeric, so it has no IQR outliers")
+        return df
+    if not _is_numeric_column(df[column]):
+        _reject(item, f"`{column}` is no longer numeric (it is now {df[column].dtype}), so its outliers are not marked")
+        return df
+    # The raw-upload mask the model was shown, aligned by index label (F3's rule).
+    raw_mask = _iqr_outlier_mask(df_raw[column])
+    if not raw_mask.any():
+        _reject(item, f"`{column}` has no values outside the IQR bounds")
+        return df
+    mask = raw_mask.reindex(df.index, fill_value=False).astype(bool)
+    present = int(mask.sum())
+    if present == 0:
+        _reject(item, f"none of the {int(raw_mask.sum())} rows holding `{column}`'s outliers remain in the data")
+        return df
+    df = _mark_rows(df, flag_column, mask)
+    if int(df[flag_column].sum()) != present:
+        item["verification"] = f"`{flag_column}` marks {int(df[flag_column].sum())} rows, not {present}"
+    lower, upper = _iqr_bounds(df_raw[column])
+    item["status"] = "executed"
+    item["facts"] = {
+        "outliers": int(raw_mask.sum()),
+        "marked": present,
+        "lower": _format_value(lower),
+        "upper": _format_value(upper),
+        "flag_column": flag_column,
+    }
+    return df
+
+
+_RUNNERS = {
+    "convert_type": _run_convert,
+    "standardize_values": _run_standardize,
+    "fill_missing": _run_fill,
+    "leave_missing": _run_fill,
+    "flag_outliers": _run_flag,
+}
+
+
+def run_model_operations(
+    df: pd.DataFrame,
+    items: list,
+    phases: tuple,
+    df_raw: pd.DataFrame,
+    shown: dict,
+    excluded: Optional[dict] = None,
+) -> pd.DataFrame:
+    """Run the planned Cleaner operations of the given phases, in phase order. Never raises.
+
+    Each operation is checked against the frame as it is when it runs; one
+    that is impossible for the column, or fails unexpectedly, leaves the frame
+    unchanged and is recorded "not_executed" with the reason. `shown` is
+    _distinct_value_columns of the uploaded data. `excluded` maps a column to the
+    raw-upload mask of outlier values the user chose to exclude (set to missing)
+    at its outlier pause: a fill's median, mean or mode is computed without them.
+    """
+    for phase in phases:
+        for item in items:
+            if item["status"] != "planned" or _PHASE_OF.get(item["operation"]) != phase:
+                continue
+            if item["column_name"] not in df.columns:
+                _reject(item, f"`{item['column_name']}` is no longer in the data")
+                continue
+            try:
+                df = _RUNNERS[item["operation"]](df, item, df_raw, shown, excluded or {})
+            except Exception as exc:
+                logger.exception("Cleaner operation %s on '%s' failed", item["operation"], item["column_name"])
+                _reject(item, f"it failed unexpectedly ({type(exc).__name__}: {exc})")
+    return df
+
+
+def _cleaner_reason(item: dict, acted: bool) -> str:
+    reason = item["decision"].get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return "The Cleaner gave no reasoning."
+    prefix = "The Cleaner's reasoning: " if acted else "The Cleaner's reasoning (not acted on): "
+    return prefix + reason.strip()
+
+
+def _executed_record(item: dict) -> tuple[str, str]:
+    """(issue, action) for an executed operation, from the facts Python computed."""
+    column, facts, operation = item["column_name"], item["facts"], item["operation"]
+    if operation == "convert_type":
+        return (
+            f"`{column}` was stored as {facts['dtype_before']} ({facts['recorded']} recorded value(s))",
+            f"converted `{column}` from {facts['dtype_before']} to {facts['dtype_after']} "
+            f"({item['params']['to']}); all {facts['recorded']} recorded value(s) kept",
+        )
+    if operation == "standardize_values":
+        pairs = "; ".join(
+            f"'{key}' → '{change['to']}' ({change['cells']})" for key, change in facts["replaced"].items()
+        )
+        return (
+            f"`{column}` had {facts['distinct_before']} distinct values, including variants of the same value",
+            f"replaced {facts['cells_changed']} value(s) in `{column}`: {pairs}; "
+            f"{facts['distinct_before']} distinct values became {facts['distinct_after']}",
+        )
+    if operation in ("fill_missing", "leave_missing"):
+        issue_missing = (
+            f"{facts['missing']} missing values in `{column}` "
+            f"({facts['missing'] / facts['rows'] * 100 if facts['rows'] else 0:.1f}% of {facts['rows']} rows)"
+        )
+    if operation == "fill_missing":
+        method = item["params"]["method"]
+        if method != "constant":
+            what = f"the {method} ({facts['value']})"
+        elif isinstance(item["params"]["value"], str):
+            what = f"the value '{facts['value']}'"
+        else:
+            what = f"the value {facts['value']}"
+        without = facts.get("excluded_outliers", 0)
+        if without:
+            what += f", computed without the {without} value(s) the user excluded as outliers"
+        return issue_missing, f"filled the {facts['missing']} missing values in `{column}` with {what}"
+    if operation == "leave_missing":
+        later = facts.get("rows_removed_later", 0)
+        return issue_missing, (
+            f"left the {facts['missing']} missing values in `{column}` unchanged "
+            "(nothing imputed, no rows removed)"
+            + (f"; {later} of those rows were later removed by the user's row exclusion" if later else "")
+        )
+    return (  # flag_outliers
+        f"{facts['outliers']} value(s) in `{column}` lie outside the IQR bounds "
+        f"({facts['lower']} to {facts['upper']}) on the uploaded data",
+        f"marked the {facts['marked']} row(s) holding these values in `{facts['flag_column']}` "
+        "(1 = outside the IQR bounds); the values themselves are unchanged and stay in every statistic",
+    )
+
+
+def build_model_records(items: list, df_final: pd.DataFrame) -> tuple[list, dict, list]:
+    """Python-written decision records for the Cleaner's decisions, in its order.
+
+    Returns (records, outliers_flagged, discrepancies). An executed operation is
+    stated from what ran, with Python's counts; a refused one says "Not
+    executed" and why; a note says no data changed. The Cleaner's own wording
+    appears only as its reasoning (or as a note's observation), never as the
+    claim of what happened. A leave_missing is re-checked on the final frame.
+    """
+    records: list = []
+    flagged: dict = {}
+    discrepancies: list = []
+    for item in items:
+        column = item["column_name"]
+        if item["operation"] == "leave_missing" and item["status"] == "executed" and column in df_final.columns:
+            # Every row left missing that is still in the data must still be missing;
+            # rows the user's exclude_rows removed afterwards are counted, not failed.
+            present = item.pop("missing_rows").intersection(df_final.index)
+            still_missing = int(df_final.loc[present, column].isna().sum())
+            item["facts"]["rows_removed_later"] = item["facts"]["missing"] - len(present)
+            if still_missing != len(present):
+                item["verification"] = (
+                    f"{len(present) - still_missing} of the {len(present)} values left missing in "
+                    f"`{column}` were filled afterwards"
+                )
+        if item["status"] == "planned" and item["operation"] == "note":
+            item["status"] = "noted"
+        if item["operation"] == "flag_outliers" and item["status"] == "executed":
+            flagged[column] = item["facts"]["marked"]
+        if item.get("verification"):
+            discrepancies.append(f"Decision {item['index'] + 1} ({_describe_request(item)}): {item['verification']}")
+        if not item["printed"]:
+            continue
+        if item["status"] == "noted":
+            observation = item["decision"].get("issue")
+            columns = item["params"].get("columns") or []
+            about = f" about {', '.join(f'`{c}`' for c in columns)}" if columns else ""
+            records.append({
+                "column_name": column,
+                "issue": "The Cleaner's observation: " + (
+                    observation.strip() if isinstance(observation, str) and observation.strip() else "(none given)"
+                ),
+                "action": f"No data changed: a note by the Cleaner{about}, not an operation",
+                "reason": _cleaner_reason(item, acted=True),
+            })
+        elif item["status"] == "executed":
+            issue, action = _executed_record(item)
+            prefix = (
+                f"Cleaner decision (verification failed: {item['verification']}): "
+                if item.get("verification")
+                else "Cleaner decision: "
+            )
+            records.append({
+                "column_name": column,
+                "issue": issue,
+                "action": prefix + action,
+                "reason": _cleaner_reason(item, acted=True),
+            })
+        else:
+            target = f" on `{column}`" if column else ""
+            records.append({
+                "column_name": column,
+                "issue": f"The Cleaner requested {_describe_request(item)}{target}",
+                "action": f"Not executed: {item['detail']}. Nothing was changed.",
+                "reason": _cleaner_reason(item, acted=False),
+            })
+    return records, flagged, discrepancies
+
+
+def build_contract_record(items: list, decisions_field_ok: bool, total: Optional[int] = None) -> Optional[dict]:
+    """One system record, placed first, when any Cleaner decision had no valid operation.
+
+    The run still completes — raising would discard every answered pause — but
+    a report whose decisions were mostly not run must say so where it is read.
+    `total` is the number of decisions in the Cleaner's whole report (items holds
+    only those filter_user_decided kept), matching the report-position numbering.
+    """
+    failures = [item for item in items if item["contract"]]
+    if decisions_field_ok and not failures:
+        return None
+    total = len(items) if total is None else total
+    if not decisions_field_ok:
+        issue = "The Cleaner's report had no list of decisions"
+        action = (
+            "Contract check: the Cleaner's report had no valid decisions list, so none of its "
+            "decisions could be run; the data was changed only by the system and the user's choices"
+        )
+    else:
+        issue = f"{len(failures)} of the {total} decisions in the Cleaner's report did not name a valid operation"
+        action = (
+            f"Contract check: {len(failures)} of the Cleaner's {total} decisions had no valid operation "
+            "and were not executed; the data was not changed by them"
+        )
+        unshown = sum(1 for item in failures if not item["printed"])
+        if unshown:
+            action += f". {unshown} of them named no column and {'is' if unshown == 1 else 'are'} not shown"
+    reasons = Counter(item["detail"] for item in failures)
+    summary = "; ".join(f"{reason} ({count})" for reason, count in reasons.most_common())
+    return {
+        "column_name": None,
+        "issue": issue,
+        "action": action,
+        "reason": (
+            "Recorded by the system, not written by the Cleaner. Every change the Cleaner makes must "
+            "name one of its operations, which the system checks and runs; a decision without one is "
+            "never guessed from its wording." + (f" Reasons: {summary}." if summary else "")
+        ),
+    }
+
+
+def _json_safe(value: object) -> object:
+    """Model-supplied params as plain JSON (anything else as its string)."""
+    try:
+        return json.loads(json.dumps(value))
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def build_operations_log(
+    duplicate_entry: dict,
+    items: list,
+    dropped: list,
+    user_record: list,
+) -> tuple[list, dict]:
+    """cleaning_report.operations (every operation, its status and facts) and its summary."""
+    operations: list = [duplicate_entry]
+    for item in items:
+        operations.append({
+            "source": "cleaner",
+            "decision": item["index"] + 1,
+            "phase": _PHASE_OF.get(item["operation"]),
+            "operation": item["operation"],
+            "column_name": item["column_name"],
+            "params": _json_safe(item["params"]),
+            "status": item["status"],
+            "detail": item["detail"] or item.get("verification") or "",
+            "facts": _json_safe(item["facts"]),
+            "no_valid_operation": item["contract"],
+        })
+    for decision in dropped:
+        operations.append({
+            "source": "cleaner",
+            "operation": _json_safe(decision.get("operation")),
+            "column_name": decision.get("column_name"),
+            "status": "dropped",
+            "detail": "the user decided this column at a pause; the system runs the user's choice instead",
+        })
+    for entry in user_record:
+        operations.append({
+            "source": "user",
+            "operation": entry["option_chosen"],
+            "pause_type": entry["pause_type"],
+            "column_name": entry["column_name"],
+            "status": "not_executed" if entry["resolution_summary"].startswith("Not applied") else "executed",
+            "detail": entry["resolution_summary"],
+        })
+    statuses = Counter(item["status"] for item in items)
+    summary = {
+        "cleaner_decisions": len(items) + len(dropped),
+        "executed": statuses.get("executed", 0),
+        "noted": statuses.get("noted", 0),
+        "not_executed": statuses.get("not_executed", 0),
+        "no_valid_operation": sum(1 for item in items if item["contract"]),
+        "dropped_on_user_decided_columns": len(dropped),
+    }
+    return operations, summary
 
 
 async def cleaner_node(state: PipelineState) -> dict:
@@ -1413,8 +2127,14 @@ async def cleaner_node(state: PipelineState) -> dict:
         }
         # The columns whose outliers the report must route, from the same mask.
         review_columns = await asyncio.to_thread(_outlier_review_columns, df, answered)
+        # Computed once, off the event loop: the text columns sent in full (also
+        # standardize_values' check) and the system's duplicate removal (its count is
+        # sent; the frame is used after the call).
+        shown = await asyncio.to_thread(_distinct_value_columns, df)
+        df_deduped, duplicate_record, duplicate_entry = await asyncio.to_thread(remove_duplicate_rows, df)
 
-        user_message = build_cleaner_message(
+        user_message = await asyncio.to_thread(
+            build_cleaner_message,
             df=df,
             profile_report=profile_report,
             domain_hypothesis=domain_hypothesis,
@@ -1432,17 +2152,26 @@ async def cleaner_node(state: PipelineState) -> dict:
             missingness_patterns=missingness_patterns,
             domain_resolution=profile_report.get("domain_resolution"),
             outlier_review_columns=list(review_columns),
+            interactions=interactions,
+            distinct_values=shown,
+            duplicate_row_count=duplicate_entry["facts"]["duplicate_rows"],
         )
         system_prompt = load_system_prompt("cleaner")
 
         response = await asyncio.to_thread(
             lambda: client.messages.create(
                 model=ANTHROPIC_MODEL,
-                max_tokens=8000,
+                max_tokens=_CLEANER_MAX_TOKENS,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_message}],
             )
         )
+
+        if response.stop_reason == "max_tokens":
+            raise ValueError(
+                "Cleaner LLM response truncated: reached the max_tokens ceiling "
+                f"({_CLEANER_MAX_TOKENS}) before the JSON was complete."
+            )
 
         parsed = parse_json_response(response.content[0].text)
         parsed = apply_missingness_backstop(
@@ -1463,10 +2192,33 @@ async def cleaner_node(state: PipelineState) -> dict:
                 "user_pause_response": None,
             }
 
-        decisions_data = filter_user_decided(parsed.get("decisions", []), resolutions)
-
-        df_cleaned, excluded_columns, outlier_flagged = await asyncio.to_thread(
-            execute_cleaning_operations, df, decisions_data
+        # The fixed order: the system's duplicate removal; the Cleaner's
+        # conversions, value standardizations and fills; the user's
+        # missing-value then outlier choices (F3's order, unchanged); the
+        # Cleaner's outlier flags; then the records. Every Cleaner decision runs
+        # by its named operation, checked by Python, never by its wording.
+        df_cleaned = df_deduped
+        decisions_field = parsed.get("decisions")
+        decisions_list = decisions_field if isinstance(decisions_field, list) else []
+        kept, dropped = filter_user_decided(decisions_list, resolutions)
+        # Each kept decision's position in the full report (kept is an ordered
+        # subsequence of the same objects), so records number them as the report does.
+        numbers: list = []
+        for position, decision in enumerate(decisions_list):
+            if len(numbers) < len(kept) and decision is kept[len(numbers)]:
+                numbers.append(position)
+        plan = plan_model_decisions(kept, df, numbers)
+        # The outlier values the user chose to exclude (set to missing): the Cleaner's
+        # fills on the same column, which run first, are computed without them.
+        excluded_outliers = {
+            r["column_name"]: outlier_masks[r["column_name"]]
+            for r in resolutions
+            if r["pause_type"] == _OUTLIER_PAUSE
+            and r["option_id"] not in _OUTLIER_KEEP_IDS
+            and r["column_name"] in outlier_masks
+        }
+        df_cleaned = await asyncio.to_thread(
+            run_model_operations, df_cleaned, plan, _MODEL_PHASES_BEFORE_USER, df, shown, excluded_outliers
         )
         (
             df_cleaned,
@@ -1475,13 +2227,30 @@ async def cleaner_node(state: PipelineState) -> dict:
             user_outliers_flagged,
             user_decisions_incorporated,
         ) = await asyncio.to_thread(apply_user_decisions, df_cleaned, resolutions, outlier_masks)
+        df_cleaned = await asyncio.to_thread(
+            run_model_operations, df_cleaned, plan, _MODEL_PHASES_AFTER_USER, df, shown
+        )
+        model_records, model_flagged, discrepancies = await asyncio.to_thread(
+            build_model_records, plan, df_cleaned
+        )
+        contract_record = build_contract_record(plan, isinstance(decisions_field, list), len(decisions_list))
         # Appended last: never executed, never filtered (build_outlier_records).
         outlier_records = await asyncio.to_thread(
             build_outlier_records, df, df_cleaned, review_columns, routing, unrouted
         )
-        decisions_data = decisions_data + user_decisions + outlier_records
-        excluded_columns = excluded_columns + user_excluded_columns
-        outlier_flagged = {**outlier_flagged, **user_outliers_flagged}
+        decisions_data = (
+            ([contract_record] if contract_record else [])
+            + [duplicate_record]
+            + model_records
+            + user_decisions
+            + outlier_records
+        )
+        # The Cleaner cannot remove a column; only the user's choices can.
+        excluded_columns = user_excluded_columns
+        outlier_flagged = {**model_flagged, **user_outliers_flagged}
+        operations, operations_summary = build_operations_log(
+            duplicate_entry, plan, dropped, user_decisions_incorporated
+        )
 
         # Its own key: the model's outlier_review has a different shape.
         outlier_review_summary = await asyncio.to_thread(
@@ -1499,7 +2268,7 @@ async def cleaner_node(state: PipelineState) -> dict:
             "columns_removed": cols_before - cols_after,
         }
 
-        re_profile = await asyncio.to_thread(re_profile_dataframe, df_cleaned)
+        re_profile = await asyncio.to_thread(re_profile_dataframe, df_cleaned, discrepancies)
 
         local_parquet_path = str(
             Path("backend") / "uploads" / f"{analysis_id}.parquet"
@@ -1528,19 +2297,13 @@ async def cleaner_node(state: PipelineState) -> dict:
                 e,
             )
 
-        profiler_concerns_addressed = []
-        if top_3_concerns:
-            for concern in top_3_concerns:
-                concern_str = str(concern).lower()
-                matched = any(
-                    concern_str in str(d.get("reason", "")).lower()
-                    or concern_str in str(d.get("issue", "")).lower()
-                    for d in decisions_data
-                )
-                profiler_concerns_addressed.append({
-                    "concern": concern,
-                    "addressed": matched,
-                })
+        # Not assessed: the text match this replaced compared a whole concern
+        # object with decision text and was false on every run (errors.md
+        # 2026-09-26). The real assessment is its own build.
+        profiler_concerns_addressed = [
+            {"concern": concern, "addressed": "not assessed"}
+            for concern in (top_3_concerns or [])
+        ]
 
         full_cleaning_report = {
             "decisions": decisions_data,
@@ -1550,6 +2313,8 @@ async def cleaner_node(state: PipelineState) -> dict:
             "interactions_detected": interactions,
             "user_decisions_incorporated": user_decisions_incorporated,
             "outlier_review_summary": outlier_review_summary,
+            "operations": operations,
+            "operations_summary": operations_summary,
         }
 
         await asyncio.to_thread(

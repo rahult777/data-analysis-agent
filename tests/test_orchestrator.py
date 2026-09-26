@@ -397,7 +397,6 @@ def test_run_pipeline_sub_80_full_report_is_gated_into_a_pause_then_confirmed_un
 from tests.test_cleaner import (  # noqa: E402
     ADVERSARIAL_OUTLIERS,
     ADVERSARIAL_REVENUE,
-    DEDUPE,
     OUTLIER_ROWS,
     _mv_question,
     _outlier_question,
@@ -488,7 +487,7 @@ def test_run_pipeline_three_cleaner_pauses_accumulate_and_every_choice_is_execut
             _mv_question("revenue", "median"),
             _mv_question("notes", "mode"),
             _outlier_question("revenue"),
-            _report([DEDUPE, *ADVERSARIAL_REVENUE, *ADVERSARIAL_OUTLIERS]),
+            _report([*ADVERSARIAL_REVENUE, *ADVERSARIAL_OUTLIERS]),
         ],
         [
             _answer("missing_value_pause", "impute", "revenue"),
@@ -553,7 +552,9 @@ def test_run_pipeline_survives_more_cleaner_pauses_than_langgraphs_default_step_
     """12 columns over 30% missing, each asked about once via the backstop: 24 pause
     supersteps on top of the pipeline's own, past LangGraph's default limit of 25."""
     columns = {f"c{i}": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, np.nan, np.nan, np.nan, np.nan] for i in range(12)}
-    frame = pd.DataFrame(columns)
+    # A distinct row id: since Build G the system always removes exact duplicate
+    # rows, and rows 6-9 would otherwise be four identical all-missing rows.
+    frame = pd.DataFrame({"row": list(range(10)), **columns})
     outcome, analyzer, create, updates, saved = run_cleaner_pauses(
         [_report([])] * 13,
         [_answer("missing_value_pause", "preserve_missingness", f"c{i}") for i in range(12)],

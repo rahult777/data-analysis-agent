@@ -36,7 +36,7 @@ Nothing the Cleaner does is divorced from this context. Every decision reference
 
 The Profiler's provenance hypothesis is not background information — it is a mandatory input to every cleaning decision.
 
-**Manual entry provenance:** Look for spelling variations of the same categorical value and normalize them, check for timestamp patterns suggesting batch copy-paste entry, treat round-number clustering as a data quality signal not a business pattern.
+**Manual entry provenance:** Look for spelling variations of the same categorical value and normalize them (the `standardize_values` operation, with an explicit mapping of every variant as it appears in `distinct_values`), check for timestamp patterns suggesting batch copy-paste entry, treat round-number clustering as a data quality signal not a business pattern.
 
 **System export provenance:** Missing values likely carry semantic meaning within the source system's logic — a missing field may mean "not applicable" or "event did not occur", not "unknown". Verify the semantic meaning before imputing. Default values that appear with suspicious frequency are real system defaults, not placeholders — do not replace them.
 
@@ -174,9 +174,22 @@ This transparency is non-negotiable. The user must always know what happened to 
 
 ---
 
+## Operations — How the Cleaner's Decisions Are Executed (Build G)
+
+The LLM decides and explains; Python executes and records. Nothing is ever executed from the wording of a decision.
+
+- **A closed set of operations.** Every decision names one `operation` with typed `params`: `convert_type` (`string`, or `numeric` / `integer` / `datetime` only when every recorded value converts), `standardize_values` (an explicit `{variant: canonical}` mapping, only for a text column whose every value was sent in `distinct_values`), `fill_missing` (`median`, `mean`, `mode`, or a type-compatible `constant`), `leave_missing`, `flag_outliers` (the raw-upload IQR mask, values unchanged) and `note` (no data change). The prompt lists exactly these (a drift-guard test pins them).
+- **Reserved, not offered.** Removing rows, a column or outlier values is the user's choice at a pause; exact duplicate rows are removed by the system. A model request for any of them is recorded as not executed.
+- **Duplicates are a system step.** Python counts exact duplicate rows on the uploaded data, always removes them first (keeping the first occurrence), and writes the record. The Cleaner is sent the count; it never writes a duplicate decision.
+- **Validation never raises.** A missing, unknown, reserved or malformed operation, a column not in the data, or an operation impossible for the column's data (a mean on text, a text constant in a numeric column, a lossy conversion, a fractional fill into whole numbers) is recorded "Not executed" with the reason, and the frame is unchanged. Contradicting decisions on one column are all refused. A report whose decisions lack valid operations still completes, with a system "Contract check" record placed first.
+- **Fixed order.** Duplicates, conversions, standardizations, fills, the user's pause choices (F3's order), then flags.
+- **One circuit.** The user's choices and the Cleaner's operations share the same primitives (fill, drop column, drop rows, mark rows, set missing); the refactor was proven a pure move on every F3 input.
+- **Records.** Python writes all four CleaningDecision fields from what ran: "Cleaner decision: …" with Python's counts, "Not executed: …", or "No data changed: a note by the Cleaner". The model's text appears only as "The Cleaner's reasoning: …" (or a note's observation). `cleaning_report.operations` logs every operation with its status and facts; `operations_summary` counts them.
+- **On a user-decided column** the system keeps only a `note`; a `flag_outliers` where the user answered only the missing-value pause; and a `fill_missing` or `leave_missing` where the user answered only the outlier pause (fills run before the user's outlier choice, so they touch only the values that were missing; their median, mean or mode is computed without any outlier values the user excluded).
+
 ## The Verify-After-Execute Requirement
 
-After executing all cleaning operations, the Cleaner re-profiles the cleaned data to verify:
+Since Build G the system, not the LLM, verifies: each operation checks its own effect (a fill leaves no missing value, a conversion reaches its type and keeps every value, a standardization leaves no replaced variant, a flag marks exactly the masked rows), and any failure is listed in `re_profile_verification.discrepancies`. After executing all cleaning operations, the cleaned data is re-profiled to verify:
 
 - Missing value counts went to zero (or to expected values) in affected columns
 - Data type corrections took effect
@@ -201,8 +214,8 @@ Add to the CleaningReport output: an **interactions_detected** list, where each 
 
 The Cleaner outputs a CleaningReport containing:
 
-**decisions:** A list of CleaningDecision objects, one per issue found. Each contains:
-- column_name (null for dataset-level decisions like duplicate removal)
+**decisions:** A list of CleaningDecision objects, one per issue found, each written by Python from what actually ran (see "Operations" above). Each contains:
+- column_name (null for dataset-level records: the system's duplicate removal, the contract check, a note about several columns)
 - issue: what was found (e.g., "3.2% missing values")
 - action: what was done (e.g., "filled with median value $12,450")
 - reason: why this action was chosen for this specific data

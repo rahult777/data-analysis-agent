@@ -36,12 +36,19 @@ from backend.agents.cleaner import (
     apply_outlier_backstop,
     apply_user_decisions,
     build_cleaner_message,
+    _MODEL_PHASES_AFTER_USER,
+    _MODEL_PHASES_BEFORE_USER,
+    _distinct_value_columns,
     build_cleaner_resolutions,
-    classify_cleaning_decision,
+    build_contract_record,
+    build_model_records,
     cleaner_node,
     detect_interactions,
-    execute_cleaning_operations,
     filter_user_decided,
+    plan_model_decisions,
+    re_profile_dataframe,
+    remove_duplicate_rows,
+    run_model_operations,
     load_dataframe_from_uploads,
     normalize_outlier_review,
     validate_cleaner_pause,
@@ -238,48 +245,114 @@ def test_build_cleaner_message_categorical_sample_shows_every_category() -> None
     assert len(set(parsed["column_info"]["species"]["sample_values"])) == 3
 
 
+PROFILER_STRUCTURAL = {
+    "duplicate_row_count": 0,  # the Profiler's live value on messy_data.csv; 15 are real
+    "semantically_categorical_columns": [{"column_name": "customer_id", "reason": "an identifier"}],
+    "co_emptiness_patterns": [{"column_group": ["revenue", "units_sold"]}],
+    "co_completeness_patterns": [{"column_group": ["customer_id", "product_code"]}],
+    "default_value_frequencies": [{"column_name": "region", "suspect_value": "casings"}],
+    "potential_merge_artifacts": [],
+    "top_3_patterns": [{"what_was_noticed": "p", "why_its_interesting": "q"}],
+}
+
+
+def test_the_message_sends_the_profilers_id_judgment_and_the_systems_own_structure(
+    messy_df: pd.DataFrame, messy_missingness_patterns: dict
+) -> None:
+    """S6: semantically_categorical_columns (the Profiler's judgment, Step 5), Python's
+    duplicate count, and the Cleaner's own full-data analyses; never the Profiler's
+    whole-table pattern claims, and never its false duplicate count."""
+    interactions = detect_interactions(messy_df, {})
+    parsed = json.loads(build_cleaner_message(
+        messy_df, PROFILER_STRUCTURAL, None, None, None, None, messy_missingness_patterns,
+        interactions=interactions,
+    ))
+    assert parsed["semantically_categorical_columns"] == PROFILER_STRUCTURAL["semantically_categorical_columns"]
+    assert parsed["duplicate_row_count"] == 15
+    assert parsed["missingness_patterns"] == messy_missingness_patterns
+    assert parsed["interactions_detected"] == json.loads(json.dumps(interactions))
+    assert parsed["profile_summary"] == {"top_3_patterns": PROFILER_STRUCTURAL["top_3_patterns"]}
+    sent = json.dumps(parsed)
+    for field in ("co_emptiness_patterns", "co_completeness_patterns", "default_value_frequencies",
+                  "potential_merge_artifacts", "structural_observations"):
+        assert field not in sent
+
+
+def test_the_message_sends_every_value_of_each_low_cardinality_text_column(
+    messy_df: pd.DataFrame, messy_missingness_patterns: dict
+) -> None:
+    parsed = json.loads(build_cleaner_message(
+        messy_df, {}, None, None, None, None, messy_missingness_patterns
+    ))
+    assert parsed["distinct_values"]["region"] == {
+        "North": 45, "East": 36, "north": 33, "West": 33, "south": 25, "SOUTH": 24,
+    }
+    assert set(parsed["distinct_values"]) == {"region", "sales_rep", "return_flag", "notes"}
+    assert parsed["semantically_categorical_columns"] == []
+
+
+def test_a_text_column_with_more_than_30_distinct_values_is_not_sent_in_full() -> None:
+    df = pd.DataFrame({"many": [f"v{i}" for i in range(31)], "few": ["a", "b"] * 15 + ["a"]})
+    assert set(_distinct_value_columns(df)) == {"few"}
+    assert _distinct_value_columns(df.iloc[:30])["many"]["v0"] == 1
+
+
 # ---------------------------------------------------------------------------
-# Group 4 — execute_cleaning_operations
+# Group 4 — the Cleaner's operations, run by Python (Build G)
 # ---------------------------------------------------------------------------
 
 
-def test_execute_cleaning_median_fill() -> None:
-    """Median fill decision removes all NaN from a numeric column."""
+def _run_ops(df: pd.DataFrame, decisions: list) -> tuple[pd.DataFrame, list, list, dict, list]:
+    """Run Cleaner decisions exactly as cleaner_node does when no pause was answered.
+
+    Returns (frame, plan items, records, outliers flagged, discrepancies).
+    """
+    frame, _, _ = remove_duplicate_rows(df)
+    kept, _ = filter_user_decided(decisions, [])
+    items = plan_model_decisions(kept, df)
+    shown = _distinct_value_columns(df)
+    frame = run_model_operations(frame, items, _MODEL_PHASES_BEFORE_USER, df, shown)
+    frame = run_model_operations(frame, items, _MODEL_PHASES_AFTER_USER, df, shown)
+    records, flagged, discrepancies = build_model_records(items, frame)
+    return frame, items, records, flagged, discrepancies
+
+
+def _op(column, operation, params=None, **text) -> dict:
+    return {"column_name": column, "operation": operation, "params": params or {},
+            "issue": text.get("issue", "i"), "action": text.get("action", "a"), "reason": text.get("reason", "r")}
+
+
+def test_fill_missing_median_fills_every_gap() -> None:
     df = pd.DataFrame({"value": [1.0, 2.0, np.nan, 4.0, 5.0]})
-    decisions = [{"column_name": "value", "action": "fill median", "issue": "missing values"}]
-    df_cleaned, excluded_cols, outlier_flagged = execute_cleaning_operations(df, decisions)
-    assert df_cleaned["value"].isna().sum() == 0
+    frame, _, [record], _, _ = _run_ops(df, [_op("value", "fill_missing", {"method": "median"})])
+    assert frame["value"].isna().sum() == 0 and frame.loc[2, "value"] == 3.0
+    assert record["action"] == "Cleaner decision: filled the 1 missing values in `value` with the median (3)"
 
 
-def test_execute_cleaning_drop_column() -> None:
-    """Drop column decision removes the column and reports it in excluded_cols."""
+def test_a_model_request_to_drop_a_column_is_not_executed() -> None:
+    """Removing a column is the user's choice (Step 9); the old router ran it."""
     df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6], "c": [7, 8, 9]})
-    decisions = [{"column_name": "b", "action": "drop column", "issue": "too many missing"}]
-    df_cleaned, excluded_cols, outlier_flagged = execute_cleaning_operations(df, decisions)
-    assert "b" not in df_cleaned.columns
-    assert len(df_cleaned.columns) == 2
+    frame, _, [record], _, _ = _run_ops(df, [_op("b", "drop_column")])
+    assert list(frame.columns) == ["a", "b", "c"]
+    assert record["action"].startswith("Not executed: 'drop_column' is not an operation the Cleaner can run")
 
 
-def test_execute_cleaning_drop_duplicates() -> None:
-    """column_name=None triggers deduplication across the full DataFrame."""
-    df = pd.DataFrame({
-        "x": [1, 2, 1, 2, 3],
-        "y": [10, 20, 10, 20, 30],
-    })
-    decisions = [{"column_name": None, "action": "drop duplicates", "issue": "duplicate rows"}]
-    df_cleaned, excluded_cols, outlier_flagged = execute_cleaning_operations(df, decisions)
-    assert df_cleaned.duplicated().sum() == 0
+def test_the_system_removes_exact_duplicates_and_records_its_own_count() -> None:
+    df = pd.DataFrame({"x": [1, 2, 1, 2, 3], "y": [10, 20, 10, 20, 30]})
+    frame, record, entry = remove_duplicate_rows(df)
+    assert frame.index.tolist() == [0, 1, 4]
+    assert record["column_name"] is None
+    assert record["action"] == "System step: removed the 2 exact duplicate rows, keeping the first occurrence of each"
+    assert entry["facts"] == {"duplicate_rows": 2, "rows_before": 5, "rows_after": 3}
+    _, none_record, _ = remove_duplicate_rows(df.drop_duplicates())
+    assert none_record["action"] == "System step: checked for exact duplicate rows and found none; nothing removed"
 
 
-def test_execute_cleaning_returns_tuple() -> None:
-    """execute_cleaning_operations returns a 3-tuple: (DataFrame, list, dict)."""
-    df = pd.DataFrame({"a": [1, 2, 3]})
-    result = execute_cleaning_operations(df, [])
-    assert isinstance(result, tuple)
-    assert len(result) == 3
-    assert isinstance(result[0], pd.DataFrame)
-    assert isinstance(result[1], list)
-    assert isinstance(result[2], dict)
+def test_no_decisions_change_nothing() -> None:
+    df = pd.DataFrame({"a": [1.0, np.nan, 3.0]})
+    frame, items, records, flagged, discrepancies = _run_ops(df, [])
+    pd.testing.assert_frame_equal(frame, df)
+    assert (items, records, flagged, discrepancies) == ([], [], {}, [])
 
 
 # ---------------------------------------------------------------------------
@@ -351,14 +424,14 @@ def test_build_cleaner_message_bool_column_does_not_raise() -> None:
     assert "outlier_bounds" in column_info["count"]
 
 
-def test_execute_cleaning_outlier_flag_on_bool_column_is_skipped() -> None:
-    """Flagging outliers on a bool column is a no-op, like any non-numeric column."""
+def test_flag_outliers_on_a_bool_column_is_not_executed() -> None:
+    """A bool column has no IQR outliers, like any non-numeric column; the record says so."""
     df = _bool_df(20)
-    decisions = [{"column_name": "flag", "action": "flag outliers", "issue": "outliers"}]
-    df_cleaned, excluded_cols, outlier_flagged = execute_cleaning_operations(df, decisions)
+    frame, _, [record], flagged, _ = _run_ops(df, [_op("flag", "flag_outliers")])
 
-    assert "flag_outlier_flag" not in df_cleaned.columns
-    assert outlier_flagged == {}
+    assert "flag_outlier_flag" not in frame.columns
+    assert flagged == {}
+    assert record["action"] == "Not executed: `flag` is not numeric, so it has no IQR outliers. Nothing was changed."
 
 
 def test_build_cleaner_message_imbalanced_bool_sample_shows_both_values() -> None:
@@ -414,7 +487,10 @@ def test_cleaner_node_completes_with_bool_column() -> None:
     mock_client.messages.create.assert_called_once()
     assert [payload["status"] for payload in captured] == ["cleaning", "cleaned"]
     assert not any("error_message" in payload for payload in captured)
-    assert result["cleaning_report"]["summary"]["rows_after"] == 20
+    # Since Build G the system always removes exact duplicates (4 in this frame);
+    # before, they were removed only when the model wrote a dataset-level decision.
+    assert int(df.duplicated().sum()) == 4
+    assert result["cleaning_report"]["summary"]["rows_after"] == 16
 
 
 # ---------------------------------------------------------------------------
@@ -572,14 +648,17 @@ FIN_NOTE = (
     "in financial data, extreme values are often legitimate large transactions. "
     "A $750,000 order against a $42,790 mean may be a wholesale order or a misplaced digit."
 )
-DEDUPE = {
+# The old Step 4 decision, which the model no longer writes (the system removes
+# duplicates itself). Prose with no operation: never executed, never shown.
+LEGACY_DEDUPE = {
     "column_name": None,
-    "issue": "15 exact duplicate rows present",
-    "action": "removed all exact duplicate rows",
-    "reason": "duplicates would inflate every count",
+    "issue": "0 exact duplicate rows present",
+    "action": "no duplicate rows present; no action taken",
+    "reason": "the Profiler confirmed zero exact duplicate rows",
 }
-# Model-written decisions for user-decided revenue that keyword routing would
-# misexecute: mean-fill ("means"), nothing ("Removed"/backticks), a 0 fill.
+# Prose-only decisions on user-decided revenue that the pre-Build G keyword
+# router misexecuted: mean-fill ("means"), nothing ("Removed"/backticks), a 0
+# fill. They name no operation, and the filter drops them.
 ADVERSARIAL_REVENUE = [
     {"column_name": "revenue", "issue": "missingness means the sale was never recorded",
      "action": "Exclude rows where revenue is missing", "reason": "r"},
@@ -669,7 +748,13 @@ def _report(decisions: list) -> dict:
     }
 
 
-def _run_cleaner(df: pd.DataFrame, llm_payload: dict, answered: list | None = None) -> tuple:
+def _run_cleaner(
+    df: pd.DataFrame,
+    llm_payload: dict,
+    answered: list | None = None,
+    stop_reason: str = "end_turn",
+    **state_overrides,
+) -> tuple:
     """Run cleaner_node with every external service mocked.
 
     Returns (result or raised exception, the frame written to parquet or None,
@@ -679,6 +764,7 @@ def _run_cleaner(df: pd.DataFrame, llm_payload: dict, answered: list | None = No
     captured: list[dict] = []
     reply = MagicMock()
     reply.content = [MagicMock(text=json.dumps(llm_payload))]
+    reply.stop_reason = stop_reason
     state = {
         "analysis_id": "test-analysis-id",
         "stored_filename": "messy.csv",
@@ -687,6 +773,7 @@ def _run_cleaner(df: pd.DataFrame, llm_payload: dict, answered: list | None = No
         "profiler_provenance_hypothesis": "system export",
         "profiler_top_3_concerns": [],
         "answered_cleaner_pauses": answered or [],
+        **state_overrides,
     }
 
     def capture_parquet(frame: pd.DataFrame, *args, **kwargs) -> None:
@@ -716,25 +803,6 @@ def _user_decisions(outcome: dict, column: str) -> list:
         d for d in outcome["cleaning_report"]["decisions"]
         if d["column_name"] == column and d["action"].startswith("User decision")
     ]
-
-
-@pytest.mark.parametrize(
-    "action, issue, op",
-    [
-        ("fill median", "", "median"),
-        ("a mean is meaningless; convert to string", "", "mean"),
-        ("Exclude `notes` from analysis entirely", "", "unmatched"),
-        ("Removed the 4 outlier values", "", "outlier_noop"),
-        ("flag outliers", "", "outlier_flag"),
-        ("convert to category", "", "dtype"),
-    ],
-)
-def test_classify_cleaning_decision_names_what_the_keywords_trigger(action, issue, op) -> None:
-    assert classify_cleaning_decision({"column_name": "c", "action": action, "issue": issue}) == op
-
-
-def test_classify_cleaning_decision_dataset_level_is_dedupe() -> None:
-    assert classify_cleaning_decision({"column_name": None, "action": "anything"}) == "dedupe"
 
 
 def test_validate_missing_pause_overwrites_counts_and_appends_the_preserve_option() -> None:
@@ -900,18 +968,40 @@ def test_cleaner_node_rejects_an_unusable_answer_before_calling_the_model() -> N
     assert [p["status"] for p in captured] == ["cleaning", "error"]
 
 
-def test_filter_drops_every_model_decision_on_a_user_decided_column() -> None:
+def test_filter_on_a_column_whose_outliers_the_user_decided() -> None:
+    """The operation field decides, never the wording: a Step 8 issue saying "from the
+    mean" is no longer a mean fill. Where the user answered only the outlier pause, a
+    note and a fill of the column's gaps survive; a flag (the user's choice writes it), a
+    conversion and prose without an operation are dropped; other columns always pass."""
     df = _messy()
     resolutions = build_cleaner_resolutions([_answered(_outlier_question(), "treat_as_valid", df)])
-    # §8 requires an outlier issue to state its SD distance "from the mean", which the
-    # keyword router reads as a mean fill — so the filter is by column, not by guessed op.
-    sd_issue = {"column_name": "revenue", "issue": "4 values 6.8 SD from the mean", "action": "flag and include"}
-    convert = {"column_name": "revenue", "issue": "stored as text", "action": "convert to float"}
-    drop = {"column_name": "revenue", "issue": "outliers", "action": "drop column"}
-    other = {"column_name": "units_sold", "issue": "8% missing", "action": "fill median"}
-    decisions = [DEDUPE, sd_issue, convert, drop, *ADVERSARIAL_REVENUE, other]
-    assert classify_cleaning_decision(sd_issue) == "mean"
-    assert filter_user_decided(decisions, resolutions) == [DEDUPE, other]
+    note = _op("revenue", "note", issue="4 values 6.8 SD from the mean")
+    flag = _op("revenue", "flag_outliers")
+    fill = _op("revenue", "fill_missing", {"method": "mean"})
+    convert = _op("revenue", "convert_type", {"to": "string"})
+    other = _op("units_sold", "fill_missing", {"method": "median"})
+    decisions = [note, flag, fill, convert, *ADVERSARIAL_REVENUE, other]
+    kept, dropped = filter_user_decided(decisions, resolutions)
+    assert kept == [note, fill, other]
+    assert dropped == [flag, convert, *ADVERSARIAL_REVENUE]
+
+
+def test_filter_keeps_a_flag_where_the_user_decided_only_the_missing_values() -> None:
+    df = _messy()
+    resolutions = build_cleaner_resolutions([_answered(_mv_question(), "impute", df)])
+    flag, note = _op("revenue", "flag_outliers"), _op("revenue", "note")
+    fill, leave = _op("revenue", "fill_missing", {"method": "mode"}), _op("revenue", "leave_missing")
+    standardize = _op("revenue", "standardize_values", {"mapping": {"a": "b"}})
+    kept, dropped = filter_user_decided([flag, note, fill, leave, standardize], resolutions)
+    assert kept == [flag, note]
+    assert dropped == [fill, leave, standardize]
+
+
+def test_filter_drops_everything_on_a_column_the_user_excluded() -> None:
+    df = _messy()
+    resolutions = build_cleaner_resolutions([_answered(_mv_question(), "exclude_column", df)])
+    kept, dropped = filter_user_decided([_op("revenue", "note"), _op("revenue", "flag_outliers")], resolutions)
+    assert kept == [] and len(dropped) == 2
 
 
 def test_an_outlier_answer_on_a_column_the_user_later_excluded_is_recorded_not_run() -> None:
@@ -923,7 +1013,7 @@ def test_an_outlier_answer_on_a_column_the_user_later_excluded_is_recorded_not_r
         _answered(_mv_question(), "exclude_column", df),
         _notes_preserved(df),
     ]
-    outcome, saved, _, _ = _run_cleaner(df, _report([DEDUPE]), answered)
+    outcome, saved, _, _ = _run_cleaner(df, _report([]), answered)
     assert not isinstance(outcome, Exception), outcome
     assert "revenue" not in saved.columns and "revenue_outlier_flag" not in saved.columns
     assert not [d for d in outcome["cleaning_report"]["decisions"] if "outlier pause" in d["action"]]
@@ -952,7 +1042,7 @@ def test_each_missing_value_choice_executes_exactly_as_chosen(option_id, method_
     # notes is the dataset's other column over 30%; answered so the run can complete.
     answered = [_answered(_mv_question(method_id=method_id), option_id, df), _notes_preserved(df)]
 
-    outcome, saved, _, _ = _run_cleaner(df, _report([DEDUPE, *ADVERSARIAL_REVENUE]), answered)
+    outcome, saved, _, _ = _run_cleaner(df, _report([*ADVERSARIAL_REVENUE]), answered)
 
     assert not isinstance(outcome, Exception), outcome
     was_missing = deduped.index[deduped["revenue"].isna()]
@@ -998,7 +1088,7 @@ def test_mode_imputation_on_a_text_column_uses_the_deduplicated_mode() -> None:
     df = _messy()
     deduped = df.drop_duplicates()
     answered = [_answered(_mv_question(), "impute", df), _answered(_mv_question("notes", "mode"), "impute", df)]
-    outcome, saved, _, _ = _run_cleaner(df, _report([DEDUPE]), answered)
+    outcome, saved, _, _ = _run_cleaner(df, _report([]), answered)
     assert saved["notes"].isna().sum() == 0
     assert (saved.loc[deduped.index[deduped["notes"].isna()], "notes"] == deduped["notes"].mode().iloc[0]).all()
 
@@ -1022,7 +1112,7 @@ def test_each_outlier_choice_executes_exactly_as_chosen(domain, option_id, remov
         _answered(_outlier_question(domain=domain), option_id, df),
     ]
 
-    outcome, saved, _, _ = _run_cleaner(df, _report([DEDUPE, *ADVERSARIAL_OUTLIERS]), answered)
+    outcome, saved, _, _ = _run_cleaner(df, _report([*ADVERSARIAL_OUTLIERS]), answered)
 
     assert not isinstance(outcome, Exception), outcome
     assert len(saved) == 185
@@ -1057,7 +1147,7 @@ def test_outlier_masks_stay_aligned_by_label_after_rows_are_removed() -> None:
         _answered(_outlier_question("amount"), "flag_as_suspected_error", df),
     ]
 
-    outcome, saved, _, _ = _run_cleaner(df, _report([DEDUPE]), answered)
+    outcome, saved, _, _ = _run_cleaner(df, _report([]), answered)
 
     assert not isinstance(outcome, Exception), outcome
     assert saved.index.tolist() == [0, 4, 6, 7, 8, 9, 10, 11, 13]
@@ -1090,7 +1180,7 @@ def test_cleaner_node_returns_the_checked_question_for_a_new_pause() -> None:
 
 
 def test_cleaner_node_backstop_pauses_instead_of_saving_a_report_that_skipped_a_column() -> None:
-    outcome, saved, captured, _ = _run_cleaner(_messy(), _report([DEDUPE]))
+    outcome, saved, captured, _ = _run_cleaner(_messy(), _report([]))
     assert saved is None
     assert [p["status"] for p in captured] == ["cleaning"]
     assert outcome["missing_value_pause_data"]["column_name"] == "revenue"
@@ -1108,7 +1198,7 @@ def test_cleaning_report_with_user_decisions_validates_against_the_strict_schema
         _answered(_mv_question("notes", "mode"), "preserve_missingness", df),
         _answered(_outlier_question(), "flag_as_suspected_error", df),
     ]
-    outcome, _, captured, _ = _run_cleaner(df, _report([DEDUPE]), answered)
+    outcome, _, captured, _ = _run_cleaner(df, _report([]), answered)
 
     report = outcome["cleaning_report"]
     CleaningReport.model_validate(report)
@@ -1185,13 +1275,13 @@ def test_messy_data_requires_routing_for_revenue_only() -> None:
 
 def test_the_message_lists_the_required_columns_from_the_same_mask() -> None:
     df = _messy()
-    _, _, _, create = _run_cleaner(df, _routed([DEDUPE], ("revenue", "none")), _missing_answered(df))
+    _, _, _, create = _run_cleaner(df, _routed([], ("revenue", "none")), _missing_answered(df))
     message = _sent_message(create)
     assert message["outlier_review_columns"] == ["revenue"]
     assert message["column_info"]["revenue"]["outlier_count"] == 4
 
     answered = _missing_answered(df) + [_answered(_outlier_question(), "treat_as_valid", df)]
-    _, _, _, create = _run_cleaner(df, _report([DEDUPE]), answered)
+    _, _, _, create = _run_cleaner(df, _report([]), answered)
     assert _sent_message(create)["outlier_review_columns"] == []
 
 
@@ -1252,7 +1342,7 @@ def test_outlier_backstop_passes_a_model_pause_untouched() -> None:
 def test_cleaner_node_backstop_pauses_on_a_column_the_report_routed_financial() -> None:
     df = _messy()
     outcome, saved, captured, _ = _run_cleaner(
-        df, _routed([DEDUPE], ("revenue", "financial")), _missing_answered(df)
+        df, _routed([], ("revenue", "financial")), _missing_answered(df)
     )
     assert saved is None
     assert [p["status"] for p in captured] == ["cleaning"]
@@ -1264,13 +1354,13 @@ def test_cleaner_node_backstop_pauses_on_a_column_the_report_routed_financial() 
 def test_an_answered_or_excluded_column_is_never_paused_again_whatever_the_routing() -> None:
     df = _messy()
     answered = _missing_answered(df) + [_answered(_outlier_question(), "flag_as_suspected_error", df)]
-    outcome, saved, _, _ = _run_cleaner(df, _routed([DEDUPE], ("revenue", "financial")), answered)
+    outcome, saved, _, _ = _run_cleaner(df, _routed([], ("revenue", "financial")), answered)
     assert not isinstance(outcome, Exception), outcome
     assert saved.index[saved["revenue_outlier_flag"] == 1].tolist() == OUTLIER_ROWS
     assert _system_records(outcome, "revenue") == []  # the user's decision is the record
 
     excluded = [_answered(_mv_question(), "exclude_column", df), _notes_preserved(df)]
-    outcome, saved, _, _ = _run_cleaner(df, _routed([DEDUPE], ("revenue", "financial")), excluded)
+    outcome, saved, _, _ = _run_cleaner(df, _routed([], ("revenue", "financial")), excluded)
     assert not isinstance(outcome, Exception), outcome
     assert "revenue" not in saved.columns
     assert outcome["cleaning_report"]["outlier_review_summary"] == [
@@ -1342,7 +1432,7 @@ def test_an_entry_for_an_excluded_column_is_ignored() -> None:
 def test_an_unrouted_column_completes_the_run_with_an_unreviewed_record(review) -> None:
     """DECISION 2: never raises; the report says plainly the outliers were not reviewed."""
     df = _messy()
-    report = _report([DEDUPE])
+    report = _report([])
     if review is not None:
         report["outlier_review"] = review
     outcome, saved, _, _ = _run_cleaner(df, report, _missing_answered(df))
@@ -1367,7 +1457,7 @@ def test_an_unrouted_column_completes_the_run_with_an_unreviewed_record(review) 
 def test_the_unreviewed_record_survives_the_filter_and_the_strict_schemas() -> None:
     df = _messy()
     # revenue is user-decided, so the filter drops every model decision on it.
-    outcome, _, captured, _ = _run_cleaner(df, _report([DEDUPE, FLAG_INCLUDE_SD]), _missing_answered(df))
+    outcome, _, captured, _ = _run_cleaner(df, _report([FLAG_INCLUDE_SD]), _missing_answered(df))
     report = outcome["cleaning_report"]
     [record] = _system_records(outcome, "revenue")
     assert FLAG_INCLUDE_SD not in report["decisions"]
@@ -1391,7 +1481,7 @@ def test_n1_user_decided_missing_values_and_a_model_outlier_decision_on_the_same
     df = _messy()
     deduped = df.drop_duplicates()
     outcome, saved, _, _ = _run_cleaner(
-        df, _routed([DEDUPE, FLAG_INCLUDE_SD], ("revenue", "none")), _missing_answered(df)
+        df, _routed([FLAG_INCLUDE_SD], ("revenue", "none")), _missing_answered(df)
     )
     assert not isinstance(outcome, Exception), outcome
     decisions = outcome["cleaning_report"]["decisions"]
@@ -1424,26 +1514,31 @@ def _amount_frame() -> pd.DataFrame:
     })
 
 
-def test_the_record_contradicts_a_model_decision_the_keyword_router_misran() -> None:
-    """Addition 2: on a column the user did not decide, the model's 'flagged' decision runs
-    a mean fill (its issue says "from the mean"); the system record says what is true."""
+def test_a_prose_flag_decision_runs_nothing_and_cannot_contradict_the_record() -> None:
+    """F3b addition 2, after Build G: the Step 8 prose that the keyword router ran as a
+    mean fill (its issue says "from the mean") names no operation, so nothing runs; its
+    claim is not reported as an action, and the system record agrees with the data."""
     df = _amount_frame()
     model = {"column_name": "amount", "issue": "2 values 3.1 SD from the mean",
              "action": "flagged as potential process events; included with annotation", "reason": "r"}
     outcome, saved, _, _ = _run_cleaner(df, _routed([model], ("amount", "none")))
     assert not isinstance(outcome, Exception), outcome
-    assert model in outcome["cleaning_report"]["decisions"]  # the model's claim is still reported
-    assert saved["amount"].isna().sum() == 0 and "amount_outlier_flag" not in saved.columns
+    decisions = outcome["cleaning_report"]["decisions"]
+    assert model not in decisions
+    assert not any(d["action"].startswith("flagged") for d in decisions)
+    assert saved["amount"].isna().sum() == 1 and "amount_outlier_flag" not in saved.columns
+    [not_run] = [d for d in decisions if d["column_name"] == "amount" and d["action"].startswith("Not executed")]
+    assert not_run["action"] == "Not executed: the decision names no operation. Nothing was changed."
+    assert decisions[0]["action"].startswith("Contract check: 1 of the Cleaner's 1 decisions had no valid operation")
     [record] = _system_records(outcome, "amount")
     assert record["reason"].startswith(
         "Computed from the cleaned data: 2 of the 2 value(s) are unchanged; they are not flagged."
     )
-    assert "this record is the accurate one" in record["reason"]
 
 
 def test_the_record_reports_a_flag_the_model_decision_did_add() -> None:
     df = _amount_frame()
-    model = {"column_name": "amount", "issue": "2 extreme values", "action": "flag outliers", "reason": "r"}
+    model = _op("amount", "flag_outliers", issue="2 extreme values")
     outcome, saved, _, _ = _run_cleaner(df, _routed([model], ("amount", "none")))
     [record] = _system_records(outcome, "amount")
     assert saved.index[saved["amount_outlier_flag"] == 1].tolist() == [8, 13]
@@ -1451,12 +1546,18 @@ def test_the_record_reports_a_flag_the_model_decision_did_add() -> None:
         "Computed from the cleaned data: 2 of the 2 value(s) are unchanged; "
         "2 of them are marked in `amount_outlier_flag`."
     )
+    [flag] = [d for d in outcome["cleaning_report"]["decisions"] if d["action"].startswith("Cleaner decision")]
+    assert flag["action"] == (
+        "Cleaner decision: marked the 2 row(s) holding these values in `amount_outlier_flag` "
+        "(1 = outside the IQR bounds); the values themselves are unchanged and stay in every statistic"
+    )
+    assert outcome["cleaner_outliers_handled"] == {"amount": 2}
 
 
 def test_the_record_counts_an_outlier_removed_with_a_duplicate_row() -> None:
     df = _amount_frame()
     df.loc[14] = df.loc[8]  # a duplicate of an outlier row
-    outcome, saved, _, _ = _run_cleaner(df, _routed([DEDUPE], ("amount", "none")))
+    outcome, saved, _, _ = _run_cleaner(df, _routed([], ("amount", "none")))
     assert 14 not in saved.index
     [record] = _system_records(outcome, "amount")
     assert record["issue"].startswith("3 value(s) in `amount`")
@@ -1468,7 +1569,7 @@ def test_the_record_counts_an_outlier_removed_with_a_duplicate_row() -> None:
 
 def test_the_record_never_raises_on_a_converted_column() -> None:
     df = _amount_frame()
-    model = {"column_name": "amount", "issue": "numbers", "action": "convert to string", "reason": "r"}
+    model = _op("amount", "convert_type", {"to": "string"})
     outcome, _, _, _ = _run_cleaner(df, _routed([model], ("amount", "none")))
     assert not isinstance(outcome, Exception), outcome
     [record] = _system_records(outcome, "amount")
@@ -1521,3 +1622,753 @@ def test_python_written_pause_text_matches_the_prompt() -> None:
     for label in _OUTLIER_LABELS.values():
         assert label.replace("{n}", "<outlier_count>") in prompt
 
+
+
+# ---------------------------------------------------------------------------
+# Group 12 — the Cleaner's own decisions run by named operation (Build G)
+# (errors.md 2026-09-25 "The Cleaner's own (model-authored) decisions are still
+# executed by keyword matching")
+# ---------------------------------------------------------------------------
+
+MESSY_DEDUPED_ROWS = 185
+
+
+def _records_for(outcome: dict, column: str) -> list:
+    return [d for d in outcome["cleaning_report"]["decisions"] if d["column_name"] == column]
+
+
+def _item(items: list, column: str) -> dict:
+    [item] = [i for i in items if i["column_name"] == column]
+    return item
+
+
+@pytest.mark.parametrize(
+    "to, values, expected_dtype, expected",
+    [
+        ("string", [1, 2, 3], "object", ["1", "2", "3"]),
+        ("numeric", ["1.5", "2", None], "float64", [1.5, 2.0, None]),
+        ("integer", [1.0, 2.0, None], "Int64", [1, 2, None]),
+        ("datetime", ["2024-01-01", "2024-02-01", None], "datetime64[ns]",
+         [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-02-01"), None]),
+    ],
+)
+def test_convert_type_converts_every_recorded_value(to, values, expected_dtype, expected) -> None:
+    df = pd.DataFrame({"c": values, "k": ["a", "b", "c"]})
+    frame, items, [record], _, discrepancies = _run_ops(df, [_op("c", "convert_type", {"to": to})])
+    assert str(frame["c"].dtype) == expected_dtype
+    assert [None if pd.isna(v) else v for v in frame["c"].tolist()] == expected
+    assert record["action"].startswith(f"Cleaner decision: converted `c` from {df['c'].dtype} to {expected_dtype} ({to})")
+    assert discrepancies == []
+
+
+def test_standardize_values_maps_every_variant_and_counts_each() -> None:
+    df = _messy()
+    mapping = {"north": "North", "SOUTH": "South", "south": "South"}
+    frame, _, [record], _, _ = _run_ops(df, [_op("region", "standardize_values", {"mapping": mapping})])
+    assert frame["region"].value_counts().to_dict() == {"North": 72, "South": 45, "East": 34, "West": 30}
+    assert frame["region"].isna().sum() == 4
+    assert record["action"] == (
+        "Cleaner decision: replaced 77 value(s) in `region`: 'north' → 'North' (32); "
+        "'SOUTH' → 'South' (23); 'south' → 'South' (22); 6 distinct values became 4"
+    )
+
+
+@pytest.mark.parametrize(
+    "params, filled",
+    [
+        ({"method": "median"}, 3.0),
+        ({"method": "mean"}, 3.5),
+        ({"method": "mode"}, 2.0),
+        ({"method": "constant", "value": 0}, 0.0),
+    ],
+)
+def test_fill_missing_fills_with_the_value_python_computes(params, filled) -> None:
+    df = pd.DataFrame({"x": [2.0, 2.0, 4.0, 6.0, np.nan], "k": list("abcde")})  # no duplicate rows
+    frame, _, [record], _, _ = _run_ops(df, [_op("x", "fill_missing", params)])
+    assert frame.loc[4, "x"] == filled and frame["x"].isna().sum() == 0
+    assert record["issue"] == "1 missing values in `x` (20.0% of 5 rows)"
+
+
+def test_fill_missing_with_a_text_constant_on_a_text_column() -> None:
+    df = pd.DataFrame({"t": ["a", None, "b"]})
+    frame, _, [record], _, _ = _run_ops(df, [_op("t", "fill_missing", {"method": "constant", "value": "unknown"})])
+    assert frame["t"].tolist() == ["a", "unknown", "b"]
+    assert record["action"] == "Cleaner decision: filled the 1 missing values in `t` with the value 'unknown'"
+
+
+def test_leave_missing_changes_nothing_and_says_so() -> None:
+    df = _messy()
+    frame, _, [record], _, _ = _run_ops(df, [_op("return_flag", "leave_missing")])
+    assert frame["return_flag"].isna().sum() == 15
+    assert record["action"] == (
+        "Cleaner decision: left the 15 missing values in `return_flag` unchanged (nothing imputed, no rows removed)"
+    )
+
+
+def test_flag_outliers_marks_the_raw_upload_mask() -> None:
+    df = _messy()
+    frame, _, [record], flagged, _ = _run_ops(df, [_op("revenue", "flag_outliers")])
+    assert frame.index[frame["revenue_outlier_flag"] == 1].tolist() == OUTLIER_ROWS
+    pd.testing.assert_series_equal(frame["revenue"], df.drop_duplicates()["revenue"])  # values unchanged
+    assert flagged == {"revenue": 4}
+    assert record["issue"].startswith("4 value(s) in `revenue` lie outside the IQR bounds")
+
+
+def test_a_note_changes_nothing_and_is_labelled_as_the_cleaners() -> None:
+    df = _messy()
+    decisions = [
+        _op("discount_pct", "note", issue="0 appears often", action="flagged for user verification"),
+        _op(None, "note", {"columns": ["return_flag", "notes"]}, issue="missing together in 15 records"),
+    ]
+    frame, _, records, _, _ = _run_ops(df, decisions)
+    pd.testing.assert_frame_equal(frame, df.drop_duplicates())
+    assert [r["action"] for r in records] == [
+        "No data changed: a note by the Cleaner, not an operation",
+        "No data changed: a note by the Cleaner about `return_flag`, `notes`, not an operation",
+    ]
+    assert records[1]["issue"] == "The Cleaner's observation: missing together in 15 records"
+    assert records[1]["column_name"] is None
+
+
+@pytest.mark.parametrize(
+    "decision, detail, printed",
+    [
+        ({"column_name": "units_sold", "action": "filled with median", "issue": "i", "reason": "r"},
+         "the decision names no operation", True),
+        (_op("units_sold", ""), "the decision names no operation", True),
+        (_op("units_sold", "impute_median"), "'impute_median' is not one of the Cleaner's operations", True),
+        (_op("revenue", "drop_rows"), "'drop_rows' is not an operation the Cleaner can run: removing rows", True),
+        (_op("revenue", "drop_column"), "'drop_column' is not an operation the Cleaner can run: removing a column", True),
+        (_op("revenue", "remove_outliers"), "'remove_outliers' is not an operation the Cleaner can run: removing or excluding outlier", True),
+        (_op(None, "remove_duplicates"), "'remove_duplicates' is not an operation the Cleaner can run: the system removes", False),
+        ({**_op("units_sold", "fill_missing"), "params": ["median"]}, "its params are not an object", True),
+        (_op("units_sold", "fill_missing", {"method": "average"}), "params.method must be one of", True),
+        (_op("units_sold", "fill_missing", {"method": "constant"}), "a constant fill needs params.value", True),
+        (_op("units_sold", "fill_missing", {"method": "constant", "value": float("nan")}), "a constant fill needs params.value", True),
+        (_op("units_sold", "fill_missing", {"method": "constant", "value": True}), "a constant fill needs params.value", True),
+        (_op("region", "convert_type", {"to": "category"}), "params.to must be one of", True),
+        (_op("region", "standardize_values", {"mapping": {}}), "params.mapping must be a non-empty object", True),
+        (_op("region", "standardize_values", {"mapping": {"north": ""}}), "every params.mapping key and replacement", True),
+        (_op("region", "note", {"columns": ["nope"]}), "params.columns must list columns", True),
+        (_op("true", "fill_missing", {"method": "mode"}), "there is no column 'true' in the data", True),
+        (_op(None, "fill_missing", {"method": "median"}), "a decision with no column can only be a note", False),
+        (_op(None, "note", {"columns": ["region"]}), "a decision with no column can only be a note", False),
+        (LEGACY_DEDUPE, "the decision names no operation", False),
+        ("not an object", "the decision is not an object", False),
+    ],
+)
+def test_every_invalid_decision_is_recorded_not_executed_and_never_raises(decision, detail, printed) -> None:
+    df = _messy()
+    frame, [item], records, _, _ = _run_ops(df, [decision])
+    pd.testing.assert_frame_equal(frame, df.drop_duplicates())
+    assert item["status"] == "not_executed" and item["contract"] is True
+    assert item["detail"].startswith(detail)
+    assert len(records) == (1 if printed else 0)
+    if printed:
+        assert records[0]["action"].startswith("Not executed: ")
+        assert records[0]["action"].endswith("Nothing was changed.")
+    contract = build_contract_record([item], True)
+    assert contract["action"].startswith("Contract check: 1 of the Cleaner's 1 decisions had no valid operation")
+
+
+@pytest.mark.parametrize(
+    "decisions, column, detail",
+    [
+        ([_op("sales_rep", "fill_missing", {"method": "mean"})], "sales_rep",
+         "mean imputation needs a numeric column; `sales_rep` is object"),
+        ([_op("sales_rep", "fill_missing", {"method": "median"})], "sales_rep",
+         "median imputation needs a numeric column"),
+        ([_op("units_sold", "fill_missing", {"method": "constant", "value": "unknown"})], "units_sold",
+         "`units_sold` is numeric (float64), so the fill value must be a number; 'unknown' is text"),
+        ([_op("region", "fill_missing", {"method": "constant", "value": 0})], "region",
+         "`region` is text, so the fill value must be text; 0 is a number"),
+        ([_op("customer_id", "fill_missing", {"method": "median"})], "customer_id", "`customer_id` has no missing values"),
+        ([_op("customer_id", "leave_missing")], "customer_id", "`customer_id` has no missing values, so there were none"),
+        ([_op("discount_pct", "convert_type", {"to": "integer"})], "discount_pct", "18"),
+        ([_op("region", "convert_type", {"to": "numeric"})], "region",
+         "181 recorded value(s) in `region` are not numbers"),
+        ([_op("region", "convert_type", {"to": "datetime"})], "region",
+         "181 recorded value(s) in `region` are not dates"),
+        ([_op("units_sold", "convert_type", {"to": "datetime"})], "units_sold", "only text is converted to dates"),
+        ([_op("region", "convert_type", {"to": "string"})], "region", "`region` is already stored as text"),
+        ([_op("units_sold", "convert_type", {"to": "numeric"})], "units_sold", "`units_sold` is already numeric"),
+        ([_op("product_code", "standardize_values", {"mapping": {"PRD-0001": "P1"}})], "product_code",
+         "the Cleaner was not shown every value of `product_code`"),
+        ([_op("region", "standardize_values", {"mapping": {"NORTH": "North", "north": "North"}})], "region",
+         "1 of the values to replace are not in `region` ('NORTH'), so nothing was replaced"),
+        ([_op("region", "standardize_values", {"mapping": {"North": "North"}})], "region",
+         "none of the mapped values of `region` would change"),
+        ([_op("region", "flag_outliers")], "region", "`region` is not numeric, so it has no IQR outliers"),
+        ([_op("units_sold", "flag_outliers")], "units_sold", "`units_sold` has no values outside the IQR bounds"),
+        ([_op("revenue", "convert_type", {"to": "string"}), _op("revenue", "flag_outliers")], "revenue",
+         "`revenue` is no longer numeric (it is now object)"),
+    ],
+)
+def test_an_operation_impossible_for_the_column_is_not_executed_and_changes_nothing(decisions, column, detail) -> None:
+    df = _messy()
+    frame, items, records, _, _ = _run_ops(df, decisions)
+    refused = [i for i in items if i["status"] == "not_executed"]
+    assert len(refused) == 1 and refused[0]["contract"] is False
+    assert detail in refused[0]["detail"]
+    record = records[refused[0]["index"]]
+    assert record["action"] == f"Not executed: {refused[0]['detail']}. Nothing was changed."
+    assert record["issue"].startswith("The Cleaner requested ")
+    if len(decisions) == 1:
+        pd.testing.assert_frame_equal(frame, df.drop_duplicates())
+
+
+def test_the_two_router_crashes_are_now_recorded_refusals() -> None:
+    """The keyword router raised TypeError here, after the user had answered pauses."""
+    df = pd.DataFrame({"n": [1.0, 2.0, np.nan, 4.0], "k": list("abcd")})
+    frame, items, records, _, _ = _run_ops(df, [
+        _op("n", "convert_type", {"to": "integer"}),
+        _op("n", "fill_missing", {"method": "constant", "value": "unknown"}),
+    ])
+    assert str(frame["n"].dtype) == "Int64" and frame["n"].isna().sum() == 1
+    assert records[1]["action"].startswith(
+        "Not executed: `n` is numeric (Int64), so the fill value must be a number; 'unknown' is text"
+    )
+    # A fractional median cannot fill a whole-number column either.
+    df2 = pd.DataFrame({"n": [1.0, 2.0, np.nan], "k": list("abc")})
+    frame2, _, records2, _, _ = _run_ops(df2, [
+        _op("n", "convert_type", {"to": "integer"}),
+        _op("n", "fill_missing", {"method": "median"}),
+    ])
+    assert frame2["n"].isna().sum() == 1
+    assert "the median of `n` is 1.5, not a whole number" in records2[1]["action"]
+    # Category conversion (the other crash's first half) is not an operation at all.
+    [item] = _run_ops(_messy(), [_op("region", "convert_type", {"to": "category"})])[1]
+    assert item["contract"] is True
+
+
+def test_an_unexpected_failure_leaves_the_frame_unchanged_and_is_recorded() -> None:
+    df = pd.DataFrame({"x": [1.0, np.nan, 3.0]})
+    with patch("backend.agents.cleaner._fill_missing", side_effect=RuntimeError("boom")):
+        frame, [item], [record], _, _ = _run_ops(df, [_op("x", "fill_missing", {"method": "median"})])
+    pd.testing.assert_frame_equal(frame, df)
+    assert item["status"] == "not_executed"
+    assert record["action"] == "Not executed: it failed unexpectedly (RuntimeError: boom). Nothing was changed."
+
+
+def test_a_failed_postcondition_is_reported_as_a_discrepancy() -> None:
+    df = pd.DataFrame({"x": [1.0, np.nan, 3.0]})
+    with patch("backend.agents.cleaner._fill_missing", side_effect=lambda frame, column, value: frame.copy()):
+        _, _, [record], _, discrepancies = _run_ops(df, [_op("x", "fill_missing", {"method": "median"})])
+    assert record["action"].startswith(
+        "Cleaner decision (verification failed: `x` has 1 missing value(s) and dtype float64 (was float64) after the fill): "
+    )
+    assert discrepancies == [
+        "Decision 1 (fill_missing with the median): `x` has 1 missing value(s) and dtype float64 (was float64) after the fill"
+    ]
+    assert re_profile_dataframe(df, discrepancies)["discrepancies"] == discrepancies
+
+
+@pytest.mark.parametrize(
+    "decisions",
+    [
+        [_op("units_sold", "fill_missing", {"method": "median"}), _op("units_sold", "leave_missing")],
+        [_op("units_sold", "fill_missing", {"method": "median"}), _op("units_sold", "fill_missing", {"method": "mean"})],
+        [_op("customer_id", "convert_type", {"to": "string"}), _op("customer_id", "convert_type", {"to": "numeric"})],
+        [_op("region", "standardize_values", {"mapping": {"north": "North"}}),
+         _op("region", "standardize_values", {"mapping": {"south": "South"}})],
+    ],
+)
+def test_contradicting_decisions_on_one_column_are_all_refused(decisions) -> None:
+    df = _messy()
+    frame, items, records, _, _ = _run_ops(df, decisions)
+    pd.testing.assert_frame_equal(frame, df.drop_duplicates())
+    assert [i["status"] for i in items] == ["not_executed", "not_executed"]
+    assert all("contradict each other" in r["action"] for r in records)
+
+
+def test_an_exact_repeat_runs_once() -> None:
+    df = _messy()
+    fill = _op("units_sold", "fill_missing", {"method": "median"})
+    frame, items, records, _, _ = _run_ops(df, [fill, dict(fill)])
+    assert frame["units_sold"].isna().sum() == 0
+    assert [i["status"] for i in items] == ["executed", "not_executed"]
+    assert records[1]["action"] == "Not executed: it repeats decision 1 on `units_sold`. Nothing was changed."
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        {"issue": "missingness means the sale was never recorded", "action": "Exclude rows where it is missing"},
+        {"issue": "4 values 6.8 SD from the mean", "action": "flagged as potential process events"},
+        {"issue": "0 exact duplicate rows present", "action": "no duplicate rows present; no action taken"},
+        {"issue": "a mean is meaningless", "action": "Exclude `units_sold` from analysis entirely; drop column"},
+        {"issue": "x", "action": "Removed the 4 outlier values pending review; set to 'unknown'"},
+    ],
+)
+def test_the_wording_of_a_decision_never_changes_what_runs(prose) -> None:
+    """The live keyword-routing failures (F3 C3, F3b C4, the Step 8 probe) as wording
+    around a named operation: only the operation runs, whatever the text says."""
+    df = _messy()
+    frame, _, [record], _, _ = _run_ops(df, [_op("units_sold", "fill_missing", {"method": "median"}, **prose)])
+    expected = df.drop_duplicates().copy()
+    expected["units_sold"] = expected["units_sold"].fillna(expected["units_sold"].median())
+    pd.testing.assert_frame_equal(frame, expected)
+    assert record["action"] == "Cleaner decision: filled the 15 missing values in `units_sold` with the median (270.5)"
+    # The same wording on a note runs nothing at all.
+    frame, _, _, _, _ = _run_ops(df, [_op("units_sold", "note", **prose)])
+    pd.testing.assert_frame_equal(frame, df.drop_duplicates())
+
+
+def test_order_standardize_before_fill_and_convert_before_fill() -> None:
+    """Phases run in a fixed order whatever order the decisions are listed in."""
+    df = pd.DataFrame({"t": ["b", "B", "B", None, "a"], "n": ["1", "2", None, "4", "5"]})
+    frame, _, records, _, _ = _run_ops(df, [
+        _op("t", "fill_missing", {"method": "mode"}),
+        _op("n", "fill_missing", {"method": "median"}),
+        _op("n", "convert_type", {"to": "numeric"}),
+        _op("t", "standardize_values", {"mapping": {"B": "b"}}),
+    ])
+    assert frame["t"].tolist() == ["b", "b", "b", "b", "a"]  # the mode after standardizing is 'b'
+    assert frame["n"].tolist() == [1.0, 2.0, 3.0, 4.0, 5.0]
+    assert all(r["action"].startswith("Cleaner decision:") for r in records)
+
+
+def _live_contradiction_report() -> dict:
+    """F3b C4's three contradictions, now with operations (region, return_flag), plus its
+    Step 4 prose (no operation) and prose-only decisions on user-decided columns."""
+    return _routed(
+        [
+            LEGACY_DEDUPE,
+            _op("customer_id", "convert_type", {"to": "string"}),
+            _op("region", "standardize_values", {"mapping": {"north": "North", "SOUTH": "South", "south": "South"}},
+                action="normalised all region values to title case"),
+            _op("return_flag", "leave_missing",
+                action="no imputation applied; filled with mode ('N') for the remaining records"),
+            _op("region", "fill_missing", {"method": "mode"}),
+            _op("sales_rep", "fill_missing", {"method": "mode"}),
+            {"column_name": "notes", "issue": "45.5% missing", "action": "91 missing values preserved per user decision", "reason": "r"},
+            *ADVERSARIAL_REVENUE,
+        ],
+        ("revenue", "none"),
+    )
+
+
+def test_the_live_c3_c4_contradictions_cannot_recur() -> None:
+    df = _messy()
+    outcome, saved, captured, _ = _run_cleaner(df, _live_contradiction_report(), _missing_answered(df))
+    assert not isinstance(outcome, Exception), outcome
+    decisions = outcome["cleaning_report"]["decisions"]
+    # Duplicates: the system's count, removed and stated; the false claim is nowhere.
+    assert len(saved) == MESSY_DEDUPED_ROWS
+    assert decisions[1]["action"] == "System step: removed the 15 exact duplicate rows, keeping the first occurrence of each"
+    assert not any("0 exact duplicate" in d["issue"] or "no duplicate rows present" in d["action"] for d in decisions)
+    # Region: the mapping ran, and the mode fill used the standardized values.
+    assert saved["region"].value_counts().to_dict() == {"North": 76, "South": 45, "East": 34, "West": 30}
+    assert [r["action"].split(":")[0] for r in _records_for(outcome, "region")] == ["Cleaner decision"] * 2
+    # return_flag: the operation said leave, so all 15 stay missing, whatever the prose said.
+    assert saved["return_flag"].isna().sum() == 15
+    [flag_record] = _records_for(outcome, "return_flag")
+    assert flag_record["action"].startswith("Cleaner decision: left the 15 missing values in `return_flag` unchanged")
+    # The model's own action text is never printed as what happened; only its reasoning is kept.
+    assert not any("filled with mode" in text for text in flag_record.values() if isinstance(text, str))
+    assert flag_record["reason"] == "The Cleaner's reasoning: r"
+    # Every Cleaner action was stated by the system; the contract record counts the prose.
+    # 11 in the report: 5 dropped on user-decided columns still count toward the total.
+    assert decisions[0]["action"].startswith("Contract check: 1 of the Cleaner's 11 decisions had no valid operation")
+    for d in decisions:
+        assert d["action"].split(":")[0] in (
+            "Contract check", "System step", "Cleaner decision", "Not executed",
+            "User decision (missing-value pause)", "Outlier review",
+        ) or d["action"].startswith("No data changed")
+    summary = outcome["cleaning_report"]["operations_summary"]
+    assert summary == {
+        "cleaner_decisions": 11, "executed": 5, "noted": 0, "not_executed": 1,
+        "no_valid_operation": 1, "dropped_on_user_decided_columns": 5,
+    }
+
+
+def test_a_report_whose_decisions_all_lack_an_operation_completes_truthfully_with_a_contract_record() -> None:
+    """VP3: the run finishes, nothing is guessed, and the first record says so."""
+    df = _messy()
+    prose = [
+        {"column_name": "units_sold", "issue": "8% missing", "action": "filled 16 missing values with median", "reason": "r"},
+        {"column_name": "region", "issue": "casing", "action": "normalised to title case", "reason": "r"},
+        {"column_name": "sales_rep", "issue": "3% missing", "action": "filled with mode", "reason": "r"},
+        LEGACY_DEDUPE,
+    ]
+    outcome, saved, _, _ = _run_cleaner(df, _routed(prose, ("revenue", "none")), _missing_answered(df))
+    assert not isinstance(outcome, Exception), outcome
+    decisions = outcome["cleaning_report"]["decisions"]
+    assert decisions[0] == {
+        "column_name": None,
+        "issue": "4 of the 4 decisions in the Cleaner's report did not name a valid operation",
+        "action": (
+            "Contract check: 4 of the Cleaner's 4 decisions had no valid operation and were not executed; "
+            "the data was not changed by them. 1 of them named no column and is not shown"
+        ),
+        "reason": (
+            "Recorded by the system, not written by the Cleaner. Every change the Cleaner makes must name one "
+            "of its operations, which the system checks and runs; a decision without one is never guessed "
+            "from its wording. Reasons: the decision names no operation (4)."
+        ),
+    }
+    deduped = df.drop_duplicates()
+    for column in ("units_sold", "region", "sales_rep"):
+        assert saved[column].isna().sum() == deduped[column].isna().sum()
+    assert outcome["cleaning_report"]["operations_summary"]["no_valid_operation"] == 4
+
+
+def test_a_report_without_a_decisions_list_gets_the_contract_record() -> None:
+    df = _messy()
+    report = _routed([], ("revenue", "none"))
+    del report["decisions"]
+    outcome, saved, _, _ = _run_cleaner(df, report, _missing_answered(df))
+    assert outcome["cleaning_report"]["decisions"][0]["action"].startswith(
+        "Contract check: the Cleaner's report had no valid decisions list"
+    )
+    assert len(saved) == MESSY_DEDUPED_ROWS
+
+
+def test_a_flag_survives_on_a_column_whose_missing_values_the_user_decided() -> None:
+    """S5 narrowing, at node level: the user's median runs, the Cleaner's flag marks the
+    raw-mask rows, and the F3b record agrees; the Cleaner's fill on the column is dropped."""
+    df = _messy()
+    deduped = df.drop_duplicates()
+    report = _routed(
+        [_op("revenue", "flag_outliers"), _op("revenue", "fill_missing", {"method": "mean"})],
+        ("revenue", "none"),
+    )
+    outcome, saved, _, _ = _run_cleaner(df, report, _missing_answered(df))
+    assert not isinstance(outcome, Exception), outcome
+    assert saved.index[saved["revenue_outlier_flag"] == 1].tolist() == OUTLIER_ROWS
+    assert (saved.loc[deduped.index[deduped["revenue"].isna()], "revenue"] == deduped["revenue"].median()).all()
+    [record] = _system_records(outcome, "revenue")
+    assert "4 of them are marked in `revenue_outlier_flag`" in record["reason"]
+    revenue_actions = [d["action"] for d in _records_for(outcome, "revenue")]
+    assert revenue_actions[0].startswith("Cleaner decision: marked the 4 row(s)")
+    assert revenue_actions[1].startswith("User decision (missing-value pause): imputed")
+    assert outcome["cleaner_outliers_handled"] == {"revenue": 4}
+    assert outcome["cleaning_report"]["operations_summary"]["dropped_on_user_decided_columns"] == 1
+
+
+def test_the_report_passes_the_strict_schemas_and_is_plain_json() -> None:
+    df = _messy()
+    answered = [*_missing_answered(df), _answered(_outlier_question(), "flag_as_suspected_error", df)]
+    outcome, _, captured, _ = _run_cleaner(df, _live_contradiction_report(), answered)
+    report = outcome["cleaning_report"]
+    json.dumps(report)  # no numpy or other non-JSON value anywhere, operations included
+    CleaningReport.model_validate(report)
+    for decision in report["decisions"]:
+        assert set(decision) == {"column_name", "issue", "action", "reason"}
+        CleaningDecision.model_validate(decision)
+    api = AnalysisResponse(
+        id="test-analysis-id",
+        filename="messy_data.csv",
+        status="complete",
+        created_at=datetime.datetime.now(datetime.timezone.utc),
+        cleaning_report=report,
+        cleaning_decisions=captured[-1]["cleaning_decisions"],
+    ).model_dump(mode="json")
+    assert api["cleaning_decisions"] == report["decisions"]
+    sources = [op["source"] for op in report["operations"]]
+    assert sources[0] == "system" and "cleaner" in sources and sources.count("user") == 3
+    assert report["re_profile_verification"]["discrepancies"] == []
+
+
+def test_the_cleaner_call_allows_16000_tokens_and_a_truncated_response_fails_clearly() -> None:
+    df = _messy()
+    outcome, saved, captured, create = _run_cleaner(
+        df, _routed([], ("revenue", "none")), _missing_answered(df), stop_reason="max_tokens"
+    )
+    assert create.call_args.kwargs["max_tokens"] == 16000
+    assert isinstance(outcome, ValueError)
+    assert "truncated: reached the max_tokens ceiling (16000)" in str(outcome)
+    assert saved is None
+    assert [p["status"] for p in captured] == ["cleaning", "error"]
+
+
+def test_profiler_concerns_addressed_is_not_assessed_rather_than_a_false_false() -> None:
+    df = _messy()
+    concerns = [{"issue": "revenue 35% missing", "affected_columns": ["revenue"], "why_it_matters": "bias"}]
+    outcome, _, _, create = _run_cleaner(
+        df, _routed([], ("revenue", "none")), _missing_answered(df),
+        profiler_top_3_concerns=concerns, profile_report=PROFILER_STRUCTURAL,
+    )
+    assert outcome["cleaning_report"]["profiler_concerns_addressed"] == [
+        {"concern": concerns[0], "addressed": "not assessed"}
+    ]
+    sent = _sent_message(create)
+    assert sent["duplicate_row_count"] == 15
+    assert sent["semantically_categorical_columns"] == PROFILER_STRUCTURAL["semantically_categorical_columns"]
+    assert "region" in sent["distinct_values"] and sent["interactions_detected"]
+
+
+def test_the_prompt_lists_exactly_the_operations_python_runs() -> None:
+    """Rule 7 drift guard: the operation names, conversion targets and fill methods in
+    cleaner_system.md are the ones plan_model_decisions accepts."""
+    from backend.agents.cleaner import _CONVERT_TARGETS, _FILL_METHODS, _MODEL_OPERATIONS
+    prompt = (pathlib.Path("backend") / "prompts" / "cleaner_system.md").read_text()
+    for name in _MODEL_OPERATIONS:
+        assert f"| `{name}` |" in prompt
+    assert '"to": "string" \\| "numeric" \\| "integer" \\| "datetime"' in prompt
+    assert list(_CONVERT_TARGETS) == ["string", "numeric", "integer", "datetime"]
+    assert '{"method": "median" \\| "mean" \\| "mode"}' in prompt and '"method": "constant"' in prompt
+    assert list(_FILL_METHODS) == ["median", "mean", "mode", "constant"]
+
+
+def test_flags_run_after_the_users_row_exclusions_so_the_record_counts_what_remains() -> None:
+    """A user's exclude_rows removes an outlier row; the Cleaner's flag, run after it,
+    marks and reports only the outlier row that is still there."""
+    df = _amount_frame()
+    df["gap"] = [np.nan, np.nan, np.nan, 4.0, np.nan, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, np.nan]
+    answered = [_answered(_mv_question("gap", "median"), "exclude_rows", df)]
+    outcome, saved, _, _ = _run_cleaner(df, _routed([_op("amount", "flag_outliers")], ("amount", "none")), answered)
+    assert not isinstance(outcome, Exception), outcome
+    assert 13 not in saved.index
+    assert saved.index[saved["amount_outlier_flag"] == 1].tolist() == [8]
+    [flag] = [d for d in _records_for(outcome, "amount") if d["action"].startswith("Cleaner decision")]
+    assert flag["action"].startswith("Cleaner decision: marked the 1 row(s) holding these values")
+    assert outcome["cleaner_outliers_handled"] == {"amount": 1}
+
+
+def test_leave_missing_is_rechecked_on_the_final_frame() -> None:
+    """Nothing in the pipeline fills a column the Cleaner left, but if anything ever did,
+    the record would say so rather than repeat the planned count."""
+    df = _messy()
+    items = plan_model_decisions([_op("return_flag", "leave_missing")], df)
+    frame = run_model_operations(df.drop_duplicates().copy(), items, _MODEL_PHASES_BEFORE_USER, df, _distinct_value_columns(df))
+    frame["return_flag"] = frame["return_flag"].fillna("N")
+    [record], _, discrepancies = build_model_records(items, frame)
+    assert record["action"].startswith(
+        "Cleaner decision (verification failed: 15 of the 15 values left missing in `return_flag` "
+        "were filled afterwards): left"
+    )
+    assert discrepancies == [
+        "Decision 1 (leave_missing): 15 of the 15 values left missing in `return_flag` were filled afterwards"
+    ]
+
+
+def test_a_failed_check_reaches_the_saved_re_profile_verification() -> None:
+    df = _amount_frame()
+    with patch("backend.agents.cleaner._fill_missing", side_effect=lambda frame, column, value: frame.copy()):
+        outcome, _, captured, _ = _run_cleaner(
+            df, _routed([_op("amount", "fill_missing", {"method": "median"})], ("amount", "none"))
+        )
+    expected = [
+        "Decision 1 (fill_missing with the median): `amount` has 1 missing value(s) and dtype float64 "
+        "(was float64) after the fill"
+    ]
+    assert outcome["cleaning_report"]["re_profile_verification"]["discrepancies"] == expected
+    assert captured[-1]["cleaning_report"]["re_profile_verification"]["discrepancies"] == expected
+
+
+def test_records_number_decisions_by_their_position_in_the_cleaners_report() -> None:
+    """A dropped decision on a user-decided column still counts, so "decisions 2, 3" in a
+    record are the report's second and third decisions."""
+    df = _messy()
+    report = _routed(
+        [
+            _op("revenue", "fill_missing", {"method": "mean"}),  # dropped: the user decided revenue
+            _op("units_sold", "fill_missing", {"method": "median"}),
+            _op("units_sold", "fill_missing", {"method": "mean"}),
+        ],
+        ("revenue", "none"),
+    )
+    outcome, _, _, _ = _run_cleaner(df, report, _missing_answered(df))
+    units = _records_for(outcome, "units_sold")
+    assert [r["action"].split(" on ")[0] for r in units] == ["Not executed: decisions 2, 3"] * 2
+    logged = [o.get("decision") for o in outcome["cleaning_report"]["operations"] if o["source"] == "cleaner"]
+    assert logged == [2, 3, None]  # the dropped decision is logged without a number
+
+
+def test_leave_missing_on_rows_the_user_later_excluded_is_not_a_failure() -> None:
+    """Code Review finding 2: `b` is missing only where `a` is; the Cleaner leaves `b`,
+    the user excludes the rows where `a` is missing. Nothing failed; the record says so."""
+    df = pd.DataFrame({
+        "a": [np.nan] * 4 + [float(i) for i in range(6)],
+        "b": [np.nan] * 3 + [float(i * 10) for i in range(7)],  # 30%: no pause of its own
+        "k": list("abcdefghij"),
+    })
+    answered = [_answered(_mv_question("a", "median"), "exclude_rows", df)]
+    outcome, saved, _, _ = _run_cleaner(df, _report([_op("b", "leave_missing")]), answered)
+    assert not isinstance(outcome, Exception), outcome
+    assert len(saved) == 6 and saved["b"].isna().sum() == 0
+    [record] = _records_for(outcome, "b")
+    assert record["action"] == (
+        "Cleaner decision: left the 3 missing values in `b` unchanged (nothing imputed, no rows removed); "
+        "3 of those rows were later removed by the user's row exclusion"
+    )
+    assert outcome["cleaning_report"]["re_profile_verification"]["discrepancies"] == []
+
+
+def test_a_mode_fill_that_narrows_an_object_true_false_column_is_not_a_failure() -> None:
+    """Code Review finding 3: True/False with blanks loads as object; pandas narrows it to
+    bool once filled. That is not a failed check; a numeric column turning non-numeric is."""
+    df = pd.read_csv(io.StringIO("k,x\n" + "\n".join(f"{i},{v}" for i, v in enumerate(["True", "False", "True", "", "True"]))))
+    assert df["x"].dtype == object
+    with pytest.warns(FutureWarning):  # pandas' own deprecation of fillna downcasting
+        frame, _, [record], _, discrepancies = _run_ops(df, [_op("x", "fill_missing", {"method": "mode"})])
+    assert frame["x"].isna().sum() == 0
+    assert record["action"].startswith("Cleaner decision: filled the 1 missing values in `x` with the mode")
+    assert discrepancies == []
+
+
+@pytest.mark.parametrize(
+    "values, dtype, expected",
+    [
+        (["a", None, "b"], None, True),
+        ([None, None], "object", True),
+        ([True, None, False], None, False),  # Python bools with gaps load as object, not text
+        (["a", 1, None], None, False),
+        (["a", None], "string", True),
+        ([1, 2], None, False),
+    ],
+)
+def test_is_text_column_means_every_recorded_value_is_text(values, dtype, expected) -> None:
+    from backend.agents.cleaner import _is_text_column
+    assert _is_text_column(pd.Series(values, dtype=dtype)) is expected
+
+
+@pytest.mark.parametrize(
+    "series",
+    [
+        pd.Series(pd.to_datetime(["2024-01-01", None, "2024-02-01"])),
+        pd.Series([1, None, 3], dtype="Int64"),
+    ],
+    ids=["datetime", "Int64"],
+)
+def test_convert_to_string_really_converts_dates_and_nullable_integers(series) -> None:
+    """Second Code Review, finding 1: `where` kept datetime64/Int64, so the conversion
+    did nothing while being reported as run."""
+    df = pd.DataFrame({"c": series, "k": list("abc")})
+    frame, _, [record], _, discrepancies = _run_ops(df, [_op("c", "convert_type", {"to": "string"})])
+    assert frame["c"].dtype == object and frame["c"].isna().tolist() == [False, True, False]
+    assert all(isinstance(v, str) for v in frame["c"].dropna())
+    assert record["action"].startswith(f"Cleaner decision: converted `c` from {series.dtype} to object (string)")
+    assert discrepancies == []
+
+
+def test_the_contract_record_counts_every_decision_in_the_report() -> None:
+    """Second Code Review, finding 2: dropped decisions still count toward the total."""
+    df = _messy()
+    report = _routed(
+        [_op("revenue", "fill_missing", {"method": "mean"}), _op("revenue", "leave_missing"),
+         {"column_name": "units_sold", "issue": "i", "action": "filled with median", "reason": "r"}],
+        ("revenue", "none"),
+    )
+    outcome, _, _, _ = _run_cleaner(df, report, _missing_answered(df))
+    assert outcome["cleaning_report"]["decisions"][0]["issue"] == (
+        "1 of the 3 decisions in the Cleaner's report did not name a valid operation"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Group 13 — fills on a column whose outliers only the user answered (Build G,
+# approved after Code Review finding 5)
+# ---------------------------------------------------------------------------
+
+
+def test_executor_order_runs_the_cleaners_fills_before_the_users_outlier_choices() -> None:
+    """The ordering the change relies on, checked on the executor itself (no filter):
+    the fill touches only the originally missing value, with the outliers still present
+    (as they were when the user was asked), and the values the user then excludes as
+    outliers stay missing."""
+    df = _amount_frame()  # amount: one gap (row 11), outliers at rows 8 and 13
+    resolutions = build_cleaner_resolutions([_answered(_outlier_question("amount"), "flag_as_suspected_error", df)])
+    masks = {"amount": _iqr_outlier_mask(df["amount"])}
+    items = plan_model_decisions([_op("amount", "fill_missing", {"method": "median"})], df)
+    shown = _distinct_value_columns(df)
+    frame, _, _ = remove_duplicate_rows(df)
+    # As cleaner_node passes them: the values the user excluded as outliers.
+    frame = run_model_operations(frame, items, _MODEL_PHASES_BEFORE_USER, df, shown, masks)
+    # Filled before the user's choice runs, with a median computed without the
+    # excluded values (15; with them it would be 16).
+    assert frame.loc[11, "amount"] == 15.0 and frame["amount"].isna().sum() == 0
+    frame, *_ = apply_user_decisions(frame, resolutions, masks)
+    frame = run_model_operations(frame, items, _MODEL_PHASES_AFTER_USER, df, shown, masks)
+    assert frame.index[frame["amount"].isna()].tolist() == [8, 13]
+    assert frame.loc[11, "amount"] == 15.0
+    assert frame.index[frame["amount_outlier_flag"] == 1].tolist() == [8, 13]
+    assert "fill" in _MODEL_PHASES_BEFORE_USER and "fill" not in _MODEL_PHASES_AFTER_USER
+
+
+def _outlier_only(df: pd.DataFrame) -> list:
+    return [_answered(_outlier_question("amount"), "flag_as_suspected_error", df)]
+
+
+def test_a_fill_runs_and_is_recorded_where_the_user_answered_only_the_outlier_pause() -> None:
+    df = _amount_frame()
+    outcome, saved, _, _ = _run_cleaner(
+        df, _report([_op("amount", "fill_missing", {"method": "median"})]), _outlier_only(df)
+    )
+    assert not isinstance(outcome, Exception), outcome
+    assert saved.loc[11, "amount"] == 15.0
+    actions = [d["action"] for d in _records_for(outcome, "amount")]
+    assert actions[0] == (
+        "Cleaner decision: filled the 1 missing values in `amount` with the median (15), "
+        "computed without the 2 value(s) the user excluded as outliers"
+    )
+    assert actions[1].startswith("User decision (financial outlier pause): removed the 2 outlier value(s)")
+    summary = outcome["cleaning_report"]["operations_summary"]
+    assert (summary["executed"], summary["dropped_on_user_decided_columns"]) == (1, 0)
+
+
+def test_the_values_the_user_excluded_as_outliers_stay_missing_after_the_fill() -> None:
+    df = _amount_frame()
+    outcome, saved, _, _ = _run_cleaner(
+        df, _report([_op("amount", "fill_missing", {"method": "median"})]), _outlier_only(df)
+    )
+    assert saved.index[saved["amount"].isna()].tolist() == [8, 13]
+    assert saved.index[saved["amount_outlier_flag"] == 1].tolist() == [8, 13]
+    assert outcome["cleaning_report"]["re_profile_verification"]["discrepancies"] == []
+
+
+def test_leave_missing_runs_where_the_user_answered_only_the_outlier_pause() -> None:
+    """The user's exclusion adds missing values later; the re-check is by row, so the
+    record is not a false failure."""
+    df = _amount_frame()
+    outcome, saved, _, _ = _run_cleaner(df, _report([_op("amount", "leave_missing")]), _outlier_only(df))
+    [record] = [d for d in _records_for(outcome, "amount") if d["action"].startswith("Cleaner decision")]
+    assert record["action"] == (
+        "Cleaner decision: left the 1 missing values in `amount` unchanged (nothing imputed, no rows removed)"
+    )
+    assert saved["amount"].isna().sum() == 3
+    assert outcome["cleaning_report"]["re_profile_verification"]["discrepancies"] == []
+
+
+@pytest.mark.parametrize("with_outlier_answer", [False, True], ids=["missing-only", "missing-and-outlier"])
+@pytest.mark.parametrize("operation, params", [("fill_missing", {"method": "median"}), ("leave_missing", {})])
+def test_no_change_where_the_user_answered_the_missing_value_pause(operation, params, with_outlier_answer) -> None:
+    """The user's missing-value choice decides the gaps: the Cleaner's fill or
+    leave_missing on that column is still dropped."""
+    df = _amount_frame()
+    answered = [_answered(_mv_question("amount", "median"), "preserve_missingness", df)]
+    if with_outlier_answer:
+        answered += _outlier_only(df)
+    outcome, saved, _, _ = _run_cleaner(df, _report([_op("amount", operation, params)]), answered)
+    assert not isinstance(outcome, Exception), outcome
+    assert pd.isna(saved.loc[11, "amount"])
+    assert not [d for d in _records_for(outcome, "amount") if d["action"].startswith("Cleaner decision")]
+    assert outcome["cleaning_report"]["operations_summary"]["dropped_on_user_decided_columns"] == 1
+
+
+
+def test_a_mean_fill_never_uses_the_outliers_the_user_excluded_as_errors() -> None:
+    """Scoped Code Review finding: the fill runs before the user's choice, so without this
+    rule a mean fill would write ~243 (built from the 1,000 and 2,000 the user rejected)
+    into a column whose real values run 10-20."""
+    df = _amount_frame()
+    outcome, saved, _, _ = _run_cleaner(
+        df, _report([_op("amount", "fill_missing", {"method": "mean"})]), _outlier_only(df)
+    )
+    assert saved.loc[11, "amount"] == 15.0
+    assert saved.index[saved["amount"].isna()].tolist() == [8, 13]
+    [fill] = [d for d in _records_for(outcome, "amount") if d["action"].startswith("Cleaner decision")]
+    assert fill["action"].endswith("with the mean (15), computed without the 2 value(s) the user excluded as outliers")
+
+
+@pytest.mark.parametrize("option_id", ["treat_as_valid"])
+def test_outliers_the_user_kept_as_valid_count_in_the_fill(option_id) -> None:
+    df = _amount_frame()
+    answered = [_answered(_outlier_question("amount"), option_id, df)]
+    outcome, saved, _, _ = _run_cleaner(df, _report([_op("amount", "fill_missing", {"method": "mean"})]), answered)
+    expected = df["amount"].mean()  # 3165 / 13, the outliers included: the user ruled them valid
+    assert saved.loc[11, "amount"] == pytest.approx(expected)
+    assert saved.loc[[8, 13], "amount"].tolist() == [1000.0, 2000.0]
+    [fill] = [d for d in _records_for(outcome, "amount") if d["action"].startswith("Cleaner decision")]
+    assert "excluded as outliers" not in fill["action"]
