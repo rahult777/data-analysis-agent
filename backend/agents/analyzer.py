@@ -53,6 +53,11 @@ client = Anthropic(api_key=ANTHROPIC_API_KEY)
 # See errors.md 2026-06-03 / 2026-06-04.
 ANALYZER_MAX_TOKENS = 32000
 
+# The Pearson reliability floor (analyzer_system.md Section 6): a correlation
+# resting on fewer complete pairs than this is Cannot Determine, whatever label
+# the model gave it. Enforced in Python by apply_correlation_floor (Build I).
+CORRELATION_MIN_PAIRS = 30
+
 
 def sanitize_for_json(obj: Any) -> Any:
     """Recursively replace NaN/Inf floats with None and tuples with lists.
@@ -207,6 +212,25 @@ def compute_descriptive_stats(
     return stats
 
 
+def count_complete_pairs(df: pd.DataFrame, col_a: str, col_b: str) -> int:
+    """Number of rows where both columns hold a present, finite number — the
+    rows df.corr() uses for this pair. pandas computes Pearson on pairwise
+    complete observations, converting with to_numpy(dtype=float,
+    na_value=np.nan) and masking with np.isfinite, so an inf is excluded as well
+    as a NaN (where a plain dropna() would still count it). The notna() masks
+    also exclude a timedelta NaT, which that conversion turns into a finite
+    sentinel."""
+    values_a = df[col_a].to_numpy(dtype=float, na_value=np.nan)
+    values_b = df[col_b].to_numpy(dtype=float, na_value=np.nan)
+    complete = (
+        np.isfinite(values_a)
+        & np.isfinite(values_b)
+        & df[col_a].notna().to_numpy()
+        & df[col_b].notna().to_numpy()
+    )
+    return int(complete.sum())
+
+
 def compute_correlation_matrix(
     df: pd.DataFrame,
     numeric_columns: List[str],
@@ -214,8 +238,9 @@ def compute_correlation_matrix(
     """Compute the full Pearson correlation matrix with diagonal masking.
 
     Returns None if fewer than 2 numeric columns exist. Otherwise returns
-    a dict with sanitized matrix, strong_pairs (|r| > 0.7, off-diagonal),
-    highest_pair (list[col1, col2]), and highest_value (float or None).
+    a dict with sanitized matrix, strong_pairs (|r| > 0.7, off-diagonal, each
+    with its number of complete pairs `n`), highest_pair (list[col1, col2]),
+    and highest_value (float or None).
     """
     if len(numeric_columns) < 2:
         return None
@@ -240,6 +265,7 @@ def compute_correlation_matrix(
                     "col1": cols[i],
                     "col2": cols[j],
                     "correlation_value": float(value),
+                    "n": count_complete_pairs(df, cols[i], cols[j]),
                 })
 
     highest_pair: Optional[List[str]] = None
@@ -563,6 +589,160 @@ def check_self_evaluation(
     return (len(failed) == 0, failed)
 
 
+_CANNOT_DETERMINE = "Cannot Determine"
+
+
+def _is_matrix_pair(matrix: dict, df: pd.DataFrame, col_a: Any, col_b: Any) -> bool:
+    """True if {col_a, col_b} is an off-diagonal pair of Python's correlation
+    matrix (and both columns are in the frame it was computed from). Exact
+    column names in either order: no case or whitespace normalization, no fuzzy
+    matching. The same column twice is not a pair."""
+    if not isinstance(col_a, str) or not isinstance(col_b, str) or col_a == col_b:
+        return False
+    row_a = matrix.get(col_a)
+    return (
+        isinstance(row_a, dict)
+        and col_b in row_a
+        and col_b in matrix
+        and col_a in df.columns
+        and col_b in df.columns
+    )
+
+
+def apply_correlation_floor(
+    analysis_response: dict,
+    correlation_result: Optional[dict],
+    df: pd.DataFrame,
+) -> None:
+    """Enforce the Pearson reliability floor on the model's correlation output,
+    in place (Build I — the prompt alone did not hold it: errors.md 2026-09-21).
+
+    Each entry of analysis_response["correlation"]["strong_correlations"] that
+    names a pair of Python's correlation matrix gets Python's r and complete-pair
+    n; below CORRELATION_MIN_PAIRS, or where Python's r is undefined (None), its
+    confidence_level becomes Cannot Determine with a floor_override record. An
+    entry naming any other pair is moved to
+    correlation.unverified_correlations with a system reason. The parent
+    correlation.confidence_level is lowered the same way when Python found strong
+    pairs and every one rests on fewer than CORRELATION_MIN_PAIRS complete pairs.
+    Labels are only ever lowered, never raised. Never raises: a correlation
+    object, strong_correlations list or entry that is malformed is left as it is
+    and logged; the parent rule reads only Python's strong pairs, so it still
+    applies when the model's entries are malformed.
+    """
+    if not isinstance(analysis_response, dict):
+        logger.warning(
+            "Correlation floor skipped: the analysis response is %s, not an object",
+            type(analysis_response).__name__,
+        )
+        return
+    correlation = analysis_response.get("correlation")
+    if correlation is None:
+        return
+    if not isinstance(correlation, dict):
+        logger.warning(
+            "Correlation floor skipped: correlation is %s, not an object",
+            type(correlation).__name__,
+        )
+        return
+
+    matrix = correlation_result.get("matrix") if isinstance(correlation_result, dict) else None
+    if not isinstance(matrix, dict):
+        matrix = {}
+
+    entries = correlation.get("strong_correlations")
+    if isinstance(entries, list):
+        kept: List[Any] = []
+        unverified: List[Dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                logger.warning(
+                    "Correlation floor: a strong_correlations entry is %s, not an "
+                    "object — left unchanged",
+                    type(entry).__name__,
+                )
+                kept.append(entry)
+                continue
+            col_a, col_b = entry.get("column_a"), entry.get("column_b")
+            if not _is_matrix_pair(matrix, df, col_a, col_b):
+                unverified.append({
+                    "column_a": col_a,
+                    "column_b": col_b,
+                    "reason": (
+                        f"System check: {col_a} × {col_b} is not a pair in the "
+                        "system's correlation matrix (a column is non-numeric, "
+                        "excluded or absent), so its r and n could not be verified. "
+                        "It is not reported as a correlation."
+                    ),
+                    "original_entry": entry,
+                })
+                continue
+            n = count_complete_pairs(df, col_a, col_b)
+            r = matrix[col_a].get(col_b)
+            entry["r"] = r
+            entry["n"] = n
+            original = entry.get("confidence_level")
+            reason: Optional[str] = None
+            if n < CORRELATION_MIN_PAIRS:
+                reason = (
+                    f"System check: Python counted {n} complete pairs for "
+                    f"{col_a} × {col_b}, below the {CORRELATION_MIN_PAIRS}-pair "
+                    "reliability floor, so the confidence is Cannot Determine."
+                )
+            elif r is None:
+                # pandas returns NaN (sanitized to None) when r is undefined,
+                # e.g. a column constant over the pair's complete rows.
+                reason = (
+                    f"System check: Python could not compute r for {col_a} × "
+                    f"{col_b} (r is undefined on their {n} complete pairs, e.g. a "
+                    "constant column), so the confidence is Cannot Determine."
+                )
+            if reason is not None and original != _CANNOT_DETERMINE:
+                entry["confidence_level"] = _CANNOT_DETERMINE
+                entry["floor_override"] = {
+                    "original_confidence_level": original,
+                    "reason": reason,
+                }
+            kept.append(entry)
+        correlation["strong_correlations"] = kept
+        correlation["unverified_correlations"] = unverified
+        if unverified:
+            logger.info(
+                "Correlation floor: %d model entries name pairs outside the "
+                "correlation matrix and were moved to unverified_correlations",
+                len(unverified),
+            )
+    else:
+        logger.warning(
+            "Correlation floor: strong_correlations is %s, not a list — left unchanged",
+            type(entries).__name__,
+        )
+
+    strong_pairs = (
+        correlation_result.get("strong_pairs") if isinstance(correlation_result, dict) else None
+    )
+    pair_counts = (
+        [pair.get("n") if isinstance(pair, dict) else None for pair in strong_pairs]
+        if isinstance(strong_pairs, list)
+        else []
+    )
+    if pair_counts and all(
+        isinstance(n, int) and n < CORRELATION_MIN_PAIRS for n in pair_counts
+    ):
+        original = correlation.get("confidence_level")
+        if original != _CANNOT_DETERMINE:
+            correlation["confidence_level"] = _CANNOT_DETERMINE
+            correlation["floor_override"] = {
+                "original_confidence_level": original,
+                "reason": (
+                    "System check: every strong correlation rests on fewer than "
+                    f"{CORRELATION_MIN_PAIRS} complete pairs (lowest n = "
+                    f"{min(pair_counts)}), so the overall correlation confidence "
+                    "is Cannot Determine."
+                ),
+            }
+
+
 async def analyzer_node(state: PipelineState) -> dict:
     """LangGraph node — runs the full Deep Investigator pipeline."""
     analysis_id = state["analysis_id"]
@@ -785,6 +965,12 @@ async def analyzer_node(state: PipelineState) -> dict:
         analysis_response["time_series"] = time_series_result
         analysis_response["data_quality_score"] = data_quality_score
         analysis_response["chart_paths"] = chart_paths
+
+        # Python's r, n and the 30-pair floor on the model's correlation
+        # entries — after the final parse, before the single save (Build I).
+        await asyncio.to_thread(
+            apply_correlation_floor, analysis_response, correlation_result, df
+        )
 
         # Sanitize returns a NEW object — reassignment is mandatory.
         analysis_response = sanitize_for_json(analysis_response)

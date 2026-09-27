@@ -9,16 +9,25 @@ test_profiler.py — not duplicated here.
 Integration tests requiring a live ANTHROPIC_API_KEY and Supabase are skipped.
 """
 
+import asyncio
+import copy
 import json
 import math
 import pathlib
+from typing import Callable
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from backend.agents import analyzer
+from backend.agents.profiler import load_system_prompt
 from backend.agents.analyzer import (
+    CORRELATION_MIN_PAIRS,
     _is_id_column,
+    analyzer_node,
+    apply_correlation_floor,
     build_analyzer_message,
     check_self_evaluation,
     classify_columns,
@@ -27,6 +36,7 @@ from backend.agents.analyzer import (
     compute_data_quality_score,
     compute_descriptive_stats,
     compute_value_counts,
+    count_complete_pairs,
     detect_time_series,
     sanitize_for_json,
 )
@@ -559,3 +569,443 @@ def test_analyzer_handles_stringified_headers_after_parquet_roundtrip(tmp_path) 
     assert numeric_columns == ["2021", "2022"]
     assert categorical_columns == []
     assert datetime_column is None
+
+
+# ---------------------------------------------------------------------------
+# Group 12 — the 30-pair correlation floor (Build I)
+# ---------------------------------------------------------------------------
+
+_CD = "Cannot Determine"
+
+
+def _sparse() -> pd.DataFrame:
+    """60 rows; x*y share 50 complete pairs, y*z 24, x*z 14 (x and z miss different rows)."""
+    return pd.read_csv(FIXTURES_DIR / "sparse_pairs.csv")
+
+
+def _correlation_for(df: pd.DataFrame) -> dict:
+    numeric_columns, _, _ = classify_columns(df)
+    return compute_correlation_matrix(df, numeric_columns)
+
+
+def _pairs_by_key(correlation_result: dict) -> dict:
+    return {frozenset((p["col1"], p["col2"])): p for p in correlation_result["strong_pairs"]}
+
+
+def _entry(col_a: object, col_b: object, r: float = 0.9, n: int = 60, confidence: str = "Low") -> dict:
+    return {
+        "column_a": col_a,
+        "column_b": col_b,
+        "r": r,
+        "n": n,
+        "confidence_level": confidence,
+        "mechanisms": ["m1", "m2"],
+        "confounders": ["c1", "c2"],
+        "what_would_establish_causality": "an experiment",
+        "causality_label": "This is correlation, not causation.",
+    }
+
+
+def _response(*entries: dict, parent: str = "Low") -> dict:
+    return {
+        "correlation": {
+            "strong_correlations": list(entries),
+            "confidence_level": parent,
+            "confidence_reasoning": "model reasoning",
+        }
+    }
+
+
+def _paired_frame(n_complete: int, n_rows: int = 40) -> pd.DataFrame:
+    """Two near-perfectly correlated columns sharing exactly n_complete complete pairs."""
+    a = np.arange(n_rows, dtype=float)
+    b = 2 * a + np.where(np.arange(n_rows) % 2 == 0, 0.5, -0.5)
+    b[n_complete:] = np.nan
+    return pd.DataFrame({"a": a, "b": b})
+
+
+def test_sparse_pairs_fixture_every_pair_is_strong_with_its_complete_pairs() -> None:
+    """All three pairs are strong, each n is the pair's complete rows — not the 60 rows,
+    and not either column's own count (x and z miss different rows)."""
+    df = _sparse()
+    assert len(df) == 60
+    pairs = _pairs_by_key(_correlation_for(df))
+    assert {k: p["n"] for k, p in pairs.items()} == {
+        frozenset(("x", "y")): 50,
+        frozenset(("y", "z")): 24,
+        frozenset(("x", "z")): 14,
+    }
+    for pair in pairs.values():
+        assert abs(pair["correlation_value"]) > 0.7
+
+
+def test_strong_pairs_n_on_iris_is_15() -> None:
+    pairs = _correlation_for(pd.read_csv(FIXTURES_DIR / "iris.csv"))["strong_pairs"]
+    assert len(pairs) == 3
+    assert all(pair["n"] == 15 for pair in pairs)
+
+
+def test_count_complete_pairs_matches_what_corr_uses_including_inf() -> None:
+    """An inf is excluded by df.corr() (np.isfinite mask) and must not be counted."""
+    df = _paired_frame(35)
+    df.loc[0, "a"] = np.inf
+    n = count_complete_pairs(df, "a", "b")
+    assert n == 34
+    finite = df[np.isfinite(df["a"]) & np.isfinite(df["b"])]
+    assert df.corr().loc["a", "b"] == pytest.approx(finite["a"].corr(finite["b"]))
+    assert len(df[["a", "b"]].dropna()) == 35  # what a plain dropna() would wrongly count
+
+
+@pytest.mark.parametrize("n_complete, expected", [(29, _CD), (30, "Low")])
+def test_floor_boundary_29_and_30(n_complete: int, expected: str) -> None:
+    df = _paired_frame(n_complete)
+    response = _response(_entry("a", "b", n=40, confidence="Low"))
+    apply_correlation_floor(response, _correlation_for(df), df)
+    entry = response["correlation"]["strong_correlations"][0]
+    assert entry["n"] == n_complete
+    assert entry["confidence_level"] == expected
+    assert ("floor_override" in entry) is (expected == _CD)
+
+
+def test_floor_never_raises_a_label() -> None:
+    """n >= 30 labels are untouched; an existing Cannot Determine gets no record."""
+    df = _sparse()
+    response = _response(
+        _entry("x", "y", confidence="Low"),
+        _entry("y", "z", confidence=_CD),
+    )
+    apply_correlation_floor(response, _correlation_for(df), df)
+    xy, yz = response["correlation"]["strong_correlations"]
+    assert xy["confidence_level"] == "Low" and "floor_override" not in xy
+    assert yz["confidence_level"] == _CD and "floor_override" not in yz
+
+
+def test_floor_high_at_n_50_stays_high() -> None:
+    df = _sparse()
+    response = _response(_entry("x", "y", confidence="High"))
+    apply_correlation_floor(response, _correlation_for(df), df)
+    assert response["correlation"]["strong_correlations"][0]["confidence_level"] == "High"
+
+
+def test_floor_lowers_with_exact_override_record() -> None:
+    df = _sparse()
+    response = _response(_entry("y", "z", confidence="Moderate"))
+    apply_correlation_floor(response, _correlation_for(df), df)
+    entry = response["correlation"]["strong_correlations"][0]
+    assert entry["confidence_level"] == _CD
+    assert entry["floor_override"] == {
+        "original_confidence_level": "Moderate",
+        "reason": (
+            "System check: Python counted 24 complete pairs for y × z, below the "
+            "30-pair reliability floor, so the confidence is Cannot Determine."
+        ),
+    }
+
+
+def test_floor_matches_either_order_and_overwrites_r_and_n() -> None:
+    df = _sparse()
+    correlation_result = _correlation_for(df)
+    python_r = _pairs_by_key(correlation_result)[frozenset(("x", "z"))]["correlation_value"]
+    response = _response(_entry("z", "x", r=0.74, n=15, confidence="Low"))
+    apply_correlation_floor(response, correlation_result, df)
+    entry = response["correlation"]["strong_correlations"][0]
+    assert entry["r"] == python_r
+    assert entry["n"] == 14
+    assert entry["confidence_level"] == _CD
+    assert response["correlation"]["unverified_correlations"] == []
+
+
+def test_floor_enforces_every_entry() -> None:
+    df = _sparse()
+    response = _response(
+        _entry("x", "y", confidence="Low"),
+        _entry("y", "z", confidence="Low"),
+        _entry("x", "z", confidence="High"),
+    )
+    apply_correlation_floor(response, _correlation_for(df), df)
+    labels = [e["confidence_level"] for e in response["correlation"]["strong_correlations"]]
+    assert labels == ["Low", _CD, _CD]
+
+
+@pytest.mark.parametrize("col_a, col_b", [("X", "y"), (" x", "y"), ("x ", "y"), ("y", "y")])
+def test_floor_matches_exact_names_only(col_a: str, col_b: str) -> None:
+    """No case or whitespace normalization; the same column twice is not a pair."""
+    df = _sparse()
+    response = _response(_entry(col_a, col_b))
+    apply_correlation_floor(response, _correlation_for(df), df)
+    assert response["correlation"]["strong_correlations"] == []
+    assert len(response["correlation"]["unverified_correlations"]) == 1
+
+
+def test_floor_non_strong_matrix_pair_is_matched_not_moved() -> None:
+    """A model entry for a matrix pair Python did not flag as strong is still verified:
+    Python's r and n replace the model's, and the floor applies."""
+    df = _sparse()
+    df["w"] = (np.arange(60) % 7).astype(float)
+    df.loc[25:, "w"] = np.nan  # w*x share 25 complete pairs
+    correlation_result = _correlation_for(df)
+    assert frozenset(("w", "x")) not in _pairs_by_key(correlation_result)
+    response = _response(_entry("x", "w", r=0.91, n=60, confidence="Moderate"))
+    apply_correlation_floor(response, correlation_result, df)
+    entry = response["correlation"]["strong_correlations"][0]
+    assert entry["r"] == correlation_result["matrix"]["x"]["w"]
+    assert abs(entry["r"]) < 0.7
+    assert entry["n"] == 25
+    assert entry["confidence_level"] == _CD
+    assert response["correlation"]["unverified_correlations"] == []
+
+
+def test_floor_moves_pair_absent_from_matrix_with_exact_reason() -> None:
+    df = _sparse()
+    model_entry = _entry("x", "batch", r=0.74, n=15)
+    response = _response(_entry("x", "y"), model_entry)
+    apply_correlation_floor(response, _correlation_for(df), df)
+    correlation = response["correlation"]
+    assert [(e["column_a"], e["column_b"]) for e in correlation["strong_correlations"]] == [("x", "y")]
+    assert correlation["unverified_correlations"] == [{
+        "column_a": "x",
+        "column_b": "batch",
+        "reason": (
+            "System check: x × batch is not a pair in the system's correlation matrix "
+            "(a column is non-numeric, excluded or absent), so its r and n could not "
+            "be verified. It is not reported as a correlation."
+        ),
+        "original_entry": _entry("x", "batch", r=0.74, n=15),
+    }]
+
+
+def test_floor_python_strong_pair_omitted_by_model_is_not_fabricated() -> None:
+    df = _sparse()
+    response = _response(_entry("x", "y"))
+    apply_correlation_floor(response, _correlation_for(df), df)
+    assert len(response["correlation"]["strong_correlations"]) == 1
+
+
+def test_floor_nan_r_pair_does_not_raise_and_is_cannot_determine() -> None:
+    """An undefined r (NaN, stored as None) cannot carry any confidence, even at n >= 30."""
+    df = _sparse()
+    df["const"] = 5.0
+    correlation_result = _correlation_for(df)
+    assert correlation_result["matrix"]["x"]["const"] is None
+    response = _response(_entry("x", "const", confidence="High"))
+    apply_correlation_floor(response, correlation_result, df)
+    entry = response["correlation"]["strong_correlations"][0]
+    assert entry["r"] is None
+    assert entry["n"] == 50
+    assert entry["confidence_level"] == _CD
+    assert entry["floor_override"] == {
+        "original_confidence_level": "High",
+        "reason": (
+            "System check: Python could not compute r for x × const (r is undefined on "
+            "their 50 complete pairs, e.g. a constant column), so the confidence is "
+            "Cannot Determine."
+        ),
+    }
+
+
+def test_floor_parent_lowered_when_every_strong_pair_is_below_30() -> None:
+    df = pd.read_csv(FIXTURES_DIR / "iris.csv")
+    response = _response(_entry("sepal_length", "petal_length"), parent="Low")
+    apply_correlation_floor(response, _correlation_for(df), df)
+    correlation = response["correlation"]
+    assert correlation["confidence_level"] == _CD
+    assert correlation["floor_override"] == {
+        "original_confidence_level": "Low",
+        "reason": (
+            "System check: every strong correlation rests on fewer than 30 complete "
+            "pairs (lowest n = 15), so the overall correlation confidence is Cannot Determine."
+        ),
+    }
+    assert correlation["confidence_reasoning"] == "model reasoning"
+
+
+def test_floor_parent_untouched_when_any_strong_pair_reaches_30() -> None:
+    df = _sparse()  # 50, 24, 14
+    response = _response(_entry("y", "z"), parent="Moderate")
+    apply_correlation_floor(response, _correlation_for(df), df)
+    assert response["correlation"]["confidence_level"] == "Moderate"
+    assert "floor_override" not in response["correlation"]
+
+
+def test_floor_parent_untouched_without_strong_pairs_or_when_already_cd() -> None:
+    df = _paired_frame(10)
+    df["b"] = np.where(np.arange(40) % 2 == 0, 1.0, -1.0)  # no strong pair
+    df.loc[10:, "b"] = np.nan
+    no_strong = _correlation_for(df)
+    assert no_strong["strong_pairs"] == []
+    response = _response(parent="Low")
+    apply_correlation_floor(response, no_strong, df)
+    assert response["correlation"]["confidence_level"] == "Low"
+
+    iris = pd.read_csv(FIXTURES_DIR / "iris.csv")
+    response = _response(parent=_CD)
+    apply_correlation_floor(response, _correlation_for(iris), iris)
+    assert "floor_override" not in response["correlation"]
+
+
+def test_floor_without_python_matrix_moves_every_entry() -> None:
+    df = _sparse()
+    response = _response(_entry("x", "y"))
+    apply_correlation_floor(response, None, df)
+    assert response["correlation"]["strong_correlations"] == []
+    assert len(response["correlation"]["unverified_correlations"]) == 1
+
+
+@pytest.mark.parametrize("analysis_response", [
+    [],
+    {},
+    {"correlation": None},
+    {"correlation": "not an object"},
+    {"correlation": {"strong_correlations": "not a list", "confidence_level": "Low"}},
+    {"correlation": {"strong_correlations": ["not an object", 7, None]}},
+])
+def test_floor_never_raises_on_malformed_input(analysis_response: object) -> None:
+    df = _sparse()
+    before = copy.deepcopy(analysis_response)
+    apply_correlation_floor(analysis_response, _correlation_for(df), df)
+    correlation = before.get("correlation") if isinstance(before, dict) else None
+    entries = correlation.get("strong_correlations") if isinstance(correlation, dict) else None
+    if isinstance(entries, list) and not all(isinstance(e, dict) for e in entries):
+        assert analysis_response["correlation"]["strong_correlations"] == entries
+    elif not isinstance(entries, list) or not entries:
+        assert analysis_response == before
+
+
+def test_floor_malformed_python_strong_pairs_leave_parent_unchanged() -> None:
+    df = _sparse()
+    correlation_result = _correlation_for(df)
+    correlation_result["strong_pairs"] = ["garbage", {"col1": "y", "col2": "z", "n": "24"}]
+    response = _response(parent="Low")
+    apply_correlation_floor(response, correlation_result, df)
+    assert response["correlation"]["confidence_level"] == "Low"
+
+
+def test_build_analyzer_message_sends_n_for_every_strong_pair() -> None:
+    df = _sparse()
+    sent = json.loads(_minimal_analyzer_message(correlation_result=_correlation_for(df)))
+    assert sorted(p["n"] for p in sent["correlation"]["strong_pairs"]) == [14, 24, 50]
+
+
+def test_analyzer_prompt_states_the_floor_as_a_confidence_ceiling() -> None:
+    prompt = load_system_prompt("analyzer")
+    assert "copy both verbatim and never infer n from row counts" in prompt
+    assert "The 30-pair rule is a ceiling on confidence, not a condition for computing r" in prompt
+    assert "Any confidence other than Cannot Determine (High, Moderate or Low) on a correlation with n below 30 complete pairs" in prompt
+    assert "floors, not ceilings" not in prompt
+    assert "the correlation is computed but tagged as Cannot Determine" not in prompt
+    assert "- High confidence assigned to a correlation with n below 30 pairs." not in prompt
+
+
+def _stream_returning(payload: dict) -> Callable[..., MagicMock]:
+    def stream(**kwargs: object) -> MagicMock:
+        message = MagicMock()
+        message.stop_reason = "end_turn"
+        message.content = [MagicMock(text=json.dumps(payload))]
+        manager = MagicMock()
+        manager.__enter__.return_value.get_final_message.return_value = message
+        return manager
+    return stream
+
+
+def test_analyzer_node_saves_the_floored_report_once(tmp_path: pathlib.Path) -> None:
+    """Node level: n comes from the cleaned parquet (not the Profiler's 60 rows), the
+    floor runs before the single analysis_report save, and the returned state is the
+    saved object."""
+    parquet_path = tmp_path / "cleaned.parquet"
+    _sparse().to_parquet(parquet_path, index=False)
+    cleaned = pd.read_parquet(parquet_path)
+
+    model_payload = {
+        "correlation": {
+            "strong_correlations": [
+                _entry("y", "x", r=0.99, n=60, confidence="High"),
+                _entry("z", "y", r=0.97, n=60, confidence="Low"),
+                _entry("x", "z", r=0.95, n=60, confidence="Low"),
+                _entry("x", "batch", r=0.74, n=60, confidence="Low"),
+            ],
+            "confidence_level": "Low",
+            "confidence_reasoning": "n=60 clears the 30-pair floor",
+        },
+        "most_important_finding": "x and y move together; one anomaly in batch A",
+        "most_surprising_finding": "z tracks y closely",
+        "open_questions": [],
+    }
+    supabase = MagicMock()
+    at_save_time: list = []  # deep copies: what was written, not the object afterwards
+
+    def update(payload: dict) -> MagicMock:
+        at_save_time.append(copy.deepcopy(payload))
+        return MagicMock()
+
+    supabase.table.return_value.update.side_effect = update
+    state = {
+        "analysis_id": "build-i-node",
+        "profile_report": {"row_count": 60},
+        "cleaning_report": {"decisions": [], "summary": ""},
+        "profiler_top_3_concerns": [],
+        "profiler_top_3_patterns": [],
+    }
+    with (
+        patch("backend.agents.analyzer.get_supabase_client", return_value=supabase),
+        patch("backend.agents.analyzer.load_cleaned_dataframe", new=AsyncMock(return_value=cleaned)),
+        patch("backend.agents.analyzer.cleanup_temp_file", new=AsyncMock()),
+        patch("backend.agents.analyzer.generate_all_charts", return_value=["chart.png"]),
+        patch("backend.agents.analyzer.create_tracer", return_value=MagicMock()),
+        patch.object(analyzer.client.messages, "stream", side_effect=_stream_returning(model_payload)) as stream,
+    ):
+        result = asyncio.run(analyzer_node(state))
+
+    assert stream.call_count == 1
+    sent = json.loads(stream.call_args.kwargs["messages"][0]["content"])
+    assert sorted(p["n"] for p in sent["correlation"]["strong_pairs"]) == [14, 24, 50]
+
+    save_calls = [
+        c.args[0] for c in supabase.table.return_value.update.call_args_list
+        if "analysis_report" in c.args[0]
+    ]
+    assert len(save_calls) == 1
+    assert result["analysis_report"] is save_calls[0]["analysis_report"]
+    saved = next(p for p in at_save_time if "analysis_report" in p)["analysis_report"]
+    assert result["analysis_report"] == saved
+
+    entries = saved["correlation"]["strong_correlations"]
+    by_pair = {frozenset((e["column_a"], e["column_b"])): e for e in entries}
+    assert {k: (e["n"], e["confidence_level"]) for k, e in by_pair.items()} == {
+        frozenset(("x", "y")): (50, "High"),
+        frozenset(("y", "z")): (24, _CD),
+        frozenset(("x", "z")): (14, _CD),
+    }
+    python_pairs = _pairs_by_key(saved["correlation_matrix"])
+    for key, entry in by_pair.items():
+        assert entry["r"] == python_pairs[key]["correlation_value"]
+    assert "floor_override" not in by_pair[frozenset(("x", "y"))]
+    assert [u["column_b"] for u in saved["correlation"]["unverified_correlations"]] == ["batch"]
+    assert saved["correlation"]["confidence_level"] == "Low"  # the n = 50 pair clears the floor
+    assert CORRELATION_MIN_PAIRS == 30
+
+
+def test_floor_unhashable_column_names_are_unverified_not_raised() -> None:
+    df = _sparse()
+    response = _response({"column_a": ["x"], "column_b": {"y": 1}, "confidence_level": "Low"})
+    apply_correlation_floor(response, _correlation_for(df), df)
+    assert response["correlation"]["strong_correlations"] == []
+    assert response["correlation"]["unverified_correlations"][0]["column_a"] == ["x"]
+
+
+def test_count_complete_pairs_excludes_timedelta_nat() -> None:
+    """to_numpy(dtype=float) turns NaT into a finite sentinel; it is still a missing value."""
+    df = pd.DataFrame({
+        "a": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        "t": pd.to_timedelta([1, 2, None, 4, 5, 6], unit="D"),
+    })
+    assert count_complete_pairs(df, "a", "t") == 5
+
+
+def test_floor_parent_rule_applies_even_when_entries_are_malformed() -> None:
+    """The parent rule reads only Python's strong pairs (iris: all n = 15)."""
+    df = pd.read_csv(FIXTURES_DIR / "iris.csv")
+    response = {"correlation": {"strong_correlations": "not a list", "confidence_level": "Low"}}
+    apply_correlation_floor(response, _correlation_for(df), df)
+    assert response["correlation"]["strong_correlations"] == "not a list"
+    assert response["correlation"]["confidence_level"] == _CD
+    assert response["correlation"]["floor_override"]["original_confidence_level"] == "Low"
