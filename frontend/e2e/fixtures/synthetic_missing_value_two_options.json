@@ -1,0 +1,22 @@
+{
+  "type": "missing_value_decision_required",
+  "column_name": "lab_result_with_a_deliberately_long_column_name_for_wrapping",
+  "missing_pct": 100.0,
+  "missing_count": 200,
+  "total_rows": 200,
+  "what_this_column_represents": "a lab measurement column with no recorded values at all",
+  "provenance_interpretation": "Not assessed. The Cleaner did not ask about this column, so the system generated this question.",
+  "domain_context": "More than 30% of this column is missing, which is the point at which the decision must come from you rather than the pipeline.",
+  "options": [
+    {
+      "id": "exclude_column",
+      "label": "Exclude `lab_result_with_a_deliberately_long_column_name_for_wrapping` from analysis entirely",
+      "consequence": "removes the column but keeps all 200 rows"
+    },
+    {
+      "id": "preserve_missingness",
+      "label": "Keep `lab_result_with_a_deliberately_long_column_name_for_wrapping` as it is: its 200 missing values stay missing",
+      "consequence": "nothing is imputed and no rows are removed. Statistics on `lab_result_with_a_deliberately_long_column_name_for_wrapping` will use only its 0 recorded values, and the missingness is recorded in the cleaning report, where the Analyzer and Explainer will see it"
+    }
+  ]
+}

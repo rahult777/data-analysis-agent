@@ -1,0 +1,23 @@
+{
+  "type": "outlier_decision_required",
+  "domain_context": "financial",
+  "column_name": "revenue",
+  "outlier_value": 750000.0,
+  "outlier_count": 4,
+  "sd_distance": 6.79,
+  "column_mean": 42790.66941066989,
+  "column_std": 104094.20063998573,
+  "financial_context_note": "Not assessed. The Cleaner routed `revenue` as financial in its outlier review but did not ask about it, so the system generated this question and made no column-specific interpretation of these values. In financial data, extreme values are often legitimate large transactions (corporate treasury movements, end-of-quarter true-ups, wholesale orders), fraud signals, or data integration errors at merge points. 4 value(s) lie outside the IQR bounds (-27082.8 to 78877.4), from 500000 to 750000; the most extreme, 750000, is 6.79 SD from the column mean of 42790.7.",
+  "options": [
+    {
+      "id": "treat_as_valid",
+      "label": "Treat the 4 outlier value(s) as valid data (legitimate large transaction or expected business event)",
+      "consequence": "the values stay in `revenue` and in every statistic; their rows are marked in `revenue_outlier_flag`"
+    },
+    {
+      "id": "flag_as_suspected_error",
+      "label": "Flag the 4 outlier value(s) as suspected data entry error or fraud; exclude from aggregate statistics pending investigation",
+      "consequence": "the values are set to missing in `revenue`, so they drop out of every statistic; their rows are kept and marked in `revenue_outlier_flag`"
+    }
+  ]
+}

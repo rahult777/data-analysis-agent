@@ -1,0 +1,20 @@
+{
+  "type": "domain_confirmation_required",
+  "domain_hypothesis": "Retail and E-commerce",
+  "domain_confidence_score": 91,
+  "supporting_signals": [
+    "order_id, sku and revenue columns"
+  ],
+  "options": [
+    {
+      "id": "confirm",
+      "label": "Yes, this is Retail and E-commerce. Proceed.",
+      "action": "proceed_with_hypothesis"
+    },
+    {
+      "id": "correct",
+      "label": "No, the correct domain is something else.",
+      "action": "request_user_specified_domain"
+    }
+  ]
+}

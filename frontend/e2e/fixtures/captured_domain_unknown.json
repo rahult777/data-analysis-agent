@@ -1,0 +1,27 @@
+{
+  "type": "domain_confirmation_required",
+  "domain_hypothesis": "unknown",
+  "domain_confidence_score": 22,
+  "supporting_signals": [
+    "All substantive column names are anonymized (x1, x2, x3, grp, cat, period, ref), providing no domain vocabulary to match against known domains",
+    "ref column follows a sequential alphanumeric pattern (R001-R040) consistent with a generic record identifier, not a domain-specific ID format",
+    "x1 ranges 36-64 with mean ~49 — plausible in many domains (age, temperature, score, measurement) with no disambiguating signal",
+    "x2 is bounded 0.025-0.968, consistent with a proportion or probability, but this bounded-float pattern appears across research, manufacturing, finance, and healthcare without further context",
+    "x3 takes only 5 integer values (1-5), consistent with a Likert scale, severity rating, or ordinal classification — present across survey, clinical, HR, and manufacturing domains",
+    "grp with three single-letter levels (A, B, C) and cat with three single-letter levels (P, Q, S) are generic categorical encodings used in experimental, research, and synthetic datasets across all domains",
+    "period with 8 integer levels (1-8) suggests a longitudinal or repeated-measures structure, but the time unit (day, week, quarter, cycle) is unspecifiable from the data alone",
+    "No timestamps, currency values, geographic identifiers, ICD codes, SKUs, or other domain-anchoring value patterns are present"
+  ],
+  "options": [
+    {
+      "id": "confirm",
+      "label": "Yes, this is unknown. Proceed.",
+      "action": "proceed_with_hypothesis"
+    },
+    {
+      "id": "correct",
+      "label": "No, the correct domain is something else.",
+      "action": "request_user_specified_domain"
+    }
+  ]
+}

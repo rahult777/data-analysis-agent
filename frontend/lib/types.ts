@@ -12,12 +12,18 @@ export type AnalysisStatus =
 
 export type QuestionStatus = "pending" | "answering" | "complete" | "error";
 
+export type PauseStatus = "domain_pause" | "missing_value_pause" | "outlier_pause";
+
 export interface StatusResponse {
   analysis_id: string;
   status: AnalysisStatus;
   current_agent: string | null;
   progress_pct: number | null;
   error_message: string | null;
+  // The active pause question, set only in a pause status. Raw agent JSON
+  // (decisions.md 2026-09-22) — never read it directly; narrow it with
+  // parsePause (lib/pause.ts).
+  pause_data: Record<string, unknown> | null;
 }
 
 export interface UploadResponse {

@@ -87,11 +87,13 @@ When status is anything other than `complete` or `error`, the page shows the liv
 - Polling behavior: frontend polls `/api/analysis/{id}/status` every 3 seconds. The `current_agent` field in the response drives which stage is highlighted.
 
 **Pause State Display:**
-When the pipeline enters a pause state (domain confirmation or missing value decisions), the AnalysisProgress component transitions to a question display:
-- Clear visual distinction from the normal progress view
-- Shows the specific question with context
-- Shows the available options as prominent buttons
-- User selects an option and the pipeline resumes
+When the pipeline enters a pause state (domain confirmation, a missing-value decision or an outlier decision), AnalysisProgress shows the question inline below the pipeline (`PauseQuestion.tsx`, Build L):
+- Clear visual distinction from the normal progress view (a primary-bordered card), with the question's context: the domain hypothesis, its confidence score and signals; or the column, its counts "in the uploaded file", and the Cleaner's reasoning ("Why this needs your decision"); or the outlier count, the most extreme value and the domain note
+- **Select, then confirm.** The options are native radio buttons in a fieldset (no new UI dependency), shown as full-width option cards (min 44px). Choosing one shows what it does (its consequence, or an imputation's method and assumption); nothing is sent until the user presses "Continue with this choice". A domain "correct" answer opens a text field (trimmed, required, max 200 characters)
+- The domain question's wording: "Confirm what this data is" with "Yes, it's {hypothesis}" / "No, it's something else"; when the hypothesis is "unknown": "The Profiler couldn't tell what kind of data this is." with "Continue without a specific domain" / "Tell it the domain". "below the 80 needed to continue without asking" appears only when the score is below 80
+- After a successful answer the status line says "Answer recorded — the Cleaner is re-running and may ask about another column (this can take a minute or two)." The next question, if any, replaces the card
+- **Visitors** (no `session_id_{analysis_id}` in this browser, including the real owner on another device) see the question read-only: "Only the browser that started this analysis can answer. If that's you, open this link in that browser — the analysis is waiting for this answer." A 403 from /resume switches the owner's view to the same read-only state
+- Every model-written string is rendered as plain text; the only markup derived from it is `<code>` for backtick spans. A question the UI cannot render or answer (malformed or missing `pause_data`) shows "This question can't be displayed" and polling continues
 - The interaction is inline — no modal, no page navigation
 
 #### State 2 — Pipeline Complete
@@ -136,12 +138,14 @@ When status is `complete`, the full results are displayed.
 - Polls `/api/analysis/{id}/status` every 3 seconds using setInterval
 - Clears the interval when status is `complete` or `error`
 - Displays the 4-stage pipeline with animated active stage
-- Handles pause states with inline question display
+- Handles pause states with inline question display (`PauseQuestion`), answering through POST /resume (`resumeAnalysis`, which alone has a 15-second request timeout)
 - Handles error states with the ErrorDisplay pattern (see Error Display section)
+- A visible `aria-live` status line says what is happening; focus moves to the question heading only when a NEW question appears (never on a poll) and to the status line after an answer is sent
+- Stall notice: after 10 minutes in the same non-pause status it says the step is taking longer than usual (the server may have restarted, and this analysis can't continue) with a "Start a new analysis" link; the progress view stays visible and the notice clears as soon as the status changes. Client-side only — the backend has no heartbeat and a reload resets the timer
 
-**Props:** analysisId (string), sessionId (string), onComplete (callback)
+**Props:** analysisId (string), sessionId (string | null — null for a read-only visitor), onComplete (callback)
 
-**State:** status, currentAgent, progressPct, errorMessage, pauseData
+**State:** status, currentAgent, progressPct, errorMessage, pauseData, notice, stalled, submitting, submitError
 
 ---
 
@@ -301,6 +305,10 @@ The frontend polls `/api/analysis/{id}/status` every 3 seconds while the pipelin
 - If status changed to `error`: clear interval, render error display
 - If status is a pause state: render the pause question inline
 
+**Out-of-order responses (Build L).** Every status source — the first fetch, the interval, the resume response and each refetch after a failed answer — goes through one `applyStatus(data, seq)` in AnalysisProgress. Each request is numbered when it is sent, and a response older than the last one applied is dropped, so a slow earlier poll can never overwrite a newer status. The resume response keeps its send number (so polls sent after the answer still win) and is not applied at all when a read sent after the answer already shows the next question or a later stage. A question's key is its status plus `column_name`; once answered (a 200, or a refetch after a failure that shows the pause moved on) that key is never shown again. This is safe because the Cleaner never asks the same (pause type, column) twice (F3's repeat guard) and there is at most one domain pause.
+
+**After a failed answer:** the status is refetched. If the pause moved on: "This question was already answered or has changed." If it is the same pause: friendly retry text — for a 400/409, a server error, or a network error/timeout, each worded for its cause (an API detail is never shown). "Sending…" belongs to the question being sent, not to whichever question a poll swaps in. A 403 switches to the read-only view.
+
 ---
 
 ## Technology Stack
@@ -316,3 +324,15 @@ The frontend polls `/api/analysis/{id}/status` every 3 seconds while the pipelin
 **TypeScript interfaces** in `frontend/lib/types.ts` must match the pydantic schemas in `backend/models/schemas.py` exactly. Any schema change in the backend requires a corresponding update in the frontend types.
 
 **API functions** in `frontend/lib/api.ts` wrap every API call. Components never call axios directly — they always go through the api.ts functions. This centralizes error handling and makes the session_id header automatic.
+
+---
+
+## End-to-End Tests (Playwright)
+
+The pause-state UI is covered by committed, route-mocked Playwright tests (`frontend/e2e/`, Build L). They need no backend and cost nothing: `playwright.config.ts` starts `next dev` on port 3100 with `NEXT_PUBLIC_API_URL` set to an unreachable address (a process env value takes precedence over `frontend/.env.local`), and `e2e/mockApi.ts` answers every API call with `page.route`; any call it does not handle fails the test. Every test runs at 320px and at 1280px.
+
+- One-time setup (downloads Chromium): `cd frontend && npx playwright install chromium` (`npm install` of `@playwright/test` downloads no browser).
+- Run: `npm run test:e2e`. It is separate from `npm run build`, `npm run lint` and pytest, none of which need a browser. Run it and `npm run build` one after the other — both use `.next`.
+- Mock data: `e2e/fixtures/captured_*.json` are real stored pause questions (the `pause_data` payloads only, from the F2 and F3/F3b live validations); `synthetic_*.json` are hand-written variants (a medical outlier, a 2-option missing-value pause, null statistics, malformed payloads).
+- Screenshots for a build report: set `E2E_SCREENSHOT_DIR` (e.g. to the gitignored `.playwright-mcp/<build>/`); test output (`test-results/`, `playwright-report/`) is gitignored.
+- `npm run lint` covers `app`, `components`, `lib` and `e2e`.

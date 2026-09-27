@@ -1,0 +1,23 @@
+{
+  "type": "outlier_decision_required",
+  "domain_context": "medical",
+  "column_name": "creatinine",
+  "outlier_value": 12.4,
+  "outlier_count": 3,
+  "sd_distance": 5.12,
+  "column_mean": 1.1,
+  "column_std": 2.21,
+  "clinical_significance_note": "in medical data, extreme values are often the most clinically significant data points in the dataset rather than measurement errors. A creatinine of 12.4 mg/dL likely indicates renal failure.",
+  "options": [
+    {
+      "id": "include_with_annotation",
+      "label": "Include the 3 outlier value(s) in the analysis as potentially clinically significant; annotate as statistical outliers",
+      "consequence": "the values stay in `creatinine` and in every statistic; their rows are marked in `creatinine_outlier_flag`"
+    },
+    {
+      "id": "exclude_pending_clinical_review",
+      "label": "Exclude the 3 outlier value(s) pending clinical review",
+      "consequence": "the values are set to missing in `creatinine`, so they drop out of every statistic; their rows are kept and marked in `creatinine_outlier_flag`"
+    }
+  ]
+}

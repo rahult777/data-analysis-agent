@@ -1,0 +1,34 @@
+{
+  "type": "missing_value_decision_required",
+  "column_name": "notes",
+  "missing_pct": 45.5,
+  "missing_count": 91,
+  "total_rows": 200,
+  "what_this_column_represents": "`notes` (object); recorded values include: Average, Good, Standard, Follow up, VIP.",
+  "provenance_interpretation": "Not assessed. The Cleaner did not ask about this column, so the system generated this question and made no provenance-specific interpretation of the missing values. The Profiler's provenance hypothesis for the dataset is 'manual entry'.",
+  "domain_context": "The Profiler's domain hypothesis is 'Retail and E-commerce'. More than 30% of this column is missing, which is the point at which the decision must come from you rather than the pipeline.",
+  "options": [
+    {
+      "id": "impute",
+      "label": "Impute the 91 missing values with mode (Good)",
+      "method": "mode (Good)",
+      "method_id": "mode",
+      "assumption": "the missing values would have resembled the recorded ones; this has not been checked"
+    },
+    {
+      "id": "exclude_column",
+      "label": "Exclude `notes` from analysis entirely",
+      "consequence": "removes the column but keeps all 200 rows"
+    },
+    {
+      "id": "exclude_rows",
+      "label": "Exclude the 91 rows where `notes` is missing",
+      "consequence": "keeps the column but removes 91 of 200 rows (45.5%)"
+    },
+    {
+      "id": "preserve_missingness",
+      "label": "Keep `notes` as it is: its 91 missing values stay missing",
+      "consequence": "nothing is imputed and no rows are removed. Statistics on `notes` will use only its 109 recorded values, and the missingness is recorded in the cleaning report, where the Analyzer and Explainer will see it"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "type": "missing_value_decision_required",
+  "column_name": "revenue",
+  "what_this_column_represents": "revenue",
+  "options": "not a list"
+}

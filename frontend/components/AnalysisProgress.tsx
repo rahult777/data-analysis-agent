@@ -1,31 +1,42 @@
-// TODO: full pause UI deferred to follow-up build. Will be paired with backend
-//   pause_data persistence (pause_data jsonb column on analyses table).
-//   Also deferred: no stale-state timeout in pause states — polling continues
-//   indefinitely. No max-retry on persistent polling failures.
-//   See assessment round 1 findings.
+// Live progress for one analysis: polls GET /status every 3 s, shows the
+// four-stage pipeline, and — when the pipeline pauses — the question inline
+// (PauseQuestion). Only the browser that uploaded the file (sessionId) can
+// answer; everyone else sees the question read-only.
+//
+// Every status source — the first fetch, the interval, the resume response
+// and each refetch after a failed answer — goes through applyStatus with a
+// sequence number taken when the request is sent, so a slow earlier response
+// can never overwrite a newer one or re-show a question already answered.
+//
+// The stall notice (10 minutes in the same non-pause status) is client-side
+// only: the backend exposes no heartbeat, and a reload resets the timer.
 
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
-import { AlertCircle, AlertTriangle, Check, Loader2 } from "lucide-react";
+import { AlertTriangle, Check, Loader2 } from "lucide-react";
 
+import { PauseQuestion } from "@/components/PauseQuestion";
 import { Button, buttonVariants } from "@/components/ui/button";
-import { ApiError, getAnalysisStatus } from "@/lib/api";
+import { ApiError, getAnalysisStatus, resumeAnalysis } from "@/lib/api";
+import {
+  buildResumeResponse,
+  isPauseStatus,
+  parsePause,
+  pauseKey,
+  type AnswerableView,
+} from "@/lib/pause";
 import { cn } from "@/lib/utils";
-import type { AnalysisStatus } from "@/lib/types";
+import type { AnalysisStatus, StatusResponse } from "@/lib/types";
 
 const POLL_INTERVAL_MS = 3000;
+const STALL_MS = 10 * 60 * 1000;
 
 const STAGE_ORDER = ["profiler", "cleaner", "analyzer", "explainer"] as const;
 type Stage = (typeof STAGE_ORDER)[number];
-
-const PAUSE_STATUSES: ReadonlyArray<AnalysisStatus> = [
-  "domain_pause",
-  "missing_value_pause",
-  "outlier_pause",
-];
 
 const STAGE_LABELS: Record<Stage, string> = {
   profiler: "Profiler",
@@ -42,24 +53,44 @@ const STAGE_DESCRIPTIONS: Record<Stage, string> = {
   explainer: "Translating findings into three layers.",
 };
 
-const PAUSE_SUBTEXTS: Record<string, string> = {
-  domain_pause: "Waiting on domain confirmation",
-  missing_value_pause: "Waiting on missing-value decisions",
-  outlier_pause: "Waiting on outlier review",
-};
+const MOVED_ON_TEXT = "This question was already answered or has changed.";
+const REJECTED_TEXT =
+  "Your answer couldn't be accepted. Check your choice and try again.";
+const SERVER_TEXT =
+  "Something went wrong on the server, so your answer wasn't recorded. Please try again.";
+const NETWORK_TEXT =
+  "Couldn't reach the server, so your answer may not have been sent. Please try again.";
+const STALL_TEXT =
+  "This step is taking longer than usual. If nothing changes, the server may have restarted and this analysis can't continue — you can start a new one.";
+
+function recordedText(view: AnswerableView): string {
+  return view.kind === "domain"
+    ? "Answer recorded — the Profiler is re-running with your answer, and the Cleaner may ask about a column next (this can take a minute or two)."
+    : "Answer recorded — the Cleaner is re-running and may ask about another column (this can take a minute or two).";
+}
+
+// A message in the status line that outlives the poll that caused it.
+// "recorded" clears once a pause appears or another agent takes over;
+// "moved-on" clears once the status or the question changes again.
+type Notice =
+  | { kind: "recorded"; text: string; anchorAgent: string | null }
+  | { kind: "moved-on"; text: string; anchorStatus: AnalysisStatus; anchorKey: string | null };
+
+type FetchOutcome =
+  | { outcome: "applied"; data: StatusResponse }
+  | { outcome: "dropped" }
+  | { outcome: "failed" }
+  | { outcome: "not-found" }
+  | { outcome: "inactive" };
 
 type StageState = "waiting" | "active-running" | "active-paused" | "complete";
 
 interface AnalysisProgressProps {
   analysisId: string;
-  // True when this browser holds the uploader's session_id. Read-only visitors
-  // see the same live progress, but error-card copy and actions are adjusted.
-  isOwner: boolean;
+  // The uploader's session_id from this browser's localStorage, or null for
+  // a read-only visitor (including the real owner on another device).
+  sessionId: string | null;
   onComplete?: () => void;
-}
-
-function isPauseStatus(status: AnalysisStatus): boolean {
-  return PAUSE_STATUSES.includes(status);
 }
 
 function getStageState(
@@ -79,12 +110,38 @@ function getStageState(
   return stageIdx < activeIdx ? "complete" : "waiting";
 }
 
+function keyOf(data: StatusResponse): string | null {
+  return isPauseStatus(data.status) ? pauseKey(data.status, data.pause_data) : null;
+}
+
+function isTerminal(status: AnalysisStatus | null): boolean {
+  return status === "complete" || status === "error";
+}
+
+function statusSentence(
+  status: AnalysisStatus,
+  currentAgent: string | null,
+  canAnswer: boolean,
+  questionRenderable: boolean,
+): string {
+  if (status === "complete") return "The analysis is complete.";
+  const agent = currentAgent && currentAgent in STAGE_LABELS ? STAGE_LABELS[currentAgent as Stage] : "pipeline";
+  if (isPauseStatus(status)) {
+    if (!questionRenderable) return `Paused: the ${agent} is waiting, but its question could not be loaded.`;
+    return canAnswer
+      ? `Paused: the ${agent} needs your answer below.`
+      : `Paused: the ${agent} is waiting for an answer from the browser that started this analysis.`;
+  }
+  return `The ${agent} is working.`;
+}
+
 export function AnalysisProgress({
   analysisId,
-  isOwner,
+  sessionId,
   onComplete,
 }: AnalysisProgressProps) {
   const router = useRouter();
+  const isOwner = sessionId !== null;
 
   // Hold the latest onComplete in a ref so the polling effect never
   // re-subscribes when the parent passes a new callback identity.
@@ -97,72 +154,219 @@ export function AnalysisProgress({
   const [currentAgent, setCurrentAgent] = useState<string | null>(null);
   const [progressPct, setProgressPct] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [pauseData, setPauseData] = useState<Record<string, unknown> | null>(null);
   const [pollingError, setPollingError] = useState<boolean>(false);
   const [notFound, setNotFound] = useState<boolean>(false);
+  const [stalled, setStalled] = useState<boolean>(false);
+  const [notice, setNotice] = useState<Notice | null>(null);
+  // The key of the question whose answer is being sent (one question's state,
+  // not whichever question happens to be shown).
+  const [submittingKey, setSubmittingKey] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  // Set when /resume rejects this browser's session (403): the question
+  // stays visible, read-only.
+  const [sessionRejected, setSessionRejected] = useState<boolean>(false);
 
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const activeRef = useRef<boolean>(true);
+  const issuedSeqRef = useRef<number>(0);
+  const appliedSeqRef = useRef<number>(0);
+  const answeredKeysRef = useRef<Set<string>>(new Set());
+  const statusRef = useRef<AnalysisStatus | null>(null);
+  const statusSinceRef = useRef<number>(Date.now());
+  const shownKeyRef = useRef<string | null>(null);
+  const completedRef = useRef<boolean>(false);
+  const submittingKeyRef = useRef<string | null>(null);
+  const statusLineRef = useRef<HTMLParagraphElement>(null);
 
-  useEffect(() => {
-    let cancelled = false;
+  const canAnswer = isOwner && !sessionRejected;
 
-    // "not-found" is terminal: a 404 means the link matches no analysis, so
-    // polling stops instead of retrying forever.
-    async function fetchStatus(): Promise<AnalysisStatus | "not-found" | null> {
-      try {
-        const data = await getAnalysisStatus(analysisId);
-        if (cancelled) return null;
-        setStatus(data.status);
-        setCurrentAgent(data.current_agent);
-        setProgressPct(data.progress_pct);
-        setErrorMessage(data.error_message);
+  const stopPolling = useCallback(() => {
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+  }, []);
+
+  // The only place status state is set. Drops a response older than the
+  // last one applied, and any response showing a question already answered.
+  const applyStatus = useCallback(
+    (data: StatusResponse, seq: number): StatusResponse | null => {
+      if (seq < appliedSeqRef.current) return null;
+      const key = keyOf(data);
+      if (key !== null && answeredKeysRef.current.has(key)) {
+        // A lagging read of an answered question: the server did answer.
         setPollingError(false);
-        return data.status;
-      } catch (err) {
-        if (cancelled) return null;
-        if (err instanceof ApiError && err.status === 404) {
-          setNotFound(true);
-          return "not-found";
-        }
-        setPollingError(true);
         return null;
       }
-    }
+      appliedSeqRef.current = seq;
 
-    async function init() {
-      const initialStatus = await fetchStatus();
-      if (cancelled) return;
-      if (initialStatus === "error" || initialStatus === "not-found") return;
-      if (initialStatus === "complete") {
-        onCompleteRef.current?.();
-        return;
+      if (data.status !== statusRef.current) {
+        statusRef.current = data.status;
+        statusSinceRef.current = Date.now();
+        setStalled(false);
       }
-      intervalRef.current = setInterval(async () => {
-        const next = await fetchStatus();
-        if (next === "complete") {
-          if (intervalRef.current) {
-            clearInterval(intervalRef.current);
-            intervalRef.current = null;
-          }
-          onCompleteRef.current?.();
-        } else if (next === "error" || next === "not-found") {
-          if (intervalRef.current) {
-            clearInterval(intervalRef.current);
-            intervalRef.current = null;
-          }
+      if (key !== shownKeyRef.current) {
+        shownKeyRef.current = key;
+        setSubmitError(null);
+      }
+      setNotice((previous) => {
+        if (previous === null) return null;
+        if (previous.kind === "recorded") {
+          return key !== null || isTerminal(data.status) || data.current_agent !== previous.anchorAgent
+            ? null
+            : previous;
         }
+        return data.status !== previous.anchorStatus || key !== previous.anchorKey ? null : previous;
+      });
+      setStatus(data.status);
+      setCurrentAgent(data.current_agent);
+      setProgressPct(data.progress_pct);
+      setErrorMessage(data.error_message);
+      setPauseData(key !== null ? data.pause_data : null);
+      setPollingError(false);
+
+      if (isTerminal(data.status)) stopPolling();
+      if (data.status === "complete" && !completedRef.current) {
+        completedRef.current = true;
+        onCompleteRef.current?.();
+      }
+      return data;
+    },
+    [stopPolling],
+  );
+
+  // One status fetch, numbered when it is sent. "dropped" means the server
+  // answered but a newer response had already been applied.
+  const fetchStatus = useCallback(async (): Promise<FetchOutcome> => {
+    const seq = ++issuedSeqRef.current;
+    try {
+      const data = await getAnalysisStatus(analysisId);
+      if (!activeRef.current) return { outcome: "inactive" };
+      return applyStatus(data, seq) !== null ? { outcome: "applied", data } : { outcome: "dropped" };
+    } catch (err) {
+      if (!activeRef.current) return { outcome: "inactive" };
+      if (err instanceof ApiError && err.status === 404) {
+        setNotFound(true);
+        stopPolling();
+        return { outcome: "not-found" };
+      }
+      if (seq >= appliedSeqRef.current) setPollingError(true);
+      return { outcome: "failed" };
+    }
+  }, [analysisId, applyStatus, stopPolling]);
+
+  const checkStall = useCallback(() => {
+    const current = statusRef.current;
+    if (
+      current !== null &&
+      !isPauseStatus(current) &&
+      !isTerminal(current) &&
+      Date.now() - statusSinceRef.current >= STALL_MS
+    ) {
+      setStalled(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    activeRef.current = true;
+
+    async function init(): Promise<void> {
+      const first = await fetchStatus();
+      if (!activeRef.current) return;
+      if (first.outcome === "not-found" || (first.outcome === "applied" && isTerminal(first.data.status))) return;
+      stopPolling();
+      intervalRef.current = setInterval(async () => {
+        await fetchStatus();
+        if (activeRef.current) checkStall();
       }, POLL_INTERVAL_MS);
     }
 
     void init();
 
     return () => {
-      cancelled = true;
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
+      activeRef.current = false;
+      stopPolling();
     };
-  }, [analysisId]);
+  }, [fetchStatus, checkStall, stopPolling]);
+
+  const focusStatusLine = useCallback((): void => {
+    // After the question card has gone, focus would otherwise fall to <body>.
+    requestAnimationFrame(() => statusLineRef.current?.focus());
+  }, []);
+
+  const handleSubmit = useCallback(
+    async (view: AnswerableView, optionId: string, correctedDomain?: string): Promise<void> => {
+      if (sessionId === null || submittingKeyRef.current === view.key) return;
+      submittingKeyRef.current = view.key;
+      setSubmittingKey(view.key);
+      setSubmitError(null);
+      // Numbered when sent: a response applied with a higher number was read
+      // after this answer left the browser.
+      const sentSeq = ++issuedSeqRef.current;
+      try {
+        const data = await resumeAnalysis(
+          analysisId,
+          sessionId,
+          buildResumeResponse(view, optionId, correctedDomain),
+        );
+        if (!activeRef.current) return;
+        answeredKeysRef.current.add(view.key);
+        // A read sent after the answer that already shows something past this
+        // question (the next question, or a later stage) is newer than the
+        // write's own result: keep it.
+        const newerReadShown =
+          appliedSeqRef.current > sentSeq && shownKeyRef.current !== view.key;
+        if (!newerReadShown) {
+          // At its send number, so polls sent after the answer still win; only
+          // when a pre-write read of this same question was applied since does
+          // it need a fresh number to replace it.
+          applyStatus(data, appliedSeqRef.current > sentSeq ? ++issuedSeqRef.current : sentSeq);
+          setNotice({ kind: "recorded", text: recordedText(view), anchorAgent: data.current_agent });
+        }
+        // A new question takes focus itself (PauseQuestion); otherwise the status line does.
+        if (shownKeyRef.current === null) focusStatusLine();
+      } catch (err) {
+        if (!activeRef.current) return;
+        const status = err instanceof ApiError ? err.status : null;
+        if (status === 403) setSessionRejected(true);
+        // Whatever failed, the server's state decides what to show next.
+        const refetch = await fetchStatus();
+        if (!activeRef.current) return;
+        // The latest applied state is the newest known, whether the refetch
+        // was applied, dropped for a newer poll, or failed: if it no longer
+        // shows this question, the answer's pause has moved on.
+        const movedOn = shownKeyRef.current !== view.key;
+        if (status === 403) {
+          // Marks nothing as answered: the question is still open for its owner.
+        } else if (movedOn) {
+          answeredKeysRef.current.add(view.key);
+          setNotice({
+            kind: "moved-on",
+            text: MOVED_ON_TEXT,
+            anchorStatus: statusRef.current ?? "cleaning",
+            anchorKey: shownKeyRef.current,
+          });
+          if (shownKeyRef.current === null) focusStatusLine();
+        } else if (status === null || refetch.outcome === "failed") {
+          setSubmitError(NETWORK_TEXT);
+        } else {
+          setSubmitError(status === 400 || status === 409 ? REJECTED_TEXT : SERVER_TEXT);
+        }
+      } finally {
+        if (submittingKeyRef.current === view.key) {
+          submittingKeyRef.current = null;
+          if (activeRef.current) setSubmittingKey(null);
+        }
+      }
+    },
+    [analysisId, sessionId, applyStatus, fetchStatus, focusStatusLine],
+  );
+
+  const pauseView = useMemo(
+    () => (isPauseStatus(status) ? parsePause(status, pauseData) : null),
+    [status, pauseData],
+  );
 
   // At "complete" the pipeline is shown fully finished (all stages green)
   // during the brief exit transition while the parent swaps in the results
@@ -209,35 +413,67 @@ export function AnalysisProgress({
           transition={{ duration: 0.25, ease: "easeOut" }}
           className="flex flex-col gap-8"
         >
-          <PipelineView
-            status={status}
-            currentAgent={currentAgent}
-            progressPct={progressPct}
-            pollingError={pollingError}
-          />
+          <div className="flex flex-col gap-3">
+            <PipelineView
+              status={status}
+              currentAgent={currentAgent}
+              progressPct={progressPct}
+              pollingError={pollingError}
+            />
+            <p
+              ref={statusLineRef}
+              role="status"
+              aria-live="polite"
+              tabIndex={-1}
+              data-testid="status-line"
+              className="text-sm text-muted-foreground focus:outline-none"
+            >
+              {notice?.text ??
+                statusSentence(status, currentAgent, canAnswer, pauseView?.kind !== "unrenderable")}
+            </p>
+            <AnimatePresence initial={false}>
+              {stalled && (
+                <motion.div
+                  key="stall"
+                  data-testid="stall-notice"
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.25, ease: "easeOut" }}
+                  className="flex items-start gap-3 rounded-md border border-border/60 bg-card/40 p-4"
+                >
+                  <AlertTriangle className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
+                  <p className="text-sm text-muted-foreground">
+                    {STALL_TEXT}{" "}
+                    <Link
+                      href="/"
+                      className="text-foreground underline underline-offset-4 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      Start a new analysis
+                    </Link>
+                  </p>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
 
-          <AnimatePresence initial={false}>
-            {isPauseStatus(status) && (
+          <AnimatePresence mode="wait" initial={false}>
+            {pauseView !== null && (
               <motion.div
-                key="pause-card"
+                key={pauseView.key}
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: 8 }}
                 transition={{ duration: 0.25, ease: "easeOut" }}
-                className="flex items-start gap-3 rounded-md border border-border/60 bg-card/40 p-5 md:p-6"
               >
-                <AlertCircle
-                  className="size-5 mt-0.5 shrink-0 text-muted-foreground"
-                  aria-hidden
+                <PauseQuestion
+                  view={pauseView}
+                  canAnswer={canAnswer}
+                  sessionRejected={sessionRejected}
+                  submitting={submittingKey === pauseView.key}
+                  submitError={submitError}
+                  onSubmit={handleSubmit}
                 />
-                <div className="flex flex-col gap-1.5">
-                  <p className="text-sm font-medium">
-                    Pipeline paused — pause handling coming in next build
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {PAUSE_SUBTEXTS[status]}
-                  </p>
-                </div>
               </motion.div>
             )}
           </AnimatePresence>
@@ -308,7 +544,7 @@ function PipelineView({
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               transition={{ duration: 0.2 }}
-              className="text-xs italic text-muted-foreground/70"
+              className="text-sm italic text-muted-foreground/70"
             >
               Reconnecting…
             </motion.p>
@@ -366,7 +602,7 @@ function StageRow({ stage, state, isLast }: StageRowProps) {
           </p>
         )}
         {isActive && (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-sm text-muted-foreground">
             {STAGE_DESCRIPTIONS[stage]}
           </p>
         )}

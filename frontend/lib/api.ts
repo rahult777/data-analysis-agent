@@ -129,6 +129,11 @@ export async function getQuestion(
   }
 }
 
+// Per request, not an axios default: uploads of up to 100MB share this client.
+// A resume that times out may still have been applied, so callers refetch
+// the status instead of assuming it failed.
+export const RESUME_TIMEOUT_MS = 15_000;
+
 export async function resumeAnalysis(
   analysisId: string,
   sessionId: string,
@@ -138,7 +143,7 @@ export async function resumeAnalysis(
     const { data } = await client.post<StatusResponse>(
       `/api/analysis/${analysisId}/resume`,
       { response },
-      { headers: authHeaders(sessionId) },
+      { headers: authHeaders(sessionId), timeout: RESUME_TIMEOUT_MS },
     );
     return data;
   } catch (error) {

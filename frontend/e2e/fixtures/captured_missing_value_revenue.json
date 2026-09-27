@@ -1,0 +1,34 @@
+{
+  "type": "missing_value_decision_required",
+  "column_name": "revenue",
+  "missing_pct": 35.0,
+  "missing_count": 70,
+  "total_rows": 200,
+  "what_this_column_represents": "transaction or account-level revenue in dollars; non-null values range from approximately $2,117 to $750,000 with a mean of $42,791 and a standard deviation of $104,094 computed over only the 130 non-null rows",
+  "provenance_interpretation": "this dataset is manually entered, meaning missingness in revenue is most likely the result of a sales rep failing to record revenue at the time of entry — a workflow gap — rather than a system-coded semantic signal such as 'no revenue occurred'; however, because the Profiler flagged that missingness may be structured by rep, region, or product rather than random, the 35% gap could reflect a subset of reps or territories who habitually skip revenue entry, which would make the missingness informative about rep behaviour even if it was not intentionally coded that way",
+  "domain_context": "in retail and e-commerce data, imputing 70 missing revenue values with a central-tendency estimate assumes the missing accounts resemble the recorded ones in revenue level; if the missing rows are concentrated among high-value wholesale accounts or low-value inactive accounts, median imputation will systematically misrepresent every per-rep and per-region aggregate the Analyzer computes — a direction of bias that cannot be determined without cross-tabulating missingness against sales_rep, region, and product_code first; excluding the 70 rows preserves statistical integrity of revenue aggregates but removes 35% of the dataset, which may eliminate entire reps or regions from the analysis entirely",
+  "options": [
+    {
+      "id": "impute",
+      "label": "Impute the 70 missing values with median ($24,200)",
+      "method": "median ($24,200)",
+      "method_id": "median",
+      "assumption": "missingness is non-informative — the 70 missing accounts are assumed to resemble the 130 recorded accounts in revenue level; this assumption is explicitly contradicted by the Profiler's concern that missingness may be structured by sales rep, region, or product, and any per-rep or per-region revenue aggregate produced from the imputed dataset carries an unknown selection bias"
+    },
+    {
+      "id": "exclude_column",
+      "label": "Exclude `revenue` from analysis entirely",
+      "consequence": "removes revenue from all downstream aggregates, leaderboards, and margin calculations; preserves all 200 rows for analysis of units_sold, discount_pct, return_flag, and notes, but eliminates the primary financial performance metric from every finding the Analyzer and Explainer will produce"
+    },
+    {
+      "id": "exclude_rows",
+      "label": "Exclude the 70 rows where `revenue` is missing",
+      "consequence": "preserves revenue as an unimputed column with full analytical integrity, but removes 35% of the dataset (70 of 200 rows); if the missing rows are concentrated among specific reps or regions, those reps and regions will be partially or entirely absent from every revenue-based finding — the Analyzer should verify coverage by rep and region before treating any aggregate as representative"
+    },
+    {
+      "id": "preserve_missingness",
+      "label": "Keep `revenue` as it is: its 70 missing values stay missing",
+      "consequence": "nothing is imputed and no rows are removed. Statistics on `revenue` will use only its 130 recorded values, and the missingness is recorded in the cleaning report, where the Analyzer and Explainer will see it"
+    }
+  ]
+}

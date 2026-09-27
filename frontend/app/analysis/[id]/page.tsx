@@ -52,7 +52,7 @@ export default function AnalysisPage() {
               >
                 <AnalysisProgress
                   analysisId={analysisId}
-                  isOwner={sessionId !== null}
+                  sessionId={sessionId}
                   onComplete={() => setIsComplete(true)}
                 />
               </motion.div>
