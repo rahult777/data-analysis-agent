@@ -204,6 +204,15 @@ CREATE INDEX idx_analyses_created_at ON analyses(created_at);
 CREATE INDEX idx_questions_analysis_id ON questions(analysis_id);
 ````
 
+### Database Access and Row Level Security
+
+Only the backend reads or writes the database, through `backend/utils/supabase_client.py` with `SUPABASE_SECRET_KEY` (role `service_role`, which has BYPASSRLS and keeps full privileges on both tables). Since Build K (migration `20260927183902_enable_rls_on_analyses_and_questions.sql`, decisions.md 2026-09-28):
+
+- `analyses` and `questions` have RLS enabled with **zero policies**, so `anon` and `authenticated` see no rows.
+- `anon` and `authenticated` hold **no privileges** on either table (`REVOKE ALL`). This also removes TRUNCATE, which RLS does not govern, and hides both tables from the GraphQL schema. Data API calls with the publishable key get 401 / `42501`.
+- Default privileges for role `postgres` in `public` no longer grant new tables or sequences to `anon`/`authenticated`. Default EXECUTE on new functions is unchanged (errors.md 2026-09-28).
+- The security advisor's two INFO lints `rls_enabled_no_policy` (0008) are expected and accepted: zero policies is the design.
+
 ### Supabase Storage
 
 Bucket: `cleaned-datasets`
@@ -212,9 +221,15 @@ Keys follow the pattern: `{analysis_id}.parquet`
 
 The bucket must exist before the Cleaner runs. Create it manually in the Supabase dashboard or via migration before the first pipeline run.
 
+The bucket is private (`public = false`), and `storage.objects` has RLS enabled with no policies, so only the backend's secret key can list, upload or download objects; the publishable key gets 400 on download and sees no buckets (verified 2026-09-28).
+
 ### Schema Migrations
 
 **Rule 4 in CLAUDE.md is absolute:** Never modify the Supabase schema directly from Claude Code or by hand in the dashboard. All schema changes go through migration files. Migration files are committed to the repository before being applied.
+
+Files live in `supabase/migrations/<timestamp>_<name>.sql`, end with a commented `-- DOWN (manual rollback):` block, are committed first, and are then applied with the Supabase MCP `apply_migration` using the same `<name>`. The remote history records its own apply-time version, not the filename's (decisions.md 2026-09-22).
+
+**New-table rule:** a migration that creates a table in `public` must, in the same file, `ENABLE ROW LEVEL SECURITY` on it. If the backend is the only client, it grants nothing to `anon`/`authenticated`; any grant to them needs its own decision and matching policies. A migration that creates a function in `public` must `REVOKE EXECUTE ... FROM PUBLIC, anon, authenticated` unless the function is meant to be public (errors.md 2026-09-28). `tests/test_migrations.py` enforces the table rules for every table the backend uses.
 
 ---
 
@@ -319,15 +334,14 @@ requirements.txt
 
 ## Environment Variables Required
 
-All loaded via `backend/config.py`. All required — system fails fast on import if any are missing.
+All loaded via `backend/config.py`. All required — system fails fast on import if any are missing. `SUPABASE_PUBLISHABLE_KEY` is not listed: nothing in the backend or frontend uses it, and since Build K the backend no longer loads or requires it. It may stay in `.env` for the `.live/` verification harness, which reads it directly.
 
 | Variable | Purpose |
 |----------|---------|
 | ANTHROPIC_API_KEY | Claude API access for all agents |
 | OPENAI_API_KEY | OpenAI API access (fallback or embedding use) |
 | SUPABASE_URL | Supabase project URL |
-| SUPABASE_PUBLISHABLE_KEY | Supabase anon key for client operations |
-| SUPABASE_SECRET_KEY | Supabase service role key for server operations |
+| SUPABASE_SECRET_KEY | Supabase secret key (`sb_secret_…`, authenticates as `service_role`, bypasses RLS) — the backend's only database key |
 | LANGSMITH_API_KEY | LangSmith tracing |
 | LANGSMITH_PROJECT | LangSmith project name (data-analysis-agent) |
 | LANGCHAIN_TRACING_V2 | Must be set to "true" |

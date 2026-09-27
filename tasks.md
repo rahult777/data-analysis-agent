@@ -158,6 +158,6 @@ All four agent prompts exist (see Completed). Open prompt-quality work is tracke
 
 ### Infrastructure
 
-- [ ] Supabase RLS policies
+- [x] Supabase RLS policies — Build K, 2026-09-28, committed in 9bcff18 (migration applied as remote version 20260927184255). RLS on `analyses` and `questions` with zero policies; all `anon`/`authenticated` privileges revoked (incl. TRUNCATE; closes the GraphQL exposure); `postgres`'s default privileges in `public` no longer grant new tables or sequences to them; `SUPABASE_PUBLISHABLE_KEY` no longer required. Backend unchanged (secret key = `service_role`, BYPASSRLS). 633 passed / 16 skipped; 16 of 16 mutations caught; Code Review: 1 finding, fixed. Verified live at $0: anon 401/42501 on every verb, backend GETs 200, service-key write cycle clean, advisors show only the accepted INFO 0008. See decisions.md 2026-09-28 (Build K) and errors.md 2026-09-21 / 2026-09-28.
 - [x] Supabase Storage bucket — cleaned-datasets bucket created as private bucket
 - [ ] Vercel deployment

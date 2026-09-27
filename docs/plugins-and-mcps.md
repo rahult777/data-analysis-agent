@@ -206,11 +206,12 @@ Every plugin has a specific trigger condition. When that condition is met, the p
 - When reading the current schema to confirm column names and types
 - When checking that data was written correctly after an agent run
 - When designing a new migration — read the current schema first
+- When applying a migration file that is already committed (`apply_migration`, same name as the file)
 - When debugging a database-related error
 
 **How to invoke:** Use natural language queries like "Use the Supabase MCP to read the current schema of the analyses table" or "Use the Supabase MCP to check if the cleaned-datasets storage bucket exists."
 
-**Important:** Never modify the schema directly through the MCP. Read-only use for verification and introspection. All schema changes go through migration files per CLAUDE.md Rule 4.
+**Important:** The MCP is not read-only: it has write access and applies migrations. Schema changes are made only by applying a committed `supabase/migrations/` file with `apply_migration` (decisions.md 2026-09-22). Never run DDL ad hoc through `execute_sql`; use `execute_sql` for introspection and SELECTs. All schema changes go through migration files per CLAUDE.md Rule 4.
 
 ---
 
@@ -331,4 +332,4 @@ These are CLAUDE.md rule violations. They are not judgment calls:
 - Committing without a descriptive message = Rule 15 violation
 - Building a UI component without Frontend Design plugin = quality violation
 - Deploying without Security Review = Rule 14 violation
-- Modifying the Supabase schema via MCP instead of migration = Rule 4 violation
+- Modifying the Supabase schema via ad-hoc MCP SQL instead of an applied, committed migration file = Rule 4 violation

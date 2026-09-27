@@ -198,9 +198,13 @@ Pipeline:
 
 ## Authentication Model
 
-Minimal session-based authentication. On upload, a UUID session_id is generated and stored in the analyses record. The frontend stores this session_id and includes it as a header on all subsequent requests for that analysis. The backend validates it matches the record before returning data.
+Minimal session-based authentication at the API, and a database only the backend can reach.
 
-This prevents one user from accessing another user's analysis without implementing full auth. Row Level Security (RLS) will be added to Supabase tables before any production deployment.
+- **API.** On upload, a UUID session_id is generated and stored in the analyses record; the uploading browser keeps it in localStorage. Only the state-changing routes — POST `/question` and POST `/resume` — require it in the `session-id` header (`get_session`). The four read-only GET routes are public by analysis_id (`get_public_read_access`; decisions.md 2026-09-21).
+- **Database.** Only the backend talks to Supabase, using the secret key, which authenticates as `service_role` (BYPASSRLS). `analyses` and `questions` have Row Level Security enabled with zero policies, and `anon`/`authenticated` hold no privileges on them, so the publishable key can neither read nor write them through the Data API or GraphQL (decisions.md 2026-09-28, Build K). The frontend never uses Supabase directly.
+- **Storage.** The `cleaned-datasets` bucket is private and `storage.objects` has no policies, so only the secret key can list, upload or download objects.
+
+This is not per-user authentication. Adding Supabase Auth later would need explicit grants and RLS policies for `authenticated`.
 
 ---
 
