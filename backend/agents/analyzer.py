@@ -3,9 +3,9 @@
 Reads the cleaned dataset prepared by the Cleaner, computes the mandatory
 descriptive analysis surface (descriptives, correlations, distributions,
 value counts, time series), generates all required charts, runs the LLM
-through a self-evaluation loop until the five investigator criteria pass
-(or three iterations have elapsed), and persists a complete AnalysisReport
-to Supabase for the Explainer to consume.
+through a self-evaluation loop in which Python checks each response
+structurally and retries only on a real failure (at most three calls), and
+persists a complete AnalysisReport to Supabase for the Explainer to consume.
 """
 
 import asyncio
@@ -57,6 +57,40 @@ ANALYZER_MAX_TOKENS = 32000
 # resting on fewer complete pairs than this is Cannot Determine, whatever label
 # the model gave it. Enforced in Python by apply_correlation_floor (Build I).
 CORRELATION_MIN_PAIRS = 30
+
+# The self-evaluation loop's call cap: the first analysis call plus at most two
+# retries (Build J). Each retry is a fresh call; the model does not see its
+# previous response, only the criteria it failed.
+ANALYZER_MAX_CALLS = 3
+
+class AnalyzerResponseTruncated(ValueError):
+    """The Analyzer's response stopped at max_tokens before its JSON was complete."""
+
+
+class AnalyzerResponseEmpty(ValueError):
+    """The Analyzer's response had no text content block (e.g. a refusal)."""
+
+
+class AnalyzerResponseNotJSON(ValueError):
+    """The Analyzer's response text could not be parsed as JSON."""
+
+
+def _unusable_reason(exc: Exception) -> str:
+    """A short, user-safe description of why a retry could not be used (the full
+    exception, which can hold raw model text, goes only to the log). The three
+    response failures are raised as their own types where they happen; anything
+    else is the call itself failing."""
+    if isinstance(exc, AnalyzerResponseTruncated):
+        return "the response was truncated at the output-token ceiling"
+    if isinstance(exc, AnalyzerResponseEmpty):
+        return "the response had no text content"
+    if isinstance(exc, AnalyzerResponseNotJSON):
+        return "the response was not valid JSON"
+    return f"the call failed ({type(exc).__name__})"
+
+
+_VALID_CONFIDENCE_LEVELS = frozenset({"High", "Moderate", "Low", "Cannot Determine"})
+_CAUSALITY_LABEL = "This is correlation, not causation."
 
 
 def sanitize_for_json(obj: Any) -> Any:
@@ -478,9 +512,13 @@ def build_analyzer_message(
     top_3_patterns: list,
     user_context: Optional[str],
     interactions_detected: Optional[list],
-    failed_criteria: Optional[List[str]],
+    failed_criteria: Optional[List[Dict[str, str]]],
 ) -> str:
-    """Build the Anthropic user message for the analyzer LLM call."""
+    """Build the Anthropic user message for the analyzer LLM call.
+
+    The Profiler's concerns are sent with Python-assigned concern_ids (see
+    number_concerns), which the model copies into profiler_concerns_addressed
+    and check_self_evaluation matches structurally."""
     cleaning_summary: Optional[dict] = None
     if cleaning_report is not None:
         cleaning_summary = {
@@ -498,7 +536,7 @@ def build_analyzer_message(
         "DOMAIN_HYPOTHESIS": domain_hypothesis,
         "MANDATORY_INVESTIGATION_AGENDA": {
             "label": "MANDATORY INVESTIGATION AGENDA — address every one of these",
-            "concerns": top_3_concerns,
+            "concerns": number_concerns(top_3_concerns),
         },
         "STARTING_HYPOTHESES": {
             "label": "STARTING HYPOTHESES — investigate these",
@@ -525,8 +563,9 @@ def build_analyzer_message(
     if failed_criteria:
         message_data["SELF_EVALUATION_FAILED"] = {
             "label": (
-                "SELF-EVALUATION FAILED — these criteria were not met in the "
-                "previous iteration, address them explicitly this time."
+                "SELF-EVALUATION FAILED — the system checked your earlier "
+                "responses in this analysis and these criteria were not met; "
+                "meet all of them this time."
             ),
             "failed_criteria": failed_criteria,
         }
@@ -535,58 +574,206 @@ def build_analyzer_message(
     return json.dumps(sanitized, default=str)
 
 
+def number_concerns(top_3_concerns: Any) -> List[Dict[str, Any]]:
+    """The Profiler's concerns, each with a Python-assigned concern_id "C1".."Cn"
+    in their order, for the Analyzer's message only (the stored profile_report is
+    not changed). A concern that is not an object is carried as its "issue"; a
+    non-empty value that is not a list is treated as one concern."""
+    if not isinstance(top_3_concerns, list):
+        if not top_3_concerns:
+            return []
+        logger.warning(
+            "profiler_top_3_concerns is %s, not a list — treated as one concern",
+            type(top_3_concerns).__name__,
+        )
+        top_3_concerns = [top_3_concerns]
+    numbered: List[Dict[str, Any]] = []
+    for index, concern in enumerate(top_3_concerns, start=1):
+        fields = concern if isinstance(concern, dict) else {"issue": concern}
+        numbered.append({
+            "concern_id": f"C{index}",
+            **{key: value for key, value in fields.items() if key != "concern_id"},
+        })
+    return numbered
+
+
+def _merge_failures(
+    kept_failures: List[Dict[str, str]], last_failures: List[Dict[str, str]]
+) -> List[Dict[str, str]]:
+    """The feedback for the next call: every criterion that failed on the kept
+    response or on the latest parsed one, the latest's record winning, so a
+    retry hears about the kept response's gaps too."""
+    merged: Dict[str, Dict[str, str]] = {f["criterion"]: f for f in kept_failures}
+    merged.update({f["criterion"]: f for f in last_failures})
+    return list(merged.values())
+
+
+def _text(value: Any) -> str:
+    """A string field's stripped text; "" for anything that is not a string."""
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _count_texts(value: Any) -> int:
+    """How many non-empty strings a list field holds; 0 if it is not a list."""
+    if not isinstance(value, list):
+        return 0
+    return sum(1 for item in value if _text(item))
+
+
+def _concern_lacks(entry: dict) -> List[str]:
+    """What a profiler_concerns_addressed entry lacks for criterion (a)."""
+    lacks: List[str] = []
+    if not _text(entry.get("finding")):
+        lacks.append("an empty finding")
+    if entry.get("confidence_level") not in _VALID_CONFIDENCE_LEVELS:
+        lacks.append("no valid confidence_level")
+    return lacks
+
+
+def _missing_correlation_elements(entry: dict) -> List[str]:
+    """The Step 4 elements a strong-correlation entry lacks (analyzer_system.md
+    Step 4 and criterion (b): r, n, confidence level, at least two mechanisms,
+    at least two confounders, what would establish causality, the exact label)."""
+    missing: List[str] = []
+    # r and n need only be present: Python overwrites both with its own values
+    # after the loop (apply_correlation_floor), so their form is not checked.
+    if entry.get("r") is None:
+        missing.append("r")
+    if entry.get("n") is None:
+        missing.append("n")
+    if entry.get("confidence_level") not in _VALID_CONFIDENCE_LEVELS:
+        missing.append("a valid confidence_level")
+    if _count_texts(entry.get("mechanisms")) < 2:
+        missing.append("at least two mechanisms")
+    if _count_texts(entry.get("confounders")) < 2:
+        missing.append("at least two confounders")
+    if not _text(entry.get("what_would_establish_causality")):
+        missing.append("what_would_establish_causality")
+    if _text(entry.get("causality_label")) != _CAUSALITY_LABEL:
+        missing.append(f'the exact causality_label "{_CAUSALITY_LABEL}"')
+    return missing
+
+
 def check_self_evaluation(
-    analysis_response: dict,
+    analysis_response: Any,
     top_3_concerns: list,
     correlation_result: Optional[dict],
-    chart_paths: List[str],
-) -> Tuple[bool, List[str]]:
-    """Run the five-criterion self-evaluation. Returns (all_passed, failed)."""
-    failed: List[str] = []
-    response_str = str(analysis_response).lower()
+) -> Tuple[bool, List[Dict[str, str]]]:
+    """Check the model's response structurally (Build J). Returns (all_passed,
+    failures), one {criterion, reason} per failed criterion, the reason naming
+    the concrete items. Never raises on a malformed response.
 
-    # (a) Every concern addressed
-    if top_3_concerns:
-        unaddressed = []
-        for concern in top_3_concerns:
-            concern_str = str(concern).lower()
-            if concern_str not in response_str:
-                unaddressed.append(concern_str[:80])
-        if unaddressed:
-            failed.append(f"(a) profiler concerns not addressed: {unaddressed}")
+    (a) every concern_id sent by number_concerns has a profiler_concerns_addressed
+        entry with a non-empty finding and a valid confidence_level;
+    (b) every Python strong pair has a correlation.strong_correlations entry
+        (exact column names, either order) with every Step 4 element; entries for
+        other pairs are ignored;
+    (e) most_important_finding and most_surprising_finding are non-empty and not
+        identical.
+    (c) is not checked: the output has no anomaly field to check it against
+    (errors.md 2026-09-27). (d) is not a criterion here: charts are rendered by
+    the system before the call, so a retry cannot change them; analyzer_node
+    records empty charts instead.
+    """
+    failures: List[Dict[str, str]] = []
+    response = analysis_response
+    if not isinstance(response, dict):
+        failures.append({
+            "criterion": "(response)",
+            "reason": (
+                f"The response is a JSON {type(response).__name__}, not the "
+                "AnalysisReport object."
+            ),
+        })
+        response = {}
 
-    # (b) Every strong correlation pair investigated
-    if correlation_result is not None:
-        strong_pairs = correlation_result.get("strong_pairs") or []
-        unaddressed_pairs: List[str] = []
+    # (a) Every Profiler concern addressed, by concern_id.
+    concern_ids = [c["concern_id"] for c in number_concerns(top_3_concerns)]
+    if concern_ids:
+        entries = response.get("profiler_concerns_addressed")
+        if not isinstance(entries, list):
+            failures.append({
+                "criterion": "(a)",
+                "reason": (
+                    "profiler_concerns_addressed is missing or not a list, so no "
+                    f"concern is addressed ({', '.join(concern_ids)})."
+                ),
+            })
+        else:
+            by_id: Dict[str, List[dict]] = {}
+            for entry in entries:
+                if isinstance(entry, dict) and _text(entry.get("concern_id")):
+                    by_id.setdefault(_text(entry["concern_id"]), []).append(entry)
+            problems: List[str] = []
+            for concern_id in concern_ids:
+                candidates = by_id.get(concern_id, [])
+                if not candidates:
+                    problems.append(f"{concern_id} has no entry")
+                elif not any(
+                    _text(entry.get("finding"))
+                    and entry.get("confidence_level") in _VALID_CONFIDENCE_LEVELS
+                    for entry in candidates
+                ):
+                    lacks = min((_concern_lacks(e) for e in candidates), key=len)
+                    problems.append(f"{concern_id} has {' and '.join(lacks)}")
+            if problems:
+                failures.append({
+                    "criterion": "(a)",
+                    "reason": "Profiler concerns not addressed: " + "; ".join(problems) + ".",
+                })
+
+    # (b) Every Python strong pair investigated, by exact column names.
+    strong_pairs = (
+        correlation_result.get("strong_pairs") if isinstance(correlation_result, dict) else None
+    )
+    if isinstance(strong_pairs, list) and strong_pairs:
+        correlation = response.get("correlation")
+        entries = correlation.get("strong_correlations") if isinstance(correlation, dict) else None
+        by_pair: Dict[frozenset, List[dict]] = {}
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            col_a, col_b = entry.get("column_a"), entry.get("column_b")
+            if isinstance(col_a, str) and isinstance(col_b, str) and col_a != col_b:
+                by_pair.setdefault(frozenset((col_a, col_b)), []).append(entry)
+        problems = []
         for pair in strong_pairs:
-            col1 = str(pair.get("col1", "")).lower()
-            col2 = str(pair.get("col2", "")).lower()
-            if col1 not in response_str or col2 not in response_str:
-                unaddressed_pairs.append(f"{col1}-{col2}")
-        if unaddressed_pairs:
-            failed.append(
-                f"(b) strong correlations not investigated: {unaddressed_pairs}"
+            if not isinstance(pair, dict):
+                continue
+            col1, col2 = pair.get("col1"), pair.get("col2")
+            candidates = by_pair.get(frozenset((col1, col2)), [])
+            if not candidates:
+                problems.append(f"{col1} × {col2} has no entry")
+            elif all(_missing_correlation_elements(entry) for entry in candidates):
+                lacks = min((_missing_correlation_elements(e) for e in candidates), key=len)
+                problems.append(f"{col1} × {col2} lacks {', '.join(lacks)}")
+        if problems:
+            failures.append({
+                "criterion": "(b)",
+                "reason": "Strong correlations not fully investigated: " + "; ".join(problems) + ".",
+            })
+
+    # (e) Both findings present and distinct.
+    most_important = _text(response.get("most_important_finding"))
+    most_surprising = _text(response.get("most_surprising_finding"))
+    if not most_important or not most_surprising:
+        empty = [
+            name
+            for name, value in (
+                ("most_important_finding", most_important),
+                ("most_surprising_finding", most_surprising),
             )
+            if not value
+        ]
+        verb = "are" if len(empty) == 2 else "is"
+        failures.append({"criterion": "(e)", "reason": f"{' and '.join(empty)} {verb} empty."})
+    elif most_important == most_surprising:
+        failures.append({
+            "criterion": "(e)",
+            "reason": "most_important_finding and most_surprising_finding are identical.",
+        })
 
-    # (c) At least one anomaly explanation
-    if "anomal" not in response_str:
-        failed.append("(c) no anomaly explanations present in response")
-
-    # (d) chart_paths non-empty
-    if not chart_paths:
-        failed.append("(d) chart_paths is empty — no charts generated")
-
-    # (e) Both findings present, non-empty, distinct
-    most_important = (analysis_response.get("most_important_finding") or "").strip()
-    most_surprising = (analysis_response.get("most_surprising_finding") or "").strip()
-    if not most_important or not most_surprising or most_important == most_surprising:
-        failed.append(
-            "(e) most_important_finding and most_surprising_finding must both "
-            "be non-empty and distinct from each other"
-        )
-
-    return (len(failed) == 0, failed)
+    return (len(failures) == 0, failures)
 
 
 _CANNOT_DETERMINE = "Cannot Determine"
@@ -754,7 +941,9 @@ async def analyzer_node(state: PipelineState) -> dict:
         # Memory MCP read — eight inheritance keys, sourced from pipeline state.
         domain_hypothesis = state.get("profiler_domain_hypothesis") or ""
         provenance_hypothesis = state.get("profiler_provenance_hypothesis") or ""
-        top_3_concerns = state.get("profiler_top_3_concerns") or []
+        # Numbered once here (concern_id "C1".."Cn"); number_concerns is idempotent,
+        # so the message builder and the check number the same list again.
+        top_3_concerns = number_concerns(state.get("profiler_top_3_concerns") or [])
         top_3_patterns = state.get("profiler_top_3_patterns") or []
         cleaner_key_decisions = state.get("cleaner_key_decisions") or []
         cleaner_excluded_columns = state.get("cleaner_excluded_columns") or []
@@ -862,12 +1051,23 @@ async def analyzer_node(state: PipelineState) -> dict:
             highest_correlation_value,
         )
 
-        loop_count = 0
-        failed_criteria: List[str] = []
-        analysis_response: dict = {}
+        # Self-evaluation loop (Build J): Python checks each response
+        # structurally and retries only on a real failure. The kept response is
+        # the first that passes, else the one with the fewest failed criteria
+        # (earliest on a tie), so a retry replaces a response only when it is
+        # strictly better. A retry that cannot be used (the call fails, or the
+        # response is truncated or not JSON) ranks below every parsed response.
+        calls_made = 0
+        failed_criteria: List[Dict[str, str]] = []
+        last_failures: List[Dict[str, str]] = []
+        kept_response: Any = None
+        kept_call = 0
+        kept_failures: List[Dict[str, str]] = []
+        unusable_retries: List[Tuple[int, str]] = []
+        call_outcomes: List[str] = []
         system_prompt = load_system_prompt("analyzer")
 
-        while True:
+        while calls_made < ANALYZER_MAX_CALLS:
             user_message = build_analyzer_message(
                 analysis_id=analysis_id,
                 profile_report=profile_report,
@@ -899,39 +1099,101 @@ async def analyzer_node(state: PipelineState) -> dict:
                 ) as stream:
                     return stream.get_final_message()
 
-            response = await asyncio.to_thread(_run_analyzer_stream)
-
-            if response.stop_reason == "max_tokens":
-                raise ValueError(
-                    "Analyzer LLM response truncated: reached the max_tokens "
-                    f"ceiling ({ANALYZER_MAX_TOKENS}) before the JSON was complete. "
-                    "Raise ANALYZER_MAX_TOKENS or reduce the analyzer's output size."
+            calls_made += 1
+            try:
+                response = await asyncio.to_thread(_run_analyzer_stream)
+                if response.stop_reason == "max_tokens":
+                    raise AnalyzerResponseTruncated(
+                        "Analyzer LLM response truncated: reached the max_tokens "
+                        f"ceiling ({ANALYZER_MAX_TOKENS}) before the JSON was complete. "
+                        "Raise ANALYZER_MAX_TOKENS or reduce the analyzer's output size."
+                    )
+                text = (
+                    getattr(response.content[0], "text", None) if response.content else None
                 )
+                if not isinstance(text, str):
+                    raise AnalyzerResponseEmpty(
+                        "Analyzer LLM response has no text content "
+                        f"(stop_reason={response.stop_reason!r})."
+                    )
+                try:
+                    candidate = parse_json_response(text)
+                except ValueError as parse_error:
+                    raise AnalyzerResponseNotJSON(str(parse_error)) from parse_error
+            except Exception as exc:
+                if kept_call == 0:
+                    raise  # the first call: a SYSTEM_ERROR, as before Build J
+                reason = _unusable_reason(exc)
+                unusable_retries.append((calls_made, reason))
+                call_outcomes.append(f"call {calls_made}: {reason}")
+                logger.warning(
+                    "Analyzer call %d for analysis_id=%s could not be used; "
+                    "keeping call %d: %r",
+                    calls_made,
+                    analysis_id,
+                    kept_call,
+                    exc,
+                )
+                failed_criteria = _merge_failures(kept_failures, last_failures) + [{
+                    "criterion": "(unusable retry)",
+                    "reason": (
+                        f"Your previous response could not be used: {reason}. "
+                        "Return one complete AnalysisReport JSON object."
+                    ),
+                }]
+                continue
 
-            analysis_response = parse_json_response(response.content[0].text)
-
-            all_passed, failed_criteria = check_self_evaluation(
-                analysis_response,
-                top_3_concerns,
-                correlation_result,
-                chart_paths,
+            all_passed, failures = check_self_evaluation(
+                candidate, top_3_concerns, correlation_result
             )
-
+            if not isinstance(candidate, dict):
+                call_outcomes.append(f"call {calls_made}: a JSON {type(candidate).__name__}")
             logger.info(
-                "Analyzer self-evaluation iteration %d for analysis_id=%s: "
+                "Analyzer self-evaluation, call %d for analysis_id=%s: "
                 "all_passed=%s, failed_criteria=%s",
-                loop_count,
+                calls_made,
                 analysis_id,
                 all_passed,
-                failed_criteria,
+                failures,
             )
-
-            if all_passed or loop_count >= 2:
+            if kept_call == 0 or len(failures) < len(kept_failures):
+                kept_response, kept_call, kept_failures = candidate, calls_made, failures
+            if all_passed:
                 break
-            loop_count += 1
+            last_failures = failures
+            failed_criteria = _merge_failures(kept_failures, last_failures)
 
-        if failed_criteria:
-            analysis_response["self_evaluation_gaps"] = failed_criteria
+        if not isinstance(kept_response, dict):
+            raise ValueError(
+                f"Analyzer produced no usable AnalysisReport object in {calls_made} "
+                "calls: " + "; ".join(call_outcomes) + "."
+            )
+        analysis_response = kept_response
+
+        # The loop's record, written by Python at the keys the Explainer reads
+        # (explainer_system.md: unmet_criteria, self_evaluation_loops).
+        unmet_criteria: List[Dict[str, str]] = list(kept_failures)
+        for call_number, reason in unusable_retries:
+            if call_number > kept_call:
+                unmet_criteria.append({
+                    "criterion": "(unusable retry)",
+                    "reason": (
+                        f"Retry call {call_number} could not be used ({reason}); "
+                        f"the response from call {kept_call} was kept."
+                    ),
+                })
+        if not chart_paths:
+            unmet_criteria.append({
+                "criterion": "(d)",
+                "reason": (
+                    "No charts were generated (chart_paths is empty). The system "
+                    "renders the charts before the analysis call, so a retry "
+                    "cannot add them."
+                ),
+            })
+        analysis_response.pop("self_evaluation_gaps", None)
+        analysis_response["self_evaluation_loops"] = calls_made
+        analysis_response["unmet_criteria"] = unmet_criteria
 
         # Memory MCP write — six analyzer keys (anomalies_found is intentionally
         # written by the LLM closing ritual, not at the Python level — see

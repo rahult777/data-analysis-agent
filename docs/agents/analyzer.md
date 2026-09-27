@@ -109,29 +109,29 @@ The list of all saved chart file paths is recorded in the AnalysisReport and sav
 
 ## The Self-Evaluation Loop
 
-After completing all analysis, the Analyzer does not immediately proceed. It evaluates its own output against this exact checklist:
+The model reviews its own draft against the five criteria below before it answers. After each response, Python checks it structurally (`check_self_evaluation` in analyzer.py) and calls the model again only when a checked criterion really failed (Build J, 2026-09-27).
 
 **(a) Did I analyze every concern flagged by the Comprehender in the ProfileReport?**
-Each concern must have a corresponding finding or explicit statement in the AnalysisReport. "Concern X was investigated and found to have minimal impact on analysis because..." is acceptable. Silence is not.
+Each concern must have a corresponding finding or explicit statement in the AnalysisReport. "Concern X was investigated and found to have minimal impact on analysis because..." is acceptable. Silence is not. *Checked:* Python sends each concern with a `concern_id` ("C1".."Cn"); every id must have a `profiler_concerns_addressed` entry with a non-empty `finding` and a valid confidence level.
 
 **(b) Did I investigate all column pairs with correlation above 0.7?**
-Every strong correlation must have: the correlation value stated, reasoning about possible causal mechanisms, identification of potential confounders, statement of what data would be needed for causal claims.
+Every strong correlation must have: the correlation value stated, reasoning about possible causal mechanisms, identification of potential confounders, statement of what data would be needed for causal claims. *Checked:* every pair in Python's `strong_pairs` must have a `correlation.strong_correlations` entry naming the same two columns (either order) with the elements analyzer_system.md Step 4 requires: r, n, a valid confidence level, at least two mechanisms, at least two confounders, what would establish causality, and the exact label "This is correlation, not causation."
 
 **(c) Did I provide an explanation for every anomaly identified?**
-Every anomaly must have an explanation. If the cause cannot be determined from the data, the explanation must say so explicitly and state what additional data would clarify it.
+Every anomaly must have an explanation. If the cause cannot be determined from the data, the explanation must say so explicitly and state what additional data would clarify it. *Not checked:* the output has no anomaly field, so this is asked of the model but not enforced (a structured `anomalies_found` field is logged as its own item).
 
-**(d) Did I generate all required chart types?**
-Verify: histograms for all numeric columns, box plots for all numeric columns, correlation heatmap, bar charts for all categorical columns, line chart if time series detected, scatter plot for highest correlation pair. Every chart must be saved and the path recorded.
+**(d) Were all required chart types generated?**
+Histograms for all numeric columns, box plots for all numeric columns, correlation heatmap, bar charts for all categorical columns, line chart if time series detected, scatter plot for highest correlation pair. *Recorded, not retried:* Python renders the charts before the model is called, so a retry cannot change them; empty `chart_paths` is written to `unmet_criteria`.
 
-**(e) Did I identify and clearly label the single most practically important finding?**
-Not the most statistically significant finding. The most practically important one — the finding that, if the user knew nothing else from this analysis, they should know this. This finding must be labeled clearly at the top of the AnalysisReport.
+**(e) Did I identify and clearly label the single most practically important finding and the single most surprising finding, and are they distinct?**
+Not the most statistically significant finding. The most practically important one — the finding that, if the user knew nothing else from this analysis, they should know this. This finding must be labeled clearly at the top of the AnalysisReport. *Checked:* `most_important_finding` and `most_surprising_finding` are both non-empty and not identical.
 
-**Loop behavior:**
-- If any criterion is not met AND loop count is under 3: address the gap, increment loop count, re-evaluate
-- If all criteria are met: proceed to the Explainer regardless of loop count
-- If loop count reaches 3: proceed to the Explainer and note any unmet criteria explicitly in the AnalysisReport so the Explainer can account for them
-
-The maximum is 3 loops. After 3 loops the Analyzer proceeds with whatever it has, documented honestly.
+**Loop behavior (as built):**
+- At most 3 LLM calls: the first analysis plus up to two retries. A retry is a fresh call with the same inputs plus `SELF_EVALUATION_FAILED`, listing each failed criterion and its concrete item (the concern id, the column pair, the empty finding). The model does not see its previous response.
+- The kept response is the first that passes (a), (b) and (e); if none passes, the one with the fewest failed criteria, the earliest on a tie. A retry replaces a response only when it is strictly better.
+- A first call that fails, or whose response is truncated or not JSON, is a SYSTEM_ERROR. A retry that cannot be used (the call fails; the response is truncated, empty or not JSON) ranks below every parsed response: the best earlier response is kept, the next call is told its previous response could not be used, and the event is recorded with a short reason (the raw error goes only to the log). A valid-JSON response of the wrong shape (a list, missing objects) fails the checks and triggers a retry.
+- Python writes the record: `self_evaluation_loops` (LLM calls made) and `unmet_criteria` (the kept response's failed criteria as `{criterion, reason}`, plus any unusable retry after it and the empty-charts record). The Explainer surfaces both in the Technical layer.
+- The post-parse overwrites, the 30-pair correlation floor and the single `analysis_report` save run once, after the loop, on the kept response.
 
 ---
 

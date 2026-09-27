@@ -484,36 +484,32 @@ def test_build_analyzer_message_user_intent_present_when_provided() -> None:
 
 
 def test_check_self_evaluation_all_pass() -> None:
-    """All 5 criteria satisfied — returns (True, [])."""
-    # criterion (c): "anomal" must appear in str(analysis_response).lower()
+    """Real (object) concerns addressed by concern_id, distinct findings — (True, []).
+    No criterion needs the word "anomaly" (criterion (c) is not checked, Build J)."""
+    concerns = [{"issue": "a"}, {"issue": "b"}]
     analysis_response = {
-        "most_important_finding": "Revenue shows anomalous spike in Q3",
+        "profiler_concerns_addressed": [
+            {"concern_id": "C1", "concern": "a", "finding": "f1", "confidence_level": "Low"},
+            {"concern_id": "C2", "concern": "b", "finding": "f2", "confidence_level": "High"},
+        ],
+        "most_important_finding": "Revenue rose 12% in Q3",
         "most_surprising_finding": "Website visits doubled independently",
     }
+    assert "anomal" not in json.dumps(analysis_response).lower()
     all_passed, failed_criteria = check_self_evaluation(
         analysis_response=analysis_response,
-        top_3_concerns=[],          # (a) trivially passes
-        correlation_result=None,    # (b) trivially passes
-        chart_paths=["chart1.png"], # (d) passes
+        top_3_concerns=concerns,
+        correlation_result=None,    # (b) has no strong pairs to check
     )
     assert all_passed is True
     assert failed_criteria == []
 
 
-def test_check_self_evaluation_fails_when_chart_paths_empty() -> None:
-    """Empty chart_paths triggers criterion (d) failure."""
-    analysis_response = {
-        "most_important_finding": "Revenue shows anomalous spike in Q3",
-        "most_surprising_finding": "Website visits doubled independently",
-    }
-    all_passed, failed_criteria = check_self_evaluation(
-        analysis_response=analysis_response,
-        top_3_concerns=[],
-        correlation_result=None,
-        chart_paths=[],  # (d) fails
-    )
-    assert all_passed is False
-    assert len(failed_criteria) >= 1
+def test_check_self_evaluation_does_not_take_chart_paths() -> None:
+    """(d) is not a retry criterion: charts are rendered before the call, so
+    analyzer_node records empty charts instead (Build J)."""
+    import inspect
+    assert "chart_paths" not in inspect.signature(check_self_evaluation).parameters
 
 
 # ---------------------------------------------------------------------------
@@ -926,7 +922,8 @@ def test_analyzer_node_saves_the_floored_report_once(tmp_path: pathlib.Path) -> 
             "confidence_level": "Low",
             "confidence_reasoning": "n=60 clears the 30-pair floor",
         },
-        "most_important_finding": "x and y move together; one anomaly in batch A",
+        "profiler_concerns_addressed": _addressed(["C1", "C2", "C3"]),
+        "most_important_finding": "x and y move together",
         "most_surprising_finding": "z tracks y closely",
         "open_questions": [],
     }
@@ -942,7 +939,7 @@ def test_analyzer_node_saves_the_floored_report_once(tmp_path: pathlib.Path) -> 
         "analysis_id": "build-i-node",
         "profile_report": {"row_count": 60},
         "cleaning_report": {"decisions": [], "summary": ""},
-        "profiler_top_3_concerns": [],
+        "profiler_top_3_concerns": copy.deepcopy(_CONCERNS),
         "profiler_top_3_patterns": [],
     }
     with (
@@ -1009,3 +1006,560 @@ def test_floor_parent_rule_applies_even_when_entries_are_malformed() -> None:
     assert response["correlation"]["strong_correlations"] == "not a list"
     assert response["correlation"]["confidence_level"] == _CD
     assert response["correlation"]["floor_override"]["original_confidence_level"] == "Low"
+
+
+# ---------------------------------------------------------------------------
+# Group 13 — the structural self-evaluation loop (Build J)
+# ---------------------------------------------------------------------------
+
+_CONCERNS = [
+    {"issue": "z is missing in 36 of 60 rows", "affected_columns": ["z"], "why_it_matters": "z pairs rest on 24 rows"},
+    {"issue": "x is missing in the last 10 rows", "affected_columns": ["x"], "why_it_matters": "x and z overlap on 14 rows"},
+    {"issue": "60 rows across three batches", "affected_columns": ["batch"], "why_it_matters": "20 rows per batch"},
+]
+
+
+def _addressed(ids: list, finding: str = "investigated", confidence: str = "Low") -> list:
+    return [
+        {"concern_id": cid, "concern": "text", "investigation": "i", "finding": finding, "confidence_level": confidence}
+        for cid in ids
+    ]
+
+
+def _sparse_strong_pairs() -> list:
+    return _correlation_for(_sparse())["strong_pairs"]
+
+
+def _passing(marker: int = 1, **overrides: object) -> dict:
+    """A response meeting (a), (b) and (e) for sparse_pairs.csv and _CONCERNS."""
+    response = {
+        "call_marker": marker,
+        "correlation": {
+            "strong_correlations": [
+                _entry("x", "y", confidence="Moderate"),
+                _entry("y", "z", confidence=_CD),
+                _entry("x", "z", confidence=_CD),
+            ],
+            "confidence_level": "Low",
+            "confidence_reasoning": "reasoning",
+        },
+        "profiler_concerns_addressed": _addressed(["C1", "C2", "C3"]),
+        "most_important_finding": "x and y rise together over the run",
+        "most_surprising_finding": "z tracks y closely",
+        "open_questions": [],
+    }
+    response.update(overrides)
+    return response
+
+
+def _check(response: object, concerns: list = _CONCERNS, pairs: object = "sparse") -> list:
+    correlation_result = {"strong_pairs": _sparse_strong_pairs()} if pairs == "sparse" else pairs
+    return check_self_evaluation(response, concerns, correlation_result)[1]
+
+
+def _criteria(failures: list) -> list:
+    return [f["criterion"] for f in failures]
+
+
+def test_number_concerns_assigns_ids_in_order_without_mutating() -> None:
+    concerns = copy.deepcopy(_CONCERNS) + ["a plain string concern"]
+    concerns[1]["concern_id"] = "model-supplied"
+    before = copy.deepcopy(concerns)
+    numbered = analyzer.number_concerns(concerns)
+    assert [c["concern_id"] for c in numbered] == ["C1", "C2", "C3", "C4"]
+    assert numbered[0]["issue"] == _CONCERNS[0]["issue"]
+    assert numbered[3] == {"concern_id": "C4", "issue": "a plain string concern"}
+    assert concerns == before
+    assert analyzer.number_concerns(None) == []
+
+
+def test_message_sends_concern_ids_and_leaves_profile_report_unchanged() -> None:
+    profile_report = {"top_3_concerns": copy.deepcopy(_CONCERNS)}
+    sent = json.loads(_minimal_analyzer_message(
+        top_3_concerns=copy.deepcopy(_CONCERNS), profile_report=profile_report
+    ))
+    assert [c["concern_id"] for c in sent["MANDATORY_INVESTIGATION_AGENDA"]["concerns"]] == ["C1", "C2", "C3"]
+    assert all("concern_id" not in c for c in sent["profile_report"]["top_3_concerns"])
+    assert profile_report == {"top_3_concerns": _CONCERNS}
+
+
+def test_check_passes_a_complete_response_without_the_word_anomaly() -> None:
+    response = _passing()
+    assert "anomal" not in json.dumps(response).lower()
+    assert _check(response) == []
+
+
+def test_check_a_every_id_in_any_order_passes() -> None:
+    response = _passing(profiler_concerns_addressed=_addressed(["C3", "C1", "C2", "C9"]))
+    assert _check(response) == []
+
+
+def test_check_a_requires_all_ids_not_any() -> None:
+    failures = _check(_passing(profiler_concerns_addressed=_addressed(["C1"])))
+    assert failures == [{
+        "criterion": "(a)",
+        "reason": "Profiler concerns not addressed: C2 has no entry; C3 has no entry.",
+    }]
+
+
+def test_check_a_names_an_empty_finding_and_an_invalid_label() -> None:
+    entries = _addressed(["C1"]) + _addressed(["C2"], finding="  ") + _addressed(["C3"], confidence="low")
+    failures = _check(_passing(profiler_concerns_addressed=entries))
+    assert failures == [{
+        "criterion": "(a)",
+        "reason": (
+            "Profiler concerns not addressed: C2 has an empty finding; "
+            "C3 has no valid confidence_level."
+        ),
+    }]
+
+
+def test_check_a_ignores_the_concern_text_and_the_str_dict_form() -> None:
+    """Structural: entries whose text copies the concern verbatim but carry no id fail;
+    a response containing the concerns' dict repr but no ids fails too."""
+    no_ids = [{**e, "concern": _CONCERNS[i]["issue"]} for i, e in enumerate(_addressed(["C1", "C2", "C3"]))]
+    for entry in no_ids:
+        del entry["concern_id"]
+    response = _passing(profiler_concerns_addressed=no_ids, notes=str(_CONCERNS))
+    assert _criteria(_check(response)) == ["(a)"]
+
+
+@pytest.mark.parametrize("value", [None, "not a list", {"C1": "x"}])
+def test_check_a_not_a_list_fails(value: object) -> None:
+    failures = _check(_passing(profiler_concerns_addressed=value))
+    assert failures[0]["criterion"] == "(a)"
+    assert "C1, C2, C3" in failures[0]["reason"]
+
+
+def test_check_a_without_concerns_passes() -> None:
+    response = _passing()
+    del response["profiler_concerns_addressed"]
+    assert _check(response, concerns=[]) == []
+
+
+def test_check_b_reversed_order_passes() -> None:
+    response = _passing()
+    response["correlation"]["strong_correlations"] = [
+        _entry("y", "x"), _entry("z", "y"), _entry("z", "x")
+    ]
+    assert _check(response) == []
+
+
+def test_check_b_meets_exactly_the_prompts_stated_minimum() -> None:
+    """analyzer_system.md Step 4: "At least two" mechanisms and confounders — exactly two passes."""
+    response = _passing()
+    for entry in response["correlation"]["strong_correlations"]:
+        entry["mechanisms"], entry["confounders"] = ["m1", "m2"], ["c1", "c2"]
+    assert _check(response) == []
+
+
+def test_check_b_missing_pair_named() -> None:
+    response = _passing()
+    response["correlation"]["strong_correlations"] = [_entry("x", "y"), _entry("y", "z"), _entry("x", "batch")]
+    assert _check(response) == [{
+        "criterion": "(b)",
+        "reason": "Strong correlations not fully investigated: x × z has no entry.",
+    }]
+
+
+def test_check_b_names_missing_elements() -> None:
+    response = _passing()
+    entry = response["correlation"]["strong_correlations"][2]
+    entry.update({"mechanisms": ["m1", ""], "confounders": ["c1"], "causality_label": "correlation",
+                  "what_would_establish_causality": "", "r": None, "n": None, "confidence_level": "low"})
+    reason = _check(response)[0]["reason"]
+    assert reason == (
+        "Strong correlations not fully investigated: x × z lacks r, n, a valid "
+        "confidence_level, at least two mechanisms, at least two confounders, "
+        'what_would_establish_causality, the exact causality_label "This is correlation, not causation.".'
+    )
+
+
+def test_check_b_is_not_a_substring_check() -> None:
+    """Column names mentioned in prose do not stand in for the entries."""
+    response = _passing(most_important_finding="x, y and z are all strongly related")
+    response["correlation"]["strong_correlations"] = []
+    assert _criteria(_check(response)) == ["(b)"]
+
+
+def test_check_b_ignores_extra_non_strong_entries_and_passes_without_strong_pairs() -> None:
+    response = _passing()
+    response["correlation"]["strong_correlations"].append({"column_a": "x", "column_b": "batch"})
+    assert _check(response) == []
+    response = _passing(correlation=None)
+    assert _check(response, pairs={"strong_pairs": []}) == []
+    assert _check(response, pairs=None) == []
+
+
+def test_check_b_null_correlation_with_strong_pairs_fails_every_pair() -> None:
+    reason = _check(_passing(correlation=None))[0]["reason"]
+    assert reason.count("has no entry") == 3
+
+
+@pytest.mark.parametrize("important, surprising, reason", [
+    ("", "b", "most_important_finding is empty."),
+    ("a", None, "most_surprising_finding is empty."),
+    ({"not": "text"}, "  ", "most_important_finding and most_surprising_finding are empty."),
+    ("same", " same ", "most_important_finding and most_surprising_finding are identical."),
+])
+def test_check_e(important: object, surprising: object, reason: str) -> None:
+    failures = _check(_passing(most_important_finding=important, most_surprising_finding=surprising))
+    assert failures == [{"criterion": "(e)", "reason": reason}]
+
+
+def test_check_non_object_response_fails_every_criterion_without_raising() -> None:
+    failures = _check([_passing()])
+    assert _criteria(failures) == ["(response)", "(a)", "(b)", "(e)"]
+    assert failures[0]["reason"] == "The response is a JSON list, not the AnalysisReport object."
+
+
+@pytest.mark.parametrize("response", [
+    {},
+    {"correlation": "x", "profiler_concerns_addressed": [None, 3, "C1"], "most_important_finding": 5},
+    {"correlation": {"strong_correlations": [None, {"column_a": ["x"], "column_b": "y"}, {"column_a": "x", "column_b": "x"}]}},
+    {"profiler_concerns_addressed": [{"concern_id": ["C1"]}, {"concern_id": "C1", "finding": 7}]},
+])
+def test_check_never_raises_on_malformed_shapes(response: dict) -> None:
+    all_passed, failures = check_self_evaluation(response, _CONCERNS, {"strong_pairs": _sparse_strong_pairs()})
+    assert all_passed is False
+    assert {"(a)", "(b)"} <= set(_criteria(failures))
+
+
+def test_check_records_one_failure_per_criterion_not_per_item() -> None:
+    response = _passing(profiler_concerns_addressed=_addressed(["C1"]))
+    response["correlation"]["strong_correlations"] = [_entry("x", "y")]
+    failures = _check(response)
+    assert _criteria(failures) == ["(a)", "(b)"]
+
+
+# --- node level -------------------------------------------------------------
+
+
+def _raw(item: object) -> tuple:
+    """(stop_reason, text) for one canned model response."""
+    if isinstance(item, (tuple, Exception)):
+        return item
+    return ("end_turn", json.dumps(item))
+
+
+def _run_node(
+    tmp_path: pathlib.Path,
+    responses: list,
+    charts: list | None = None,
+    concerns: object = None,
+) -> dict:
+    parquet_path = tmp_path / "cleaned.parquet"
+    _sparse().to_parquet(parquet_path, index=False)
+    cleaned = pd.read_parquet(parquet_path)
+    queue = [_raw(item) for item in responses]
+    sent: list = []
+
+    def stream(**kwargs: object) -> MagicMock:
+        sent.append(json.loads(kwargs["messages"][0]["content"]))
+        item = queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        stop_reason, text = item
+        message = MagicMock()
+        message.stop_reason = stop_reason
+        message.content = [] if text is None else [MagicMock(text=text)]
+        manager = MagicMock()
+        manager.__enter__.return_value.get_final_message.return_value = message
+        return manager
+
+    supabase = MagicMock()
+    at_save_time: list = []
+
+    def update(payload: dict) -> MagicMock:
+        at_save_time.append(copy.deepcopy(payload))
+        return MagicMock()
+
+    supabase.table.return_value.update.side_effect = update
+    state = {
+        "analysis_id": "build-j-node",
+        "profile_report": {"row_count": 60},
+        "cleaning_report": {"decisions": [], "summary": ""},
+        "profiler_top_3_concerns": copy.deepcopy(_CONCERNS if concerns is None else concerns),
+        "profiler_top_3_patterns": [],
+    }
+    with (
+        patch("backend.agents.analyzer.get_supabase_client", return_value=supabase),
+        patch("backend.agents.analyzer.load_cleaned_dataframe", new=AsyncMock(return_value=cleaned)),
+        patch("backend.agents.analyzer.cleanup_temp_file", new=AsyncMock()),
+        patch("backend.agents.analyzer.generate_all_charts", return_value=["chart.png"] if charts is None else charts),
+        patch("backend.agents.analyzer.create_tracer", return_value=MagicMock()),
+        patch("backend.agents.analyzer.apply_correlation_floor", wraps=apply_correlation_floor) as floor,
+        patch.object(analyzer.client.messages, "stream", side_effect=stream),
+    ):
+        try:
+            result: object = asyncio.run(analyzer_node(state))
+        except Exception as exc:  # noqa: BLE001 — the test inspects it
+            result = exc
+    reports = [p["analysis_report"] for p in at_save_time if "analysis_report" in p]
+    return {"result": result, "sent": sent, "reports": reports, "floor": floor, "saves": at_save_time}
+
+
+def test_node_all_criteria_met_on_call_1_makes_one_call(tmp_path: pathlib.Path) -> None:
+    run = _run_node(tmp_path, [_passing(1)])
+    assert len(run["sent"]) == 1
+    assert "SELF_EVALUATION_FAILED" not in run["sent"][0]
+    [report] = run["reports"]
+    assert report["call_marker"] == 1
+    assert report["self_evaluation_loops"] == 1
+    assert report["unmet_criteria"] == []
+    assert "self_evaluation_gaps" not in report
+
+
+def test_node_real_a_failure_retries_once_naming_the_id(tmp_path: pathlib.Path) -> None:
+    first = _passing(1, profiler_concerns_addressed=_addressed(["C1", "C3"]))
+    run = _run_node(tmp_path, [first, _passing(2)])
+    assert len(run["sent"]) == 2
+    assert run["sent"][1]["SELF_EVALUATION_FAILED"]["failed_criteria"] == [{
+        "criterion": "(a)", "reason": "Profiler concerns not addressed: C2 has no entry.",
+    }]
+    [report] = run["reports"]
+    assert report["call_marker"] == 2
+    assert report["self_evaluation_loops"] == 2
+    assert report["unmet_criteria"] == []
+
+
+def test_node_wrong_shape_is_retried_not_a_crash(tmp_path: pathlib.Path) -> None:
+    run = _run_node(tmp_path, [[_passing(1)], _passing(2)])
+    assert not isinstance(run["result"], Exception)
+    assert len(run["sent"]) == 2
+    assert run["reports"][0]["call_marker"] == 2
+
+
+def test_node_keeps_the_response_with_fewest_failed_criteria_and_floors_it_once(tmp_path: pathlib.Path) -> None:
+    call_1 = _passing(1, most_surprising_finding="")                                   # (e)
+    call_2 = _passing(2, most_surprising_finding="", profiler_concerns_addressed=[])  # (a), (e)
+    call_3 = _passing(3, most_surprising_finding="", profiler_concerns_addressed=[], correlation=None)
+    run = _run_node(tmp_path, [call_1, call_2, call_3])
+    assert len(run["sent"]) == 3
+    [report] = run["reports"]
+    assert report["call_marker"] == 1
+    assert run["floor"].call_count == 1
+    assert run["floor"].call_args.args[0]["call_marker"] == 1
+    assert report["self_evaluation_loops"] == 3
+    assert report["unmet_criteria"] == [{"criterion": "(e)", "reason": "most_surprising_finding is empty."}]
+    # the floor ran on the kept response: y × z (n = 24) is Cannot Determine, x × y untouched
+    by_pair = {frozenset((e["column_a"], e["column_b"])): e for e in report["correlation"]["strong_correlations"]}
+    assert by_pair[frozenset(("x", "y"))]["confidence_level"] == "Moderate"
+    assert by_pair[frozenset(("y", "z"))]["n"] == 24
+
+
+def test_node_tie_keeps_the_earlier_response(tmp_path: pathlib.Path) -> None:
+    call_1 = _passing(1, most_surprising_finding="")                          # (e)
+    call_2 = _passing(2, profiler_concerns_addressed=_addressed(["C1"]))      # (a)
+    call_3 = _passing(3, most_surprising_finding="", profiler_concerns_addressed=[])
+    run = _run_node(tmp_path, [call_1, call_2, call_3])
+    assert run["reports"][0]["call_marker"] == 1
+
+
+def test_node_counts_failed_criteria_not_items(tmp_path: pathlib.Path) -> None:
+    call_1 = _passing(1, profiler_concerns_addressed=[])                                  # (a): 3 items
+    call_2 = _passing(2, profiler_concerns_addressed=_addressed(["C1", "C2"]), most_surprising_finding="")  # (a) 1 item, (e)
+    call_3 = _passing(3, most_surprising_finding="", correlation=None, profiler_concerns_addressed=[])
+    run = _run_node(tmp_path, [call_1, call_2, call_3])
+    assert run["reports"][0]["call_marker"] == 1
+
+
+def test_node_always_failing_stops_at_three_calls(tmp_path: pathlib.Path) -> None:
+    failing = _passing(1, most_surprising_finding="")
+    run = _run_node(tmp_path, [failing, failing, failing, _passing(4)])
+    assert len(run["sent"]) == 3
+    assert run["reports"][0]["self_evaluation_loops"] == 3
+
+
+def test_node_unparseable_retry_keeps_the_earlier_response(tmp_path: pathlib.Path) -> None:
+    call_1 = _passing(1, most_surprising_finding="")
+    run = _run_node(tmp_path, [call_1, ("end_turn", "not json {"), ("end_turn", "still not json")])
+    assert not isinstance(run["result"], Exception)
+    [report] = run["reports"]
+    assert report["call_marker"] == 1
+    assert report["self_evaluation_loops"] == 3
+    assert _criteria(report["unmet_criteria"]) == ["(e)", "(unusable retry)", "(unusable retry)"]
+    assert report["unmet_criteria"][1]["reason"] == (
+        "Retry call 2 could not be used (the response was not valid JSON); the response "
+        "from call 1 was kept."
+    )
+    assert "Response preview" not in json.dumps(report["unmet_criteria"])
+    # the call after an unusable retry is told so, with the kept response's failures
+    assert run["sent"][2]["SELF_EVALUATION_FAILED"]["failed_criteria"] == [
+        {"criterion": "(e)", "reason": "most_surprising_finding is empty."},
+        {"criterion": "(unusable retry)", "reason": (
+            "Your previous response could not be used: the response was not valid JSON. "
+            "Return one complete AnalysisReport JSON object.")},
+    ]
+    assert not any(s.get("status") == "error" for s in run["saves"])
+
+
+def test_node_unparseable_retry_before_a_passing_call_is_not_recorded(tmp_path: pathlib.Path) -> None:
+    call_1 = _passing(1, most_surprising_finding="")
+    run = _run_node(tmp_path, [call_1, ("end_turn", "not json {"), _passing(3)])
+    [report] = run["reports"]
+    assert report["call_marker"] == 3
+    assert report["unmet_criteria"] == []
+
+
+def test_node_truncated_retry_is_unusable_not_an_error(tmp_path: pathlib.Path) -> None:
+    call_1 = _passing(1, most_surprising_finding="")
+    run = _run_node(tmp_path, [call_1, ("max_tokens", '{"cut'), ("max_tokens", '{"cut')])
+    [report] = run["reports"]
+    assert report["call_marker"] == 1
+    assert report["unmet_criteria"][1]["reason"] == (
+        "Retry call 2 could not be used (the response was truncated at the output-token "
+        "ceiling); the response from call 1 was kept."
+    )
+
+
+def test_node_unparseable_first_call_still_raises(tmp_path: pathlib.Path) -> None:
+    run = _run_node(tmp_path, [("end_turn", "not json {"), _passing(2)])
+    assert isinstance(run["result"], ValueError)
+    assert len(run["sent"]) == 1
+    assert run["reports"] == []
+    assert any(s.get("status") == "error" for s in run["saves"])
+
+
+def test_node_non_object_on_every_call_raises_clearly(tmp_path: pathlib.Path) -> None:
+    run = _run_node(tmp_path, [[1], [2], [3]])
+    assert isinstance(run["result"], ValueError)
+    assert str(run["result"]) == (
+        "Analyzer produced no usable AnalysisReport object in 3 calls: call 1: a JSON list; "
+        "call 2: a JSON list; call 3: a JSON list."
+    )
+
+
+def test_node_empty_charts_recorded_not_retried(tmp_path: pathlib.Path) -> None:
+    run = _run_node(tmp_path, [_passing(1)], charts=[])
+    assert len(run["sent"]) == 1
+    assert run["reports"][0]["unmet_criteria"] == [{
+        "criterion": "(d)",
+        "reason": (
+            "No charts were generated (chart_paths is empty). The system renders the "
+            "charts before the analysis call, so a retry cannot add them."
+        ),
+    }]
+
+
+def test_node_overwrites_model_written_loop_record(tmp_path: pathlib.Path) -> None:
+    response = _passing(1, self_evaluation_loops=2, unmet_criteria=[{"criterion": "(c)", "reason": "x"}],
+                        self_evaluation_gaps=["(a) profiler concerns not addressed"])
+    report = _run_node(tmp_path, [response])["reports"][0]
+    assert report["self_evaluation_loops"] == 1
+    assert report["unmet_criteria"] == []
+    assert "self_evaluation_gaps" not in report
+
+
+def test_analyzer_prompt_describes_the_system_check() -> None:
+    prompt = load_system_prompt("analyzer")
+    assert '"concern_id":       string,                     // copy the concern_id from MANDATORY_INVESTIGATION_AGENDA' in prompt
+    assert '"self_evaluation_loops": integer' not in prompt
+    assert '"unmet_criteria": [' not in prompt
+    assert "You do not see any previous response and you do not count loops" in prompt
+    assert "Set `loop_count` to 1" not in prompt
+
+
+def test_node_api_error_on_a_retry_keeps_the_earlier_response(tmp_path: pathlib.Path) -> None:
+    call_1 = _passing(1, most_surprising_finding="")
+    run = _run_node(tmp_path, [call_1, RuntimeError("529 overloaded"), _passing(3)])
+    assert not isinstance(run["result"], Exception)
+    assert run["reports"][0]["call_marker"] == 3
+    assert run["sent"][2]["SELF_EVALUATION_FAILED"]["failed_criteria"][-1]["reason"] == (
+        "Your previous response could not be used: the call failed (RuntimeError). "
+        "Return one complete AnalysisReport JSON object."
+    )
+
+
+def test_node_api_error_on_the_first_call_still_raises(tmp_path: pathlib.Path) -> None:
+    run = _run_node(tmp_path, [RuntimeError("529 overloaded"), _passing(2)])
+    assert isinstance(run["result"], RuntimeError)
+    assert run["reports"] == []
+
+
+def test_node_empty_content_on_a_retry_is_unusable(tmp_path: pathlib.Path) -> None:
+    """A response with no content blocks (e.g. a refusal) raises IndexError on content[0]."""
+    call_1 = _passing(1, most_surprising_finding="")
+    run = _run_node(tmp_path, [call_1, ("refusal", None), ("end_turn", None)])
+    [report] = run["reports"]
+    assert report["call_marker"] == 1
+    assert _criteria(report["unmet_criteria"]) == ["(e)", "(unusable retry)", "(unusable retry)"]
+    assert report["unmet_criteria"][1]["reason"].startswith("Retry call 2 could not be used (the response had no text content)")
+
+
+def test_node_error_names_each_calls_outcome(tmp_path: pathlib.Path) -> None:
+    run = _run_node(tmp_path, [[1], ("max_tokens", '{"cut'), ("end_turn", "nope")])
+    assert str(run["result"]) == (
+        "Analyzer produced no usable AnalysisReport object in 3 calls: call 1: a JSON list; "
+        "call 2: the response was truncated at the output-token ceiling; call 3: the "
+        "response was not valid JSON."
+    )
+
+
+def test_check_b_accepts_any_present_r_and_n() -> None:
+    """Python overwrites r and n after the loop; only their presence is required."""
+    response = _passing()
+    for entry in response["correlation"]["strong_correlations"]:
+        entry["r"], entry["n"] = "0.82", 60.0
+    assert _check(response) == []
+
+
+def test_number_concerns_treats_a_non_list_value_as_one_concern() -> None:
+    assert analyzer.number_concerns({"issue": "only one"}) == [{"concern_id": "C1", "issue": "only one"}]
+    assert analyzer.number_concerns("a string") == [{"concern_id": "C1", "issue": "a string"}]
+    assert analyzer.number_concerns({}) == []
+
+
+def test_analyzer_prompt_section_13_allows_any_number_of_concerns() -> None:
+    prompt = load_system_prompt("analyzer")
+    assert "one entry per concern in `MANDATORY_INVESTIGATION_AGENDA` (normally three)" in prompt
+    assert "must contain exactly three entries" not in prompt
+
+
+def test_node_next_call_hears_the_kept_responses_gaps_too(tmp_path: pathlib.Path) -> None:
+    call_1 = _passing(1, most_surprising_finding="")                                  # (e) — kept
+    call_2 = _passing(2, profiler_concerns_addressed=[], correlation=None)             # (a), (b)
+    run = _run_node(tmp_path, [call_1, call_2, _passing(3)])
+    assert _criteria(run["sent"][2]["SELF_EVALUATION_FAILED"]["failed_criteria"]) == ["(e)", "(a)", "(b)"]
+    assert "earlier responses in this analysis" in run["sent"][2]["SELF_EVALUATION_FAILED"]["label"]
+    assert run["reports"][0]["call_marker"] == 3
+
+
+def test_check_tolerates_surrounding_whitespace_in_ids_and_label() -> None:
+    response = _passing(profiler_concerns_addressed=_addressed([" C1", "C2 ", "C3"]))
+    for entry in response["correlation"]["strong_correlations"]:
+        entry["causality_label"] = " This is correlation, not causation. "
+    assert _check(response) == []
+    response["correlation"]["strong_correlations"][0]["causality_label"] = "This is correlation, not causation"
+    assert _criteria(_check(response)) == ["(b)"]
+
+
+def test_check_describes_the_most_nearly_complete_candidate() -> None:
+    entries = _addressed(["C1", "C3"]) + [
+        {"concern_id": "C2", "finding": "", "confidence_level": "low"},
+        {"concern_id": "C2", "finding": "found", "confidence_level": "low"},
+    ]
+    assert _check(_passing(profiler_concerns_addressed=entries))[0]["reason"] == (
+        "Profiler concerns not addressed: C2 has no valid confidence_level."
+    )
+
+
+def test_node_other_errors_on_a_retry_are_reported_as_the_call_failing(tmp_path: pathlib.Path) -> None:
+    call_1 = _passing(1, most_surprising_finding="")
+    run = _run_node(tmp_path, [call_1, ValueError("pydantic validation"), ("end_turn", "nope")])
+    reasons = [u["reason"] for u in run["reports"][0]["unmet_criteria"]]
+    assert reasons[1] == "Retry call 2 could not be used (the call failed (ValueError)); the response from call 1 was kept."
+    assert reasons[2] == "Retry call 3 could not be used (the response was not valid JSON); the response from call 1 was kept."
+
+
+def test_node_warns_once_for_non_list_concerns(tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture) -> None:
+    concern = {"issue": "the only concern"}
+    call_1 = _passing(1, profiler_concerns_addressed=[])
+    with caplog.at_level("WARNING", logger="backend.agents.analyzer"):
+        run = _run_node(tmp_path, [call_1, _passing(2, profiler_concerns_addressed=_addressed(["C1"]))], concerns=concern)
+    assert [c["concern_id"] for c in run["sent"][0]["MANDATORY_INVESTIGATION_AGENDA"]["concerns"]] == ["C1"]
+    assert sum("not a list" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_analyzer_prompt_concern_field_is_the_issue_text() -> None:
+    assert "// the concern's issue text, verbatim" in load_system_prompt("analyzer")
