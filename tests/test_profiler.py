@@ -38,6 +38,7 @@ from backend.agents.profiler import (
     load_system_prompt,
     parse_json_response,
     profiler_node,
+    rebuild_model_domain_pause,
 )
 
 FIXTURES_DIR = pathlib.Path(__file__).parent / "fixtures"
@@ -863,12 +864,18 @@ def test_profiler_node_resume_that_repauses_raises_instead_of_looping(ambiguous_
     assert state["domain_pause_data"] is None
 
 
-def test_profiler_node_first_run_pause_is_unchanged(ambiguous_df: pd.DataFrame) -> None:
+def test_profiler_node_first_run_model_pause_is_rebuilt_through_the_template(ambiguous_df: pd.DataFrame) -> None:
+    """Build L flipped this test: it asserted the model's pause was stored verbatim.
+
+    A model-emitted pause is now rebuilt through the gate's template, so its
+    own labels ("Yes. Proceed." / "No.") are replaced by Python's."""
     state = {"analysis_id": "test-analysis-id", "stored_filename": "ambiguous_domain.csv", "context": None}
     result, captured, create = _run_profiler_node(ambiguous_df, state, AMBIGUOUS_PAUSE)
 
     assert "domain_resolution" not in json.loads(create.call_args.kwargs["messages"][0]["content"])
-    assert result["domain_pause_data"] == AMBIGUOUS_PAUSE
+    assert result["domain_pause_data"] == _template_pause(
+        "operational performance tracking", 41, ["generic metric columns x1-x3", "period index 1-8"]
+    )
     assert result["domain_confirmed"] is False
     assert not any("profile_report" in payload for payload in captured)
 
@@ -1168,3 +1175,210 @@ def test_profiler_node_counts_duplicates_over_every_column_of_a_wide_file() -> N
     assert json.loads(create.call_args.kwargs["messages"][0]["content"])["duplicate_row_count"] == 1
     saved = [payload["profile_report"] for payload in captured if "profile_report" in payload]
     assert saved[0]["duplicate_row_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Group 15 — a model-emitted domain pause is rebuilt through the gate's template (Build L)
+# ---------------------------------------------------------------------------
+
+# The live F2 Tier A pause (.live/tierA.json first_call.domain_pause_data): the
+# only domain pause that has reached a real user-facing path, synthesized by the gate.
+TIER_A_GOLDEN_PATH = FIXTURES_DIR / "domain_pause_tierA.json"
+
+
+def _template_pause(hypothesis: str, score: object, signals: list) -> dict:
+    """profiler_system.md Section 8's pause, written out independently of the code."""
+    return {
+        "type": "domain_confirmation_required",
+        "domain_hypothesis": hypothesis,
+        "domain_confidence_score": score,
+        "supporting_signals": signals,
+        "options": [
+            {"id": "confirm", "label": f"Yes, this is {hypothesis}. Proceed.", "action": "proceed_with_hypothesis"},
+            {"id": "correct", "label": "No, the correct domain is something else.", "action": "request_user_specified_domain"},
+        ],
+    }
+
+
+def _odd_model_pause(**overrides: object) -> dict:
+    """A model-emitted pause that breaks the prompt's exact-id contract."""
+    pause = {
+        "type": "domain_confirmation_required",
+        "domain_hypothesis": "  retail sales ",
+        "domain_confidence_score": 41,
+        "supporting_signals": ["sku column", "order dates"],
+        "options": [
+            {"id": "yes", "label": "Looks right!", "action": "proceed"},
+            {"id": "no", "label": "Nope", "action": "ask"},
+            {"id": "skip", "label": "Skip"},
+        ],
+        "note": "an extra key the template does not have",
+    }
+    pause.update(overrides)
+    return pause
+
+
+def _tier_a_full_report() -> dict:
+    """The full ProfileReport the gate converted live: 'unknown' at 22 with the 8 signals."""
+    golden = json.loads(TIER_A_GOLDEN_PATH.read_text())
+    report = _ambiguous_profile_report("unknown", 22)
+    report["domain_supporting_signals"] = golden["supporting_signals"]
+    return report
+
+
+def test_synthesized_pause_is_byte_identical_to_the_live_tier_a_pause() -> None:
+    golden_text = json.dumps(json.loads(TIER_A_GOLDEN_PATH.read_text()))
+    assert json.dumps(apply_confidence_gate(_tier_a_full_report())) == golden_text
+
+
+def test_profiler_node_stores_the_live_tier_a_pause_byte_identical(ambiguous_df: pd.DataFrame) -> None:
+    golden_text = json.dumps(json.loads(TIER_A_GOLDEN_PATH.read_text()))
+    result, _, _ = _run_profiler_node(ambiguous_df, _first_run_state(), _tier_a_full_report())
+    assert json.dumps(result["domain_pause_data"]) == golden_text
+
+
+def test_apply_confidence_gate_keeps_non_string_signals_unchanged() -> None:
+    report = _ambiguous_profile_report("education", 35)
+    report["domain_supporting_signals"] = ["period index", 3, "", None, {"k": "v"}]
+    assert apply_confidence_gate(report)["supporting_signals"] == ["period index", 3, "", None, {"k": "v"}]
+
+
+def test_profiler_node_never_rebuilds_a_synthesized_pause(ambiguous_df: pd.DataFrame) -> None:
+    """The gate's pause is stored exactly as the gate wrote it, non-string signals included."""
+    report = _ambiguous_profile_report("education", 35)
+    report["domain_supporting_signals"] = ["period index", 3, ""]
+    result, _, _ = _run_profiler_node(ambiguous_df, _first_run_state(), report)
+    assert result["domain_pause_data"]["supporting_signals"] == ["period index", 3, ""]
+
+
+def test_rebuild_model_pause_is_exactly_the_template() -> None:
+    rebuilt = rebuild_model_domain_pause(_odd_model_pause())
+    assert json.dumps(rebuilt) == json.dumps(
+        _template_pause("  retail sales ", 41, ["sku column", "order dates"])
+    )
+
+
+def test_profiler_node_stores_an_odd_model_pause_as_exactly_the_template(ambiguous_df: pd.DataFrame) -> None:
+    result, captured, _ = _run_profiler_node(ambiguous_df, _first_run_state(), _odd_model_pause())
+
+    assert json.dumps(result["domain_pause_data"]) == json.dumps(
+        _template_pause("  retail sales ", 41, ["sku column", "order dates"])
+    )
+    assert result["domain_confirmed"] is False
+    assert not any("profile_report" in payload for payload in captured)
+
+
+@pytest.mark.parametrize("hypothesis", ["missing", "", "   ", None, 7, ["retail"]],
+                         ids=["missing", "empty", "blank", "none", "int", "list"])
+def test_rebuild_model_pause_rejects_an_unusable_hypothesis(hypothesis: object) -> None:
+    pause = _odd_model_pause()
+    if hypothesis == "missing":
+        del pause["domain_hypothesis"]
+    else:
+        pause["domain_hypothesis"] = hypothesis
+    with pytest.raises(ValueError, match="no domain_hypothesis to confirm"):
+        rebuild_model_domain_pause(pause)
+
+
+@pytest.mark.parametrize(
+    "score",
+    ["missing", None, True, "35", float("nan"), float("inf")],
+    ids=["missing", "none", "bool", "string", "nan", "inf"],
+)
+def test_rebuild_model_pause_rejects_an_unusable_score(score: object) -> None:
+    pause = _odd_model_pause()
+    if score == "missing":
+        del pause["domain_confidence_score"]
+    else:
+        pause["domain_confidence_score"] = score
+    with pytest.raises(ValueError, match="no usable domain_confidence_score"):
+        rebuild_model_domain_pause(pause)
+
+
+@pytest.mark.parametrize("score", [80, 91, 100, 79.5], ids=["80", "91", "100", "79.5"])
+def test_rebuild_model_pause_keeps_the_score_including_80_and_above(score: float) -> None:
+    assert rebuild_model_domain_pause(_odd_model_pause(domain_confidence_score=score))["domain_confidence_score"] == score
+
+
+@pytest.mark.parametrize(
+    "signals, expected",
+    [
+        ("a single string", []),
+        (None, []),
+        ({"a": 1}, []),
+        ([" keep me ", 3, "", "   ", None, {"k": "v"}, "and me"], [" keep me ", "and me"]),
+    ],
+    ids=["string", "none", "dict", "mixed-list"],
+)
+def test_rebuild_model_pause_coerces_signals(signals: object, expected: list) -> None:
+    pause = _odd_model_pause(supporting_signals=signals)
+    assert rebuild_model_domain_pause(pause)["supporting_signals"] == expected
+
+
+def test_rebuild_model_pause_treats_missing_signals_as_empty() -> None:
+    pause = _odd_model_pause()
+    del pause["supporting_signals"]
+    assert rebuild_model_domain_pause(pause)["supporting_signals"] == []
+
+
+@pytest.mark.parametrize(
+    "overrides, match",
+    [
+        ({"domain_hypothesis": "   "}, "SYSTEM_ERROR: The Profiler's domain pause has no domain_hypothesis"),
+        ({"domain_confidence_score": "high"}, "SYSTEM_ERROR: The Profiler's domain pause has no usable"),
+    ],
+    ids=["blank-hypothesis", "string-score"],
+)
+def test_profiler_node_unusable_model_pause_is_system_error_with_nothing_stored(
+    ambiguous_df: pd.DataFrame, overrides: dict, match: str
+) -> None:
+    state = _first_run_state()
+    result, captured, _ = _run_profiler_node(ambiguous_df, state, _odd_model_pause(**overrides))
+
+    assert isinstance(result, ValueError)
+    assert state.get("domain_pause_data") is None
+    assert captured[-1]["status"] == "error"
+    assert captured[-1]["error_message"].startswith(match)
+    assert not any("pause_data" in payload or "profile_report" in payload for payload in captured)
+
+
+@pytest.mark.parametrize("answer", [CONFIRM, CORRECT], ids=["confirm", "correct"])
+@pytest.mark.parametrize(
+    "pause_source",
+    ["odd-model", "template-labelled-model", "unknown-model", "high-score-model"],
+)
+def test_build_domain_resolution_succeeds_on_every_rebuilt_pause(pause_source: str, answer: dict) -> None:
+    source = {
+        "odd-model": _odd_model_pause(),
+        "template-labelled-model": copy.deepcopy(AMBIGUOUS_PAUSE),
+        "unknown-model": _odd_model_pause(domain_hypothesis="unknown", domain_confidence_score=22),
+        "high-score-model": _odd_model_pause(domain_confidence_score=91),
+    }[pause_source]
+    rebuilt = rebuild_model_domain_pause(source)
+
+    resolution = build_domain_resolution(rebuilt, answer)
+
+    if answer is CONFIRM:
+        assert resolution == {
+            "source": "user_confirmed",
+            "domain": source["domain_hypothesis"].strip(),
+            "original_hypothesis": source["domain_hypothesis"],
+            "original_confidence_score": source["domain_confidence_score"],
+            "original_supporting_signals": rebuilt["supporting_signals"],
+        }
+    else:
+        assert resolution["source"] == "user_corrected"
+        assert resolution["domain"] == "school classroom assessment records"
+    assert [option["id"] for option in rebuilt["options"]] == ["confirm", "correct"]
+
+
+def test_rebuild_model_pause_warns_only_when_the_option_ids_break_the_contract(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.INFO, logger="backend.agents.profiler"):
+        rebuild_model_domain_pause(_odd_model_pause())
+        rebuild_model_domain_pause(copy.deepcopy(AMBIGUOUS_PAUSE))  # right ids, its own labels
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == [
+        "Profiler's own domain pause offered option ids ['yes', 'no', 'skip']; rebuilt with ['confirm', 'correct']."
+    ]

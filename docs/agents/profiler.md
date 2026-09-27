@@ -70,6 +70,7 @@ The domain hypothesis must be stated explicitly with supporting evidence:
 The Profiler assigns a **domain confidence score from 0 to 100**. This score determines downstream behavior:
 - 80 or above: proceed directly to Cleaner
 - Below 80: enter PAUSE state — present the hypothesis and supporting signals to the user, offer two options (confirm or correct), wait for user response, update the ProfileReport with the confirmed domain before any further processing continues, then proceed to the Cleaner.
+- Python enforces the gate and owns the question. A full report below 80 is converted into the pause (`apply_confidence_gate`, Build F2), and a pause the model emits itself is rebuilt through the same template (`rebuild_model_domain_pause`, Build L): the hypothesis verbatim, the score, the non-blank string signals, and exactly the `confirm`/`correct` options. A model pause with no hypothesis or no usable score fails as a SYSTEM_ERROR before the user sees it.
 
 Domain knowledge that applies to each domain type is documented in `docs/intelligence-philosophy.md` under Domain Intelligence. The Profiler must apply that domain knowledge when forming its hypothesis.
 

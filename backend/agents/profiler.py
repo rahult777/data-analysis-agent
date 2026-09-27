@@ -281,6 +281,67 @@ def apply_domain_resolution(profile_report: dict, domain_resolution: dict) -> No
 DOMAIN_CONFIDENCE_THRESHOLD = 80  # profiler_system.md Step 2 / Section 8
 
 
+def _is_usable_score(score: object) -> bool:
+    """A real, finite number (a bool is not a score)."""
+    return not isinstance(score, bool) and isinstance(score, (int, float)) and math.isfinite(score)
+
+
+def _domain_pause(hypothesis: str, score: float, signals: list) -> dict:
+    """The one template every stored domain pause is built from (profiler_system.md
+    Section 8). Its option ids are exactly the two build_domain_resolution and
+    /resume accept, so the question shown is always one the pipeline can use."""
+    return {
+        "type": "domain_confirmation_required",
+        "domain_hypothesis": hypothesis,
+        "domain_confidence_score": score,
+        "supporting_signals": signals,
+        "options": [
+            {"id": "confirm", "label": f"Yes, this is {hypothesis}. Proceed.", "action": "proceed_with_hypothesis"},
+            {"id": "correct", "label": "No, the correct domain is something else.", "action": "request_user_specified_domain"},
+        ],
+    }
+
+
+def rebuild_model_domain_pause(parsed: dict) -> dict:
+    """Rebuild a domain pause the model emitted itself through the gate's template.
+
+    The model's own pause is raw LLM JSON: other option ids would be accepted
+    by /resume and then raise in build_domain_resolution after the user
+    answered (errors.md 2026-09-22). Python keeps the hypothesis verbatim, the
+    score (80 or above included — asking is harmless) and the non-blank string
+    signals, and writes the options itself. A pause the user could not answer
+    usefully — no hypothesis to confirm, or no usable score — raises before it
+    is stored or shown (F2's rule for a first call).
+    """
+    hypothesis = parsed.get("domain_hypothesis")
+    if not isinstance(hypothesis, str) or not hypothesis.strip():
+        raise ValueError("The Profiler's domain pause has no domain_hypothesis to confirm.")
+    score = parsed.get("domain_confidence_score")
+    if not _is_usable_score(score):
+        raise ValueError(f"The Profiler's domain pause has no usable domain_confidence_score: {score!r}")
+    signals = parsed.get("supporting_signals")
+    kept_signals = (
+        [signal for signal in signals if isinstance(signal, str) and signal.strip()]
+        if isinstance(signals, list)
+        else []
+    )
+    options = parsed.get("options")
+    model_ids = (
+        [option.get("id") if isinstance(option, dict) else None for option in options]
+        if isinstance(options, list)
+        else None
+    )
+    if model_ids != ["confirm", "correct"]:
+        # The contract break errors.md 2026-09-22 is about, told apart from label wording.
+        logger.warning(
+            "Profiler's own domain pause offered option ids %r; rebuilt with ['confirm', 'correct'].",
+            model_ids,
+        )
+    else:
+        logger.info("Profiler's own domain pause rebuilt through the template.")
+    return _domain_pause(hypothesis, score, kept_signals)
+
+
 def apply_confidence_gate(parsed: dict) -> dict:
     """Backstop for the <80 domain-confidence gate on a first (non-resume) call.
 
@@ -292,7 +353,7 @@ def apply_confidence_gate(parsed: dict) -> dict:
     if parsed.get("type") == "domain_confirmation_required":
         return parsed
     score = parsed.get("domain_confidence_score")
-    if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
+    if not _is_usable_score(score):
         raise ValueError(f"ProfileReport has no usable domain_confidence_score: {score!r}")
     if score >= DOMAIN_CONFIDENCE_THRESHOLD:
         return parsed
@@ -304,16 +365,7 @@ def apply_confidence_gate(parsed: dict) -> dict:
         "Profiler returned a full ProfileReport at domain_confidence_score %s (< %d); converted to a domain pause.",
         score, DOMAIN_CONFIDENCE_THRESHOLD,
     )
-    return {
-        "type": "domain_confirmation_required",
-        "domain_hypothesis": hypothesis,
-        "domain_confidence_score": score,
-        "supporting_signals": signals if isinstance(signals, list) else [],
-        "options": [
-            {"id": "confirm", "label": f"Yes, this is {hypothesis}. Proceed.", "action": "proceed_with_hypothesis"},
-            {"id": "correct", "label": "No, the correct domain is something else.", "action": "request_user_specified_domain"},
-        ],
-    }
+    return _domain_pause(hypothesis, score, signals if isinstance(signals, list) else [])
 
 
 def parse_json_response(text: str) -> dict:
@@ -369,6 +421,9 @@ async def profiler_node(state: PipelineState) -> PipelineState:
         )
 
         parsed = parse_json_response(response.content[0].text)
+        # Decided before the gate: a pause the gate synthesizes is already
+        # Python's template and must pass through exactly as the gate wrote it.
+        model_paused = parsed.get("type") == "domain_confirmation_required"
         if domain_resolution is None:
             parsed = apply_confidence_gate(parsed)
 
@@ -377,6 +432,8 @@ async def profiler_node(state: PipelineState) -> PipelineState:
                 raise ValueError(
                     "Profiler asked for domain confirmation again after the user answered."
                 )
+            if model_paused:
+                parsed = rebuild_model_domain_pause(parsed)
             state["domain_pause_data"] = parsed
             state["domain_confirmed"] = False
             await asyncio.to_thread(
