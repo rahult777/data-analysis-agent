@@ -589,7 +589,34 @@ def _is_blank(value: object) -> bool:
     return not isinstance(value, str) or not value.strip()
 
 
-def _preserve_option(column: str, missing_count: int, recorded_count: int) -> dict:
+def _impute_method_text(series: pd.Series, column: str, method_id: str, outliers_answered: bool) -> str:
+    """The impute option's `method`, written by Python, never the model. It names no
+    value: the value is computed when cleaning runs, on the data after duplicate
+    removal, which the question cannot show (a model-written value was invented
+    and shown as fact; errors.md 2026-09-28). The value includes the column's IQR
+    outliers, because the user's missing-value choices run before their outlier
+    choices (decisions.md 2026-09-25, Build F3), so the text says so."""
+    text = (
+        f"the {method_id} of `{column}`'s recorded values, computed when cleaning runs, "
+        "after exact duplicate rows are removed"
+    )
+    if bool(_iqr_outlier_mask(series).any()):
+        text += (
+            "; it includes this column's unusual values, whatever you chose for them at their own question"
+            if outliers_answered
+            else "; it includes this column's unusual values, which you may be asked about next"
+        )
+    return text
+
+
+def _outliers_answered(answered: list, column: str) -> bool:
+    return any(
+        entry.get("pause_type") == _OUTLIER_PAUSE and entry.get("column_name") == column
+        for entry in answered
+    )
+
+
+def _preserve_option(column: str, missing_count: int) -> dict:
     """The fourth missing-value option. Written by Python, never the model, so its
     wording promises only what the pipeline does: nothing downstream
     investigates the pattern (errors.md 2026-09-22, option drift)."""
@@ -598,7 +625,7 @@ def _preserve_option(column: str, missing_count: int, recorded_count: int) -> di
         "label": f"Keep `{column}` as it is: its {missing_count} missing values stay missing",
         "consequence": (
             f"nothing is imputed and no rows are removed. Statistics on `{column}` will use "
-            f"only its {recorded_count} recorded values, and the missingness is recorded in "
+            "only its recorded values, and the missingness is recorded in "
             "the cleaning report, where the Analyzer and Explainer will see it"
         ),
     }
@@ -684,10 +711,12 @@ def validate_cleaner_pause(parsed: dict, df: pd.DataFrame, answered: list) -> di
                 column, missing_pct, _MISSING_PAUSE_THRESHOLD_PCT,
             )
         stored_options = [dict(option) for option in options]
-        # Labels re-rendered from §8.1's templates with Python's count.
-        stored_options[0]["label"] = (
-            f"Impute the {missing_count} missing values with "
-            f"{stored_options[0].get('method') or method_id}"
+        # Labels re-rendered from §8.1's templates with Python's count. The impute
+        # label and method are Python's alone: the model's `method` text carried an
+        # invented value ("median ($24,200)"; errors.md 2026-09-28).
+        stored_options[0]["label"] = f"Impute the {missing_count} missing values with the {method_id}"
+        stored_options[0]["method"] = _impute_method_text(
+            df[column], column, method_id, _outliers_answered(answered, column)
         )
         stored_options[2]["label"] = f"Exclude the {missing_count} rows where `{column}` is missing"
         if recorded_count == 0:
@@ -696,7 +725,7 @@ def validate_cleaner_pause(parsed: dict, df: pd.DataFrame, answered: list) -> di
             stored_options = [
                 option for option in stored_options if option["id"] not in ("impute", "exclude_rows")
             ]
-        stored_options.append(_preserve_option(column, missing_count, recorded_count))
+        stored_options.append(_preserve_option(column, missing_count))
         return {
             **parsed,
             "missing_count": missing_count,
@@ -775,12 +804,6 @@ def apply_missingness_backstop(
         series = df[column]
         method_id = "median" if _is_numeric_column(series) else "mode"
         recorded = series.dropna()
-        if len(recorded) == 0:
-            method_value = "no recorded values"
-        elif method_id == "median":
-            method_value = _format_value(recorded.median())
-        else:
-            method_value = _format_value(recorded.mode().iloc[0])
         samples = ", ".join(str(v) for v in recorded.drop_duplicates().head(5).tolist())
         logger.warning(
             "Cleaner returned a full report while '%s' is %.2f%% missing with no user answer; "
@@ -811,7 +834,9 @@ def apply_missingness_backstop(
                 {
                     "id": "impute",
                     "label": f"Impute the {missing_count} missing values with the {method_id}",
-                    "method": f"{method_id} ({method_value})",
+                    "method": _impute_method_text(
+                        series, column, method_id, _outliers_answered(answered, column)
+                    ),
                     "method_id": method_id,
                     "assumption": (
                         "the missing values would have resembled the recorded ones; "

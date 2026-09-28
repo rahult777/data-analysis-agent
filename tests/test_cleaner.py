@@ -813,7 +813,7 @@ def test_validate_missing_pause_overwrites_counts_and_appends_the_preserve_optio
     ]
     preserve = stored["options"][3]
     assert "its 70 missing values stay missing" in preserve["label"]
-    assert "only its 130 recorded values" in preserve["consequence"]
+    assert "only its recorded values" in preserve["consequence"]
     # The option promises only what the pipeline does (no Analyzer investigation).
     assert "investigat" not in json.dumps(preserve).lower()
 
@@ -873,7 +873,7 @@ def test_validate_rerenders_count_bearing_labels_with_pythons_counts() -> None:
     wrong["options"][0]["label"] = "Impute the 3 missing values with median"
     wrong["options"][2]["label"] = "Exclude the 3 rows"
     stored = validate_cleaner_pause(wrong, _messy(), [])
-    assert stored["options"][0]["label"] == "Impute the 70 missing values with median"
+    assert stored["options"][0]["label"] == "Impute the 70 missing values with the median"
     assert stored["options"][2]["label"] == "Exclude the 70 rows where `revenue` is missing"
 
     outlier = _outlier_question()
@@ -881,6 +881,67 @@ def test_validate_rerenders_count_bearing_labels_with_pythons_counts() -> None:
     stored = validate_cleaner_pause(outlier, _messy(), [])
     assert stored["options"][0]["label"].startswith("Treat the 4 outlier value(s) as valid data")
     assert stored["options"][1]["label"].startswith("Flag the 4 outlier value(s) as suspected data entry error")
+
+
+_REVENUE_MEDIAN_METHOD = (
+    "the median of `revenue`'s recorded values, computed when cleaning runs, after exact "
+    "duplicate rows are removed; it includes this column's unusual values, which you may be "
+    "asked about next"
+)
+
+
+def test_model_written_impute_value_never_reaches_the_label_or_method() -> None:
+    """The live F3 C1 pause (errors.md 2026-09-28): the model wrote "median ($24,200)",
+    a value in no frame of the data (median 25205.55 raw, 25536.32 after duplicate
+    removal, which is what runs). Python writes both the label and the method."""
+    question = _mv_question()
+    question["options"][0]["label"] = "Impute the 70 missing values with median ($24,200)"
+    question["options"][0]["method"] = "median ($24,200)"
+    stored = validate_cleaner_pause(question, _messy(), [])
+    impute = stored["options"][0]
+    assert impute["label"] == "Impute the 70 missing values with the median"
+    assert impute["method"] == _REVENUE_MEDIAN_METHOD
+    assert "24,200" not in json.dumps(stored) and "$" not in impute["label"] + impute["method"]
+    assert impute["method_id"] == "median"
+    assert impute["assumption"] == "missingness is non-informative"  # the model's reasoning stays
+
+
+def test_impute_method_outlier_clause_follows_the_column_and_the_answers() -> None:
+    df = _messy()
+    # units_sold has missing values and no IQR outliers: no clause.
+    stored = validate_cleaner_pause(_mv_question("units_sold"), df, [])
+    assert stored["options"][0]["method"] == (
+        "the median of `units_sold`'s recorded values, computed when cleaning runs, after exact "
+        "duplicate rows are removed"
+    )
+    # revenue's outliers already answered (reachable out of the prompt's order, e.g. via the
+    # backstop): the value still includes them, and the text does not promise a question.
+    answered = [_answered(_outlier_question(), "flag_as_suspected_error", df)]
+    method = validate_cleaner_pause(_mv_question(), df, answered)["options"][0]["method"]
+    assert method.endswith("it includes this column's unusual values, whatever you chose for them at their own question")
+    assert "asked about next" not in method
+
+
+def test_impute_mode_wording_names_no_value() -> None:
+    stored = validate_cleaner_pause(_mv_question("notes", "mode"), _messy(), [])
+    impute = stored["options"][0]
+    assert impute["label"] == "Impute the 91 missing values with the mode"
+    assert impute["method"] == (
+        "the mode of `notes`'s recorded values, computed when cleaning runs, after exact "
+        "duplicate rows are removed"
+    )
+    assert "Good" not in impute["method"]
+
+
+def test_preserve_option_promises_no_recorded_count() -> None:
+    """130 values are recorded in the upload, but 115 remain after duplicate removal;
+    the option names no count it cannot keep."""
+    preserve = validate_cleaner_pause(_mv_question(), _messy(), [])["options"][3]
+    assert preserve["consequence"] == (
+        "nothing is imputed and no rows are removed. Statistics on `revenue` will use only its "
+        "recorded values, and the missingness is recorded in the cleaning report, where the "
+        "Analyzer and Explainer will see it"
+    )
 
 
 def test_repeat_pause_on_an_answered_key_raises_but_new_keys_pass() -> None:
@@ -906,7 +967,7 @@ def test_backstop_turns_a_report_that_skipped_a_mandatory_pause_into_that_pause(
     assert pause["type"] == "missing_value_decision_required"
     assert pause["column_name"] == "revenue"
     assert pause["options"][0]["method_id"] == "median"
-    assert pause["options"][0]["method"] == f"median ({df['revenue'].median():.6g})"
+    assert pause["options"][0]["method"] == _REVENUE_MEDIAN_METHOD
     assert "Not assessed" in pause["provenance_interpretation"]
     assert "'system export'" in pause["provenance_interpretation"]
     assert "'retail'" in pause["domain_context"]
