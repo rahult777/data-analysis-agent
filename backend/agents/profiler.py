@@ -20,6 +20,7 @@ from backend.config import ANTHROPIC_API_KEY, ANTHROPIC_MODEL
 from backend.models.schemas import AnalysisStatus, ColumnProfile, ProfileReport
 from backend.utils.langsmith_client import create_tracer
 from backend.utils.supabase_client import get_supabase_client
+from backend.utils.supabase_retry import supabase_call
 
 logger = logging.getLogger(__name__)
 
@@ -390,7 +391,7 @@ async def profiler_node(state: PipelineState) -> PipelineState:
         # callback to graph.invoke() in the orchestrator — not to the Anthropic SDK.
         tracer = create_tracer("profiler")
 
-        await asyncio.to_thread(
+        await supabase_call(
             lambda: get_supabase_client()
             .table("analyses")
             .update({
@@ -398,7 +399,8 @@ async def profiler_node(state: PipelineState) -> PipelineState:
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
             .eq("id", analysis_id)
-            .execute()
+            .execute(),
+            what="profiler status write",
         )
 
         df = await load_dataframe(state["stored_filename"])
@@ -436,12 +438,13 @@ async def profiler_node(state: PipelineState) -> PipelineState:
                 parsed = rebuild_model_domain_pause(parsed)
             state["domain_pause_data"] = parsed
             state["domain_confirmed"] = False
-            await asyncio.to_thread(
+            await supabase_call(
                 lambda: get_supabase_client()
                 .table("analyses")
                 .update({"updated_at": datetime.now(timezone.utc).isoformat()})
                 .eq("id", analysis_id)
-                .execute()
+                .execute(),
+                what="profiler pause stamp",
             )
             return state
 
@@ -451,7 +454,7 @@ async def profiler_node(state: PipelineState) -> PipelineState:
         if domain_resolution is not None:
             apply_domain_resolution(parsed, domain_resolution)
 
-        await asyncio.to_thread(
+        await supabase_call(
             lambda: get_supabase_client()
             .table("analyses")
             .update({
@@ -460,7 +463,8 @@ async def profiler_node(state: PipelineState) -> PipelineState:
                 "column_count": len(df.columns),
             })
             .eq("id", analysis_id)
-            .execute()
+            .execute(),
+            what="profile save",
         )
 
         state["profile_report"] = parsed
@@ -472,19 +476,20 @@ async def profiler_node(state: PipelineState) -> PipelineState:
         state["profiler_top_3_concerns"] = parsed.get("top_3_concerns")
         state["profiler_top_3_patterns"] = parsed.get("top_3_patterns")
 
-        await asyncio.to_thread(
+        await supabase_call(
             lambda: get_supabase_client()
             .table("analyses")
             .update({"updated_at": datetime.now(timezone.utc).isoformat()})
             .eq("id", analysis_id)
-            .execute()
+            .execute(),
+            what="profiler stamp",
         )
 
         return state
 
     except Exception as exc:
         logger.exception("Profiler node failed for analysis_id=%s", analysis_id)
-        await asyncio.to_thread(
+        await supabase_call(
             lambda: get_supabase_client()
             .table("analyses")
             .update({
@@ -493,6 +498,7 @@ async def profiler_node(state: PipelineState) -> PipelineState:
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
             .eq("id", analysis_id)
-            .execute()
+            .execute(),
+            what="profiler error write",
         )
         raise

@@ -73,7 +73,7 @@ The pipeline has two pause states — domain confirmation (Step 9) and missing v
 5. Frontend POSTs the response to the backend
 6. Backend resumes the pipeline with the user's input incorporated
 
-The pause states are **DB-polling nodes**, not LangGraph `interrupt()` — the installed LangGraph 0.2.0 does not support `interrupt()` (decisions.md, 2026-05-08). Each pause-wait node clears `user_pause_response` in Supabase, sets `status` to the specific pause value, then polls every 3 seconds until a response appears. They are not timeouts — the pipeline waits indefinitely for user input.
+The pause states are **DB-polling nodes**, not LangGraph `interrupt()` — the installed LangGraph 0.2.0 does not support `interrupt()` (decisions.md, 2026-05-08). Each pause-wait node clears `user_pause_response` in Supabase, sets `status` to the specific pause value, then polls every 3 seconds until a response appears. They are not timeouts — the pipeline waits indefinitely for user input. A failed poll does not end the pause: see Supabase Client and Retry Policy below.
 
 **Pause question persistence:** the pause-wait node writes the active question — the Profiler's or Cleaner's raw pause-signal JSON — to `analyses.pause_data` in the same single update that sets the pause status. `pause_data` is non-null only while `status` is `domain_pause`, `missing_value_pause` or `outlier_pause`. GET `/status` returns it in those statuses only; GET `/api/analysis/{id}` never carries it. POST `/resume` validates the answer against it (`pause_type`, `option_id`, and `column_name` or `corrected_domain`) and clears it in the same update that restores the status. Contract and shapes: decisions.md 2026-09-22. Python writes or checks every stored question before it is shown: domain pauses are built from one template (`apply_confidence_gate` and `rebuild_model_domain_pause`, exactly `confirm`/`correct`), Cleaner pauses pass `validate_cleaner_pause` (a missing-value pause has 4 options, or 2 when the column has no recorded values). The frontend renders the question inline and answers it through POST /resume (Build L; see `docs/ui-and-frontend.md`, Pause State Display).
 
@@ -215,6 +215,21 @@ Only the backend reads or writes the database, through `backend/utils/supabase_c
 - Default privileges for role `postgres` in `public` no longer grant new tables or sequences to `anon`/`authenticated`. Default EXECUTE on new functions is unchanged (errors.md 2026-09-28).
 - The security advisor's two INFO lints `rls_enabled_no_policy` (0008) are expected and accepted: zero policies is the design.
 
+### Supabase Client and Retry Policy
+
+Since Build L.2 (decisions.md 2026-09-28), the database, Storage and auth clients share one injected **HTTP/1.1** `httpx.Client` (`build_http_client()` in `backend/utils/supabase_client.py`: connect and pool timeouts 10 s, read and write 120 s, at most 20 connections, idle connections dropped after 5 s). Over HTTP/1.1 each concurrent request has its own connection, so one dropped connection fails one request, not every request in flight (the HTTP/2 default did, errors.md 2026-09-28).
+
+Every Supabase call goes through `supabase_call` (`backend/utils/supabase_retry.py`); a structural test in `tests/test_supabase_retry.py` fails on any call site that bypasses it.
+
+- **Retried:** only transient transport errors — `RemoteProtocolError`, `ReadError`, `WriteError`, `ConnectError`, `ConnectTimeout`, `PoolTimeout` — 3 attempts, waiting 0.5 s then 1.5 s, with a warning logged for each.
+- **Never retried:** postgrest `APIError`, `StorageApiError` and `HTTPStatusError` (HTTP answers, including gateway 5xx pages — a logged gap), validation errors, and read or write timeouts.
+- **Writes that cannot be repeated blindly** get a "did it land?" check before a re-send:
+  - Inserts (`/upload`, `/question`; ids are made in Python): a row with this id (and, for `/upload`, this `session_id`) already exists → landed. A duplicate key on a re-send also means landed.
+  - POST `/resume`'s conditional update: a re-read decides — this answer stored and `pause_data` cleared → 200; the row unchanged since the pre-read → the same conditional update is re-sent; anything else → 409.
+  - The pause-wait write: landed if the row shows this pause, or already holds an answer to it (matched by pause type and, for a Cleaner pause, column). The previous pause's answer, still in the row, does not count. A pause write is never repeated over an answer that arrived.
+- **Everything else** (absolute `update().eq("id")` writes, reads, Storage `exists`/`download`) is a plain retry. Storage uploads use `upsert` (the string `"true"`), so a re-sent upload overwrites the same bytes.
+- **The pause poll** retries each read through `supabase_call`; if that still fails, the wait loop keeps polling and raises only after 120 s of consecutive failures.
+
 ### Supabase Storage
 
 Bucket: `cleaned-datasets`
@@ -273,6 +288,9 @@ backend/
   utils/
     __init__.py
     supabase_client.py            Single shared Supabase client instance
+                                  (one HTTP/1.1 httpx client)
+    supabase_retry.py             supabase_call: every Supabase call,
+                                  retried on transient transport errors
     langsmith_client.py           LangSmith tracing setup
     file_handler.py               Local file ops + Supabase Storage
                                   upload/download + cleanup()

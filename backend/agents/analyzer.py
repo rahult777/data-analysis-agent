@@ -39,6 +39,7 @@ from backend.tools.viz_tools import generate_all_charts
 from backend.utils.file_handler import cleanup_temp_file, download_from_storage
 from backend.utils.langsmith_client import create_tracer
 from backend.utils.supabase_client import get_supabase_client
+from backend.utils.supabase_retry import supabase_call
 
 logger = logging.getLogger(__name__)
 
@@ -978,7 +979,7 @@ async def analyzer_node(state: PipelineState) -> dict:
             else 0,
         )
 
-        await asyncio.to_thread(
+        await supabase_call(
             lambda: get_supabase_client()
             .table("analyses")
             .update({
@@ -986,7 +987,8 @@ async def analyzer_node(state: PipelineState) -> dict:
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
             .eq("id", analysis_id)
-            .execute()
+            .execute(),
+            what="analyzer status write",
         )
 
         df = await load_cleaned_dataframe(analysis_id)
@@ -1237,33 +1239,37 @@ async def analyzer_node(state: PipelineState) -> dict:
         # Sanitize returns a NEW object — reassignment is mandatory.
         analysis_response = sanitize_for_json(analysis_response)
 
-        await asyncio.to_thread(
+        await supabase_call(
             lambda: get_supabase_client()
             .table("analyses")
             .update({"analysis_report": analysis_response})
             .eq("id", analysis_id)
-            .execute()
+            .execute(),
+            what="analysis report save",
         )
-        await asyncio.to_thread(
+        await supabase_call(
             lambda: get_supabase_client()
             .table("analyses")
             .update({"chart_paths": chart_paths})
             .eq("id", analysis_id)
-            .execute()
+            .execute(),
+            what="chart paths save",
         )
-        await asyncio.to_thread(
+        await supabase_call(
             lambda: get_supabase_client()
             .table("analyses")
             .update({"data_quality_score": data_quality_score})
             .eq("id", analysis_id)
-            .execute()
+            .execute(),
+            what="quality score save",
         )
-        await asyncio.to_thread(
+        await supabase_call(
             lambda: get_supabase_client()
             .table("analyses")
             .update({"updated_at": datetime.now(timezone.utc).isoformat()})
             .eq("id", analysis_id)
-            .execute()
+            .execute(),
+            what="analyzer stamp",
         )
 
         return {
@@ -1277,7 +1283,7 @@ async def analyzer_node(state: PipelineState) -> dict:
 
     except Exception as exc:
         logger.exception("Analyzer node failed for analysis_id=%s", analysis_id)
-        await asyncio.to_thread(
+        await supabase_call(
             lambda: get_supabase_client()
             .table("analyses")
             .update({
@@ -1286,6 +1292,7 @@ async def analyzer_node(state: PipelineState) -> dict:
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
             .eq("id", analysis_id)
-            .execute()
+            .execute(),
+            what="analyzer error write",
         )
         raise

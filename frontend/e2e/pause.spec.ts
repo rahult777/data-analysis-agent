@@ -760,6 +760,27 @@ test("a server error (500) on the same pause is not blamed on the user's choice"
   );
 });
 
+test("a server error (500) after the answer was recorded: refetch shows it moved on, never the server-error text", async ({ page }) => {
+  // Build L.2: the lost-success case. The backend now resolves most lost responses
+  // itself; when every attempt fails after the answer committed, the 500 still must
+  // not tell the user their answer was lost.
+  const serverText = "Something went wrong on the server, so your answer wasn't recorded. Please try again.";
+  api.setStatus(statusBody("missing_value_pause", MV_REVENUE));
+  api.onResume(() => {
+    api.setStatus(statusBody("cleaning")); // the answer landed; its response did not
+    return { status: 500, body: { detail: "Internal Server Error" } };
+  });
+  await openAsOwner(page);
+  await watch(page, "serverTextShown", `document.body.textContent.includes(${JSON.stringify(serverText)})`);
+
+  await page.getByRole("radio", { name: /Impute/ }).check();
+  await continueButton(page).click();
+  await expect(statusLine(page)).toHaveText(MOVED_ON);
+  await expect(question(page)).toHaveCount(0);
+  await expect(page.getByText(serverText)).toHaveCount(0);
+  expect(await seen(page, "serverTextShown"), "the server-error text never appeared").toBe(false);
+});
+
 // ---------------------------------------------------------------------------
 // focus
 // ---------------------------------------------------------------------------

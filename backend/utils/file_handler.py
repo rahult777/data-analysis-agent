@@ -10,6 +10,7 @@ from pathlib import Path
 import pandas as pd
 
 from backend.utils.supabase_client import get_supabase_client
+from backend.utils.supabase_retry import supabase_call
 
 logger = logging.getLogger(__name__)
 
@@ -78,14 +79,17 @@ async def upload_to_storage(analysis_id: str, local_parquet_path: str) -> None:
     file_bytes = await asyncio.to_thread(Path(local_parquet_path).read_bytes)
     storage_key = f"{analysis_id}.parquet"
     client = get_supabase_client()
-    await asyncio.to_thread(
-        client.storage.from_(_STORAGE_BUCKET).upload,
-        storage_key,
-        file_bytes,
+    # upsert: a retry after a lost response overwrites the same bytes instead of
+    # failing as a duplicate. Storage takes it as a header, so it must be a string.
+    await supabase_call(
+        lambda: client.storage.from_(_STORAGE_BUCKET).upload(
+            storage_key, file_bytes, file_options={"upsert": "true"}
+        ),
+        what="storage upload",
     )
-    exists = await asyncio.to_thread(
-        client.storage.from_(_STORAGE_BUCKET).exists,
-        storage_key,
+    exists = await supabase_call(
+        lambda: client.storage.from_(_STORAGE_BUCKET).exists(storage_key),
+        what="storage exists",
     )
     if not exists:
         raise RuntimeError(
@@ -97,9 +101,9 @@ async def upload_to_storage(analysis_id: str, local_parquet_path: str) -> None:
 async def download_from_storage(analysis_id: str) -> str:
     storage_key = f"{analysis_id}.parquet"
     client = get_supabase_client()
-    data: bytes = await asyncio.to_thread(
-        client.storage.from_(_STORAGE_BUCKET).download,
-        storage_key,
+    data: bytes = await supabase_call(
+        lambda: client.storage.from_(_STORAGE_BUCKET).download(storage_key),
+        what="storage download",
     )
     local_path = TEMP_DIR / f"{analysis_id}.parquet"
     await asyncio.to_thread(local_path.write_bytes, data)

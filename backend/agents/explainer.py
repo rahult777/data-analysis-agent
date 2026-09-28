@@ -28,6 +28,7 @@ from backend.tools.code_executor import run_question
 from backend.utils.file_handler import cleanup_temp_file, download_from_storage
 from backend.utils.langsmith_client import create_tracer
 from backend.utils.supabase_client import get_supabase_client
+from backend.utils.supabase_retry import supabase_call
 from backend.agents.profiler import PipelineState, load_system_prompt, parse_json_response
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ async def explainer_node(state: PipelineState) -> dict:
     try:
         tracer = create_tracer("explainer")  # noqa: F841
 
-        await asyncio.to_thread(
+        await supabase_call(
             lambda: get_supabase_client()
             .table("analyses")
             .update({
@@ -85,7 +86,8 @@ async def explainer_node(state: PipelineState) -> dict:
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
             .eq("id", analysis_id)
-            .execute()
+            .execute(),
+            what="explainer status write",
         )
 
         # Memory MCP read — 15 inheritance keys from predecessor agents.
@@ -163,7 +165,7 @@ async def explainer_node(state: PipelineState) -> dict:
         # Single atomic write: executive_summary, insight_report, status, updated_at.
         # Merged to eliminate the race window between separate calls; status="complete"
         # lands atomically with the data it is signalling as ready.
-        await asyncio.to_thread(
+        await supabase_call(
             lambda: get_supabase_client()
             .table("analyses")
             .update({
@@ -173,7 +175,8 @@ async def explainer_node(state: PipelineState) -> dict:
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
             .eq("id", analysis_id)
-            .execute()
+            .execute(),
+            what="explainer report save",
         )
 
         # Memory MCP write — three explainer keys persisted for downstream runs.
@@ -201,7 +204,7 @@ async def explainer_node(state: PipelineState) -> dict:
 
     except Exception as exc:
         logger.exception("Explainer node failed for analysis_id=%s", analysis_id)
-        await asyncio.to_thread(
+        await supabase_call(
             lambda: get_supabase_client()
             .table("analyses")
             .update({
@@ -210,7 +213,8 @@ async def explainer_node(state: PipelineState) -> dict:
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
             .eq("id", analysis_id)
-            .execute()
+            .execute(),
+            what="explainer error write",
         )
         raise
 
@@ -261,12 +265,13 @@ async def answer_question(
         columns_info: dict[str, str] = {col: str(df[col].dtype) for col in df.columns}
         sample = df.head(3).to_dict(orient="records")
 
-        await asyncio.to_thread(
+        await supabase_call(
             lambda: get_supabase_client()
             .table("questions")
             .update({"status": "answering"})
             .eq("id", question_id)
-            .execute()
+            .execute(),
+            what="question answering write",
         )
 
         # First LLM call — generate pandas code for the question.
@@ -293,7 +298,7 @@ async def answer_question(
         pandas_code: str = code_response.get("pandas_code", "")
 
         if not pandas_code:
-            await asyncio.to_thread(
+            await supabase_call(
                 lambda: get_supabase_client()
                 .table("questions")
                 .update({
@@ -302,7 +307,8 @@ async def answer_question(
                     "pandas_code": "",
                 })
                 .eq("id", question_id)
-                .execute()
+                .execute(),
+                what="question no-code error write",
             )
             return {
                 "answer": "The code generator did not produce pandas code.",
@@ -312,7 +318,7 @@ async def answer_question(
         result_value, error = await asyncio.to_thread(run_question, df, pandas_code)
 
         if error is not None:
-            await asyncio.to_thread(
+            await supabase_call(
                 lambda: get_supabase_client()
                 .table("questions")
                 .update({
@@ -321,7 +327,8 @@ async def answer_question(
                     "pandas_code": pandas_code,
                 })
                 .eq("id", question_id)
-                .execute()
+                .execute(),
+                what="question run error write",
             )
             return {
                 "answer": f"I could not compute the answer: {error}",
@@ -351,7 +358,7 @@ async def answer_question(
         answer_response = parse_json_response(answer_api_response.content[0].text)
         answer_text: str = answer_response.get("answer", "I could not formulate an answer.")
 
-        await asyncio.to_thread(
+        await supabase_call(
             lambda: get_supabase_client()
             .table("questions")
             .update({
@@ -360,7 +367,8 @@ async def answer_question(
                 "pandas_code": pandas_code,
             })
             .eq("id", question_id)
-            .execute()
+            .execute(),
+            what="question answer save",
         )
 
         return {"answer": answer_text, "pandas_code": pandas_code}
@@ -372,12 +380,13 @@ async def answer_question(
             question_id,
         )
         try:
-            await asyncio.to_thread(
+            await supabase_call(
                 lambda: get_supabase_client()
                 .table("questions")
                 .update({"status": "error"})
                 .eq("id", question_id)
-                .execute()
+                .execute(),
+                what="question failure write",
             )
         except Exception:
             logger.warning(

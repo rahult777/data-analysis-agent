@@ -875,3 +875,241 @@ def test_resume_escape_hatch_still_checks_corrected_domain(
         update.assert_not_called()
     else:
         update.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Group 7 — Transient Supabase failures (Build L.2)
+# ---------------------------------------------------------------------------
+
+from httpx import Response  # noqa: E402
+
+from tests.fake_supabase import Fault, FakeSupabase  # noqa: E402
+
+UPDATED_AT = "2026-09-28T12:00:00.123456+00:00"
+MV_ANSWER = {"pause_type": "missing_value_pause", "column_name": "revenue", "option_id": "impute"}
+NEXT_PAUSE = {**OUTLIER_PAUSE_DATA}
+
+
+def paused_fake() -> FakeSupabase:
+    return FakeSupabase(rows={"analyses": [{
+        "id": AID, "session_id": "s", "status": "missing_value_pause",
+        "pause_data": MISSING_VALUE_PAUSE_DATA, "user_pause_response": None,
+        "updated_at": UPDATED_AT, "error_message": None, "original_filename": "f.csv",
+        "created_at": UPDATED_AT, "chart_paths": ["c.png"],
+    }], "questions": [{
+        "id": QID, "analysis_id": AID, "question": "q?", "status": "complete",
+        "answer": "42", "pandas_code": "df.shape",
+    }]})
+
+
+def resume_on_fake(fake: FakeSupabase, answer: dict = MV_ANSWER, test_client: TestClient = client) -> Response:
+    with patch("backend.main.get_supabase_client", return_value=fake):
+        return test_client.post(
+            f"/api/analysis/{AID}/resume", json={"response": answer}, headers={"session-id": "s"}
+        )
+
+
+def move_row_on(fake: FakeSupabase) -> None:
+    """The pipeline wrote its next pause (without this answer) since /resume read the row."""
+    fake.row("analyses", AID).update({
+        "status": "outlier_pause", "pause_data": NEXT_PAUSE,
+        "user_pause_response": None, "updated_at": "2026-09-28T12:00:09.000000+00:00",
+    })
+
+
+@pytest.mark.parametrize(
+    "path, table",
+    [
+        (f"/api/analysis/{AID}/status", "analyses"),
+        (f"/api/analysis/{AID}", "analyses"),
+        (f"/api/analysis/{AID}/charts", "analyses"),
+        (f"/api/analysis/{AID}/question/{QID}", "questions"),
+    ],
+)
+def test_read_route_survives_one_transient_failure(path: str, table: str) -> None:
+    fake = paused_fake()
+    fake.faults.append(Fault("select", table))
+    with patch("backend.main.get_supabase_client", return_value=fake):
+        response = client.get(path)
+    assert response.status_code == 200
+    assert len(fake.executes("select", table)) == 2
+
+
+def test_get_session_survives_one_transient_failure() -> None:
+    fake = paused_fake()
+    fake.faults.append(Fault("select", "analyses", when=lambda p: p["columns"] == "id, session_id"))
+    task = AsyncMock()
+    with (
+        patch("backend.main.get_supabase_client", return_value=fake),
+        patch("backend.main.run_question_task", new=task),
+    ):
+        response = client.post(f"/api/analysis/{AID}/question", json={"question": "q?"}, headers={"session-id": "s"})
+    assert response.status_code == 200
+    task.assert_called_once()
+
+
+def upload_on_fake(fake: FakeSupabase, pipeline: AsyncMock) -> Response:
+    with (
+        patch("backend.main.get_supabase_client", return_value=fake),
+        patch("backend.main.save_temp_file", new=AsyncMock(return_value="stored.csv")),
+        patch("backend.main.run_pipeline_task", new=pipeline),
+    ):
+        return client.post("/api/upload", files={"file": ("data.csv", io.BytesIO(b"a,b\n1,2"), "text/csv")})
+
+
+def test_upload_lost_success_returns_200_with_exactly_one_pipeline() -> None:
+    fake = FakeSupabase()
+    fake.faults.append(Fault("insert", "analyses", mode="after"))
+    pipeline = AsyncMock()
+    response = upload_on_fake(fake, pipeline)
+    assert response.status_code == 200
+    body = response.json()
+    assert [r["id"] for r in fake.rows["analyses"]] == [body["analysis_id"]]
+    assert len(fake.executes("insert", "analyses")) == 1  # landed: never re-sent
+    pipeline.assert_called_once()
+
+
+def test_upload_landed_check_matches_our_id_and_session_id() -> None:
+    fake = FakeSupabase()
+    fake.faults.append(Fault("insert", "analyses", mode="after"))
+    body = upload_on_fake(fake, AsyncMock()).json()
+    (landed_read,) = fake.executes("select", "analyses")
+    assert ("eq", "id", body["analysis_id"]) in landed_read.filters
+    assert ("eq", "session_id", body["session_id"]) in landed_read.filters
+
+
+def test_upload_not_landed_is_re_sent_once() -> None:
+    fake = FakeSupabase()
+    fake.faults.append(Fault("insert", "analyses", mode="before"))
+    pipeline = AsyncMock()
+    response = upload_on_fake(fake, pipeline)
+    assert response.status_code == 200
+    assert len(fake.rows["analyses"]) == 1
+    assert len(fake.executes("insert", "analyses")) == 2
+    pipeline.assert_called_once()
+
+
+def test_upload_duplicate_key_on_a_re_send_counts_as_landed() -> None:
+    """The first insert committed after the landed check looked: the re-send hits 23505."""
+    fake = FakeSupabase()
+    fake.faults.append(Fault("insert", "analyses", mode="late"))
+    pipeline = AsyncMock()
+    response = upload_on_fake(fake, pipeline)
+    assert response.status_code == 200
+    assert len(fake.rows["analyses"]) == 1
+    assert len(fake.executes("insert", "analyses")) == 2
+    pipeline.assert_called_once()
+
+
+def test_upload_duplicate_key_on_the_first_send_is_a_real_error() -> None:
+    fixed = "33333333-3333-4333-8333-333333333333"
+    fake = FakeSupabase(rows={"analyses": [{"id": fixed, "session_id": "someone-else"}]})
+    pipeline = AsyncMock()
+    with patch("backend.main.uuid.uuid4", return_value=fixed):
+        with pytest.raises(Exception, match="23505|duplicate key"):
+            upload_on_fake(fake, pipeline)
+    pipeline.assert_not_called()
+
+
+def question_on_fake(fake: FakeSupabase, task: AsyncMock) -> Response:
+    with (
+        patch("backend.main.get_supabase_client", return_value=fake),
+        patch("backend.main.run_question_task", new=task),
+    ):
+        return client.post(f"/api/analysis/{AID}/question", json={"question": "why?"}, headers={"session-id": "s"})
+
+
+@pytest.mark.parametrize("mode, sends", [("after", 1), ("late", 2)])
+def test_question_lost_success_returns_200_with_exactly_one_task(mode: str, sends: int) -> None:
+    fake = paused_fake()
+    fake.faults.append(Fault("insert", "questions", mode=mode))
+    task = AsyncMock()
+    response = question_on_fake(fake, task)
+    assert response.status_code == 200
+    question_id = response.json()["question_id"]
+    assert [r["id"] for r in fake.rows["questions"] if r["id"] != QID] == [question_id]
+    assert len(fake.executes("insert", "questions")) == sends
+    task.assert_called_once()
+
+
+def test_question_landed_check_looks_up_our_id() -> None:
+    fake = paused_fake()
+    fake.faults.append(Fault("insert", "questions", mode="after"))
+    question_id = question_on_fake(fake, AsyncMock()).json()["question_id"]
+    (landed_read,) = fake.executes("select", "questions")
+    assert landed_read.filters == [("eq", "id", question_id)]
+
+
+def test_resume_pre_read_survives_one_transient_failure() -> None:
+    fake = paused_fake()
+    fake.faults.append(Fault("select", "analyses", when=lambda p: p["columns"] == "id, status, pause_data, updated_at"))
+    response = resume_on_fake(fake)
+    assert response.status_code == 200
+    assert fake.row("analyses", AID)["user_pause_response"] == MV_ANSWER
+
+
+def test_resume_update_that_did_not_land_is_re_sent_and_returns_200() -> None:
+    fake = paused_fake()
+    fake.faults.append(Fault("update", "analyses", mode="before"))
+    response = resume_on_fake(fake)
+    assert response.status_code == 200
+    row = fake.row("analyses", AID)
+    assert (row["status"], row["pause_data"], row["user_pause_response"]) == ("cleaning", None, MV_ANSWER)
+    updates = fake.executes("update", "analyses")
+    assert len(updates) == 2
+    # The re-send is the same conditional update.
+    assert updates[1].filters == updates[0].filters
+    assert ("eq", "updated_at", UPDATED_AT) in updates[1].filters
+
+
+def test_resume_lost_success_returns_200_not_409(caplog: pytest.LogCaptureFixture) -> None:
+    fake = paused_fake()
+    fake.faults.append(Fault("update", "analyses", mode="after"))
+    with caplog.at_level("WARNING"):
+        response = resume_on_fake(fake)
+    assert response.status_code == 200
+    assert response.json()["status"] == "cleaning"
+    assert len(fake.executes("update", "analyses")) == 1
+    assert fake.row("analyses", AID)["user_pause_response"] == MV_ANSWER
+    assert any("landed despite the lost response" in r.getMessage() for r in caplog.records)
+
+
+def test_resume_re_send_matching_no_rows_after_a_late_commit_returns_200() -> None:
+    """The first update committed only after the re-read: the re-send matches no rows."""
+    fake = paused_fake()
+    fake.faults.append(Fault("update", "analyses", mode="late"))
+    response = resume_on_fake(fake)
+    assert response.status_code == 200
+    assert len(fake.executes("update", "analyses")) == 2
+    assert fake.row("analyses", AID)["user_pause_response"] == MV_ANSWER
+
+
+def test_resume_row_moved_on_before_the_re_read_returns_409() -> None:
+    fake = paused_fake()
+    fake.faults.append(Fault("update", "analyses", mode="before", after_raise=move_row_on))
+    response = resume_on_fake(fake)
+    assert response.status_code == 409
+    assert len(fake.executes("update", "analyses")) == 1
+    row = fake.row("analyses", AID)
+    assert (row["status"], row["pause_data"], row["user_pause_response"]) == ("outlier_pause", NEXT_PAUSE, None)
+
+
+def test_resume_re_send_never_overwrites_a_pause_that_moved_on_after_the_re_read() -> None:
+    """The re-read saw the row unchanged, then the pipeline moved on: the re-send's
+    condition matches nothing, the new pause survives, and the answer is a 409."""
+    fake = paused_fake()
+    fake.faults.append(Fault("update", "analyses", mode="before", on_next_select=move_row_on))
+    response = resume_on_fake(fake)
+    assert response.status_code == 409
+    assert len(fake.executes("update", "analyses")) == 2
+    row = fake.row("analyses", AID)
+    assert (row["status"], row["pause_data"], row["user_pause_response"]) == ("outlier_pause", NEXT_PAUSE, None)
+
+
+def test_resume_persistent_failure_is_500_with_nothing_written() -> None:
+    fake = paused_fake()
+    fake.faults.extend(Fault("update", "analyses", mode="before") for _ in range(3))
+    response = resume_on_fake(fake, test_client=TestClient(app, raise_server_exceptions=False))
+    assert response.status_code == 500
+    assert len(fake.executes("update", "analyses")) == 3
+    assert fake.row("analyses", AID)["status"] == "missing_value_pause"

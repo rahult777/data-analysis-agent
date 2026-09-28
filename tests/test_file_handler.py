@@ -189,3 +189,46 @@ def test_accepts_file_at_size_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     """The limit is inclusive: a file of exactly MAX_FILE_SIZE bytes passes."""
     monkeypatch.setattr(file_handler, "MAX_FILE_SIZE", len(VALID_CSV))
     validate_file("iris.csv", VALID_CSV)
+
+
+# ---------------------------------------------------------------------------
+# Storage calls survive one transient failure (Build L.2)
+# ---------------------------------------------------------------------------
+
+import asyncio  # noqa: E402
+from unittest.mock import patch  # noqa: E402
+
+import httpx  # noqa: E402
+
+
+def storage_mock() -> tuple[MagicMock, MagicMock]:
+    client = MagicMock()
+    bucket = client.storage.from_.return_value
+    return client, bucket
+
+
+def test_upload_to_storage_retries_one_transient_failure_with_upsert(tmp_path: pathlib.Path) -> None:
+    parquet = tmp_path / "a1.parquet"
+    parquet.write_bytes(b"PAR1")
+    client, bucket = storage_mock()
+    bucket.upload.side_effect = [httpx.RemoteProtocolError("Server disconnected"), {"Key": "k"}]
+    bucket.exists.side_effect = [httpx.ReadError("reset"), True]
+    with patch("backend.utils.file_handler.get_supabase_client", return_value=client):
+        asyncio.run(file_handler.upload_to_storage("a1", str(parquet)))
+    assert bucket.upload.call_count == 2
+    for sent in bucket.upload.call_args_list:
+        assert sent.args == ("a1.parquet", b"PAR1")
+        assert sent.kwargs == {"file_options": {"upsert": "true"}}
+    assert bucket.exists.call_count == 2
+
+
+def test_download_from_storage_retries_one_transient_failure(tmp_path: pathlib.Path) -> None:
+    client, bucket = storage_mock()
+    bucket.download.side_effect = [httpx.ConnectError("refused"), b"PAR1"]
+    with (
+        patch("backend.utils.file_handler.get_supabase_client", return_value=client),
+        patch.object(file_handler, "TEMP_DIR", tmp_path),
+    ):
+        path = asyncio.run(file_handler.download_from_storage("a1"))
+    assert pathlib.Path(path).read_bytes() == b"PAR1"
+    assert bucket.download.call_count == 2

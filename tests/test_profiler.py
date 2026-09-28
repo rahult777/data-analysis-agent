@@ -1382,3 +1382,67 @@ def test_rebuild_model_pause_warns_only_when_the_option_ids_break_the_contract(
     assert warnings == [
         "Profiler's own domain pause offered option ids ['yes', 'no', 'skip']; rebuilt with ['confirm', 'correct']."
     ]
+
+
+# ---------------------------------------------------------------------------
+# Supabase writes after the LLM call survive one transient failure (Build L.2)
+# ---------------------------------------------------------------------------
+
+from tests.fake_supabase import recording_client  # noqa: E402
+
+
+def _run_profiler_node_failing(df: pd.DataFrame, state: dict, llm: object, fail_updates: frozenset) -> tuple:
+    """llm is the model's JSON payload, or an exception the call raises."""
+    supabase, updates = recording_client(fail_updates)
+    response = MagicMock()
+    response.content = [MagicMock(text=json.dumps(llm))] if isinstance(llm, dict) else []
+    with (
+        patch("backend.agents.profiler.client") as mock_client,
+        patch("backend.agents.profiler.get_supabase_client", return_value=supabase),
+        patch("backend.agents.profiler.create_tracer"),
+        patch("backend.agents.profiler.load_dataframe", return_value=df),
+    ):
+        if isinstance(llm, Exception):
+            mock_client.messages.create.side_effect = llm
+        else:
+            mock_client.messages.create.return_value = response
+        try:
+            result = asyncio.run(profiler_node(state))
+        except Exception as exc:
+            result = exc
+    return result, [payload for _, payload in updates]
+
+
+@pytest.mark.parametrize("failing, saved_twice", [(1, "profile_report"), (2, "updated_at")])
+def test_profiler_saves_after_the_llm_call_survive_one_transient_failure(
+    messy_df: pd.DataFrame, failing: int, saved_twice: str
+) -> None:
+    state = {"analysis_id": "test-analysis-id", "stored_filename": "messy_data.csv", "context": None}
+    result, payloads = _run_profiler_node_failing(
+        messy_df, state, _ambiguous_profile_report("retail sales", 91), frozenset({failing})
+    )
+    assert not isinstance(result, Exception)
+    assert result["profile_report"]["duplicate_row_count"] == 15
+    assert len(payloads) == 4
+    # The failed save is re-sent: the same write twice (a stamp's time may differ).
+    assert saved_twice in payloads[failing]
+    assert sorted(payloads[failing]) == sorted(payloads[failing + 1])
+    assert payloads[failing].get("profile_report") == payloads[failing + 1].get("profile_report")
+    assert not any(p.get("status") == "error" for p in payloads)
+
+
+def test_profiler_pause_stamp_survives_one_transient_failure(ambiguous_df: pd.DataFrame) -> None:
+    result, payloads = _run_profiler_node_failing(
+        ambiguous_df, _first_run_state(), _ambiguous_profile_report("unknown", 35), frozenset({1})
+    )
+    assert not isinstance(result, Exception)
+    assert result["domain_pause_data"]["type"] == "domain_confirmation_required"
+    assert [sorted(p) for p in payloads] == [["status", "updated_at"], ["updated_at"], ["updated_at"]]
+
+
+def test_profiler_error_write_survives_one_transient_failure(messy_df: pd.DataFrame) -> None:
+    state = {"analysis_id": "test-analysis-id", "stored_filename": "messy_data.csv", "context": None}
+    result, payloads = _run_profiler_node_failing(messy_df, state, RuntimeError("llm down"), frozenset({1}))
+    assert isinstance(result, RuntimeError) and str(result) == "llm down"
+    assert [p["status"] for p in payloads] == ["profiling", "error", "error"]
+    assert payloads[-1]["error_message"] == "SYSTEM_ERROR: llm down"

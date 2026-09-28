@@ -567,3 +567,224 @@ def test_run_pipeline_survives_more_cleaner_pauses_than_langgraphs_default_step_
     ]
     analyzer.assert_awaited_once()
     assert saved.isna().sum().sum() == 12 * 4
+
+
+# ---------------------------------------------------------------------------
+# Transient Supabase failures in the pause-wait nodes (Build L.2)
+# ---------------------------------------------------------------------------
+
+import httpx  # noqa: E402
+
+from backend.agents import orchestrator  # noqa: E402
+from backend.agents.orchestrator import _write_pause, check_for_pause_response  # noqa: E402
+from tests.fake_supabase import Fault, FakeSupabase  # noqa: E402
+
+UNITS_PAUSE = {**MISSING_VALUE_PAUSE_DATA, "column_name": "units_sold"}
+PREVIOUS_ANSWER = {"pause_type": "outlier_pause", "column_name": "revenue", "option_id": "treat_as_valid"}
+UNITS_ANSWER = {"pause_type": "missing_value_pause", "column_name": "units_sold", "option_id": "impute"}
+POLL = lambda payload: payload.get("columns") == "user_pause_response"  # noqa: E731
+
+
+def cleaning_row(answer: dict | None = PREVIOUS_ANSWER, status: str = "cleaning") -> FakeSupabase:
+    """The row as cleaner_node leaves it before its next pause: the previous answer still stored."""
+    return FakeSupabase(rows={"analyses": [{
+        "id": "test-id", "status": status, "pause_data": None,
+        "user_pause_response": answer, "updated_at": "t0",
+    }]})
+
+
+def answer_units(fake: FakeSupabase) -> None:
+    """The user answered the pause through /resume."""
+    fake.row("analyses", "test-id").update({
+        "status": "cleaning", "pause_data": None, "user_pause_response": UNITS_ANSWER, "updated_at": "t1",
+    })
+
+
+def write_units_pause(fake: FakeSupabase) -> None:
+    with patch("backend.agents.orchestrator.get_supabase_client", return_value=fake):
+        asyncio.run(_write_pause("test-id", "missing_value_pause", UNITS_PAUSE))
+
+
+def poll_once(fake: FakeSupabase) -> dict | None:
+    with patch("backend.agents.orchestrator.get_supabase_client", return_value=fake):
+        return asyncio.run(check_for_pause_response("test-id"))
+
+
+def test_pause_write_landed_with_its_response_lost_is_not_rewritten() -> None:
+    fake = cleaning_row()
+    fake.faults.append(Fault("update", "analyses", mode="after"))
+    write_units_pause(fake)
+    assert len(fake.executes("update", "analyses")) == 1
+    row = fake.row("analyses", "test-id")
+    assert (row["status"], row["pause_data"], row["user_pause_response"]) == ("missing_value_pause", UNITS_PAUSE, None)
+
+
+def test_pause_write_landed_and_answered_meanwhile_never_erases_the_answer() -> None:
+    fake = cleaning_row()
+    fake.faults.append(Fault("update", "analyses", mode="after", after_raise=answer_units))
+    write_units_pause(fake)
+    assert len(fake.executes("update", "analyses")) == 1
+    assert poll_once(fake) == UNITS_ANSWER
+
+
+def test_pause_write_not_landed_is_rewritten() -> None:
+    fake = cleaning_row(answer=None, status="profiling")
+    fake.faults.append(Fault("update", "analyses", mode="before"))
+    write_units_pause(fake)
+    assert len(fake.executes("update", "analyses")) == 2
+    assert fake.row("analyses", "test-id")["status"] == "missing_value_pause"
+
+
+def test_pause_write_not_landed_while_the_previous_answer_is_stored_is_rewritten() -> None:
+    """The previous pause's answer is still in the row: it is not an answer to this
+    pause, so the write did not land; the rewrite clears it and the poll never returns it."""
+    fake = cleaning_row(answer=PREVIOUS_ANSWER)
+    fake.faults.append(Fault("update", "analyses", mode="before"))
+    write_units_pause(fake)
+    assert len(fake.executes("update", "analyses")) == 2
+    row = fake.row("analyses", "test-id")
+    assert (row["status"], row["pause_data"]) == ("missing_value_pause", UNITS_PAUSE)
+    assert poll_once(fake) is None
+
+
+def test_pause_write_same_column_but_other_pause_type_answer_is_not_landed() -> None:
+    """messy_data.csv's revenue gets an outlier pause and a missing-value pause: the
+    outlier answer on the same column must not count as this pause's answer."""
+    previous = {"pause_type": "outlier_pause", "column_name": "revenue", "option_id": "treat_as_valid"}
+    fake = cleaning_row(answer=previous)
+    fake.faults.append(Fault("update", "analyses", mode="before"))
+    with patch("backend.agents.orchestrator.get_supabase_client", return_value=fake):
+        asyncio.run(_write_pause("test-id", "missing_value_pause", MISSING_VALUE_PAUSE_DATA))
+    assert len(fake.executes("update", "analyses")) == 2
+    assert poll_once(fake) is None
+
+
+@pytest.mark.parametrize("answered", [False, True])
+def test_domain_pause_write_landed_is_not_rewritten(answered: bool) -> None:
+    def answer_domain(fake: FakeSupabase) -> None:
+        fake.row("analyses", "test-id").update({
+            "status": "profiling", "pause_data": None,
+            "user_pause_response": {"pause_type": "domain_pause", "option_id": "confirm"},
+        })
+
+    fake = cleaning_row(answer=None, status="profiling")
+    fake.faults.append(Fault("update", "analyses", mode="after", after_raise=answer_domain if answered else None))
+    with patch("backend.agents.orchestrator.get_supabase_client", return_value=fake):
+        asyncio.run(_write_pause("test-id", "domain_pause", DOMAIN_PAUSE_DATA))
+    assert len(fake.executes("update", "analyses")) == 1
+    assert fake.row("analyses", "test-id")["status"] == ("profiling" if answered else "domain_pause")
+
+
+def test_domain_pause_write_not_landed_is_rewritten() -> None:
+    fake = cleaning_row(answer=None, status="profiling")
+    fake.faults.append(Fault("update", "analyses", mode="before"))
+    with patch("backend.agents.orchestrator.get_supabase_client", return_value=fake):
+        asyncio.run(_write_pause("test-id", "domain_pause", DOMAIN_PAUSE_DATA))
+    assert len(fake.executes("update", "analyses")) == 2
+    assert fake.row("analyses", "test-id")["pause_data"] == DOMAIN_PAUSE_DATA
+
+
+def test_poll_read_is_retried_by_the_helper() -> None:
+    fake = cleaning_row(answer=UNITS_ANSWER)
+    fake.faults.append(Fault("select", "analyses", when=POLL))
+    assert poll_once(fake) == UNITS_ANSWER
+    assert len(fake.executes("select", "analyses")) == 2
+
+
+def test_wait_node_keeps_polling_through_a_failed_poll_and_picks_up_the_answer(caplog: pytest.LogCaptureFixture) -> None:
+    """The helper gave up on one poll (3 transient failures); the wait loop polls again."""
+    fake = cleaning_row(answer=None)
+    fake.faults.extend(Fault("select", "analyses", when=POLL) for _ in range(3))
+    polls = {"n": 0}
+    real_check = check_for_pause_response
+
+    async def check(analysis_id: str) -> dict | None:
+        polls["n"] += 1
+        if polls["n"] == 2:
+            answer_units(fake)
+        return await real_check(analysis_id)
+
+    state = {"analysis_id": "test-id", "missing_value_pause_data": UNITS_PAUSE, "outlier_pause_data": None}
+    with (
+        patch("backend.agents.orchestrator.get_supabase_client", return_value=fake),
+        patch("backend.agents.orchestrator.check_for_pause_response", new=check),
+        patch("backend.agents.orchestrator.asyncio.sleep", new=AsyncMock()),
+        caplog.at_level("WARNING"),
+    ):
+        result = asyncio.run(cleaner_pause_wait_node(state))
+    assert result["user_pause_response"] == UNITS_ANSWER
+    assert polls["n"] == 2
+    assert any("still polling" in r.getMessage() for r in caplog.records)
+
+
+def test_wait_node_raises_after_120_seconds_of_consecutive_poll_failures() -> None:
+    fake = cleaning_row(answer=None)
+    failing = AsyncMock(side_effect=httpx.RemoteProtocolError("Server disconnected"))
+    state = {"analysis_id": "test-id", "missing_value_pause_data": UNITS_PAUSE, "outlier_pause_data": None}
+    with (
+        patch("backend.agents.orchestrator.get_supabase_client", return_value=fake),
+        patch("backend.agents.orchestrator.check_for_pause_response", new=failing),
+        patch("backend.agents.orchestrator.asyncio.sleep", new=AsyncMock()),
+        patch.object(orchestrator, "_monotonic", side_effect=[1000.0, 1060.0, 1119.9, 1120.0]),
+    ):
+        with pytest.raises(httpx.RemoteProtocolError):
+            asyncio.run(cleaner_pause_wait_node(state))
+    assert failing.await_count == 4
+
+
+def test_wait_node_failure_clock_restarts_after_a_successful_poll() -> None:
+    fake = cleaning_row(answer=None)
+    outcomes = [httpx.ReadError("x"), None, httpx.ReadError("x"), UNITS_ANSWER]
+    check = AsyncMock(side_effect=outcomes)
+    state = {"analysis_id": "test-id", "missing_value_pause_data": UNITS_PAUSE, "outlier_pause_data": None}
+    with (
+        patch("backend.agents.orchestrator.get_supabase_client", return_value=fake),
+        patch("backend.agents.orchestrator.check_for_pause_response", new=check),
+        patch("backend.agents.orchestrator.asyncio.sleep", new=AsyncMock()),
+        # Two failures 500 s apart, separated by a good poll: never 120 s consecutive.
+        patch.object(orchestrator, "_monotonic", side_effect=[0.0, 500.0]),
+    ):
+        result = asyncio.run(cleaner_pause_wait_node(state))
+    assert result["user_pause_response"] == UNITS_ANSWER
+
+
+def test_wait_node_raises_a_non_transient_poll_error_at_once() -> None:
+    fake = cleaning_row(answer=None)
+    check = AsyncMock(side_effect=RuntimeError("bad row"))
+    state = {"analysis_id": "test-id", "missing_value_pause_data": UNITS_PAUSE, "outlier_pause_data": None}
+    with (
+        patch("backend.agents.orchestrator.get_supabase_client", return_value=fake),
+        patch("backend.agents.orchestrator.check_for_pause_response", new=check),
+        patch("backend.agents.orchestrator.asyncio.sleep", new=AsyncMock()),
+    ):
+        with pytest.raises(RuntimeError, match="bad row"):
+            asyncio.run(cleaner_pause_wait_node(state))
+    assert check.await_count == 1
+
+
+def test_run_pipeline_error_write_survives_one_transient_failure() -> None:
+    fake = cleaning_row(answer=None, status="profiling")
+    fake.faults.append(Fault("update", "analyses", mode="before", when=lambda p: p.get("status") == "error"))
+    with (
+        patch("backend.agents.orchestrator.get_supabase_client", return_value=fake),
+        patch("backend.agents.orchestrator.create_tracer", return_value=BaseCallbackHandler()),
+        patch("backend.agents.orchestrator.profiler_node", new=AsyncMock(side_effect=RuntimeError("boom"))),
+    ):
+        initial_state = asyncio.run(build_initial_state("test-id", "test.csv", None, None))
+        with pytest.raises(RuntimeError, match="boom"):
+            asyncio.run(run_pipeline(initial_state))
+    row = fake.row("analyses", "test-id")
+    assert (row["status"], row["error_message"]) == ("error", "SYSTEM_ERROR: boom")
+    assert len(fake.executes("update", "analyses")) == 2
+
+
+def test_pause_write_without_a_column_never_takes_a_stored_answer_as_its_own() -> None:
+    """The fallback pause (no pause_data): an earlier answer of the same type with no
+    column_name must not count as landed (Code Review, Build L.2)."""
+    earlier = {"pause_type": "missing_value_pause", "option_id": "impute"}
+    fake = cleaning_row(answer=earlier)
+    fake.faults.append(Fault("update", "analyses", mode="before"))
+    with patch("backend.agents.orchestrator.get_supabase_client", return_value=fake):
+        asyncio.run(_write_pause("test-id", "missing_value_pause", None))
+    assert len(fake.executes("update", "analyses")) == 2
+    assert poll_once(fake) is None

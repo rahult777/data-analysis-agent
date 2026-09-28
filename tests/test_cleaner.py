@@ -2433,3 +2433,51 @@ def test_outliers_the_user_kept_as_valid_count_in_the_fill(option_id) -> None:
     assert saved.loc[[8, 13], "amount"].tolist() == [1000.0, 2000.0]
     [fill] = [d for d in _records_for(outcome, "amount") if d["action"].startswith("Cleaner decision")]
     assert "excluded as outliers" not in fill["action"]
+
+
+# ---------------------------------------------------------------------------
+# Supabase writes after the LLM call survive one transient failure (Build L.2)
+# ---------------------------------------------------------------------------
+
+from tests.fake_supabase import recording_client  # noqa: E402
+
+
+def _run_cleaner_node_failing(llm: object, fail_updates: frozenset) -> tuple:
+    """The bool-column run of Group 7; llm is the model's JSON payload or an exception."""
+    supabase, updates = recording_client(fail_updates)
+    response = MagicMock()
+    response.content = [MagicMock(text=json.dumps(llm))] if isinstance(llm, dict) else []
+    df = _bool_df(20)
+    df.loc[[0, 3], "amount"] = 1.0
+    with (
+        patch("backend.agents.cleaner.client") as mock_client,
+        patch("backend.agents.cleaner.get_supabase_client", return_value=supabase),
+        patch("backend.agents.cleaner.create_tracer"),
+        patch("backend.agents.cleaner.load_dataframe_from_uploads", return_value=df),
+        patch("backend.agents.cleaner.upload_to_storage"),
+        patch("backend.agents.cleaner.cleanup_temp_file"),
+        patch.object(pd.DataFrame, "to_parquet"),
+    ):
+        if isinstance(llm, Exception):
+            mock_client.messages.create.side_effect = llm
+        else:
+            mock_client.messages.create.return_value = response
+        try:
+            result = asyncio.run(cleaner_node({"analysis_id": "test-analysis-id", "stored_filename": "bool.csv"}))
+        except Exception as exc:
+            result = exc
+    return result, [payload for _, payload in updates]
+
+
+def test_cleaning_report_save_survives_one_transient_failure() -> None:
+    result, payloads = _run_cleaner_node_failing({"decisions": []}, frozenset({1}))
+    assert not isinstance(result, Exception)
+    assert [p["status"] for p in payloads] == ["cleaning", "cleaned", "cleaned"]
+    assert payloads[1]["cleaning_report"] == payloads[2]["cleaning_report"] == result["cleaning_report"]
+
+
+def test_cleaner_error_write_survives_one_transient_failure() -> None:
+    result, payloads = _run_cleaner_node_failing(RuntimeError("llm down"), frozenset({1}))
+    assert isinstance(result, RuntimeError) and str(result) == "llm down"
+    assert [p["status"] for p in payloads] == ["cleaning", "error", "error"]
+    assert payloads[-1]["error_message"] == "SYSTEM_ERROR: llm down"

@@ -8,6 +8,7 @@ in the individual agent files; this file contains graph structure only.
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -19,6 +20,7 @@ from backend.agents.explainer import explainer_node
 from backend.agents.profiler import PipelineState, profiler_node
 from backend.utils.langsmith_client import create_tracer
 from backend.utils.supabase_client import get_supabase_client
+from backend.utils.supabase_retry import TRANSIENT, supabase_call
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,13 @@ logger = logging.getLogger(__name__)
 # would fail after the user had answered them. Loops are bounded by the Cleaner's
 # repeat-pause guard (one pause per pause type and column), not by this limit.
 _RECURSION_LIMIT = 1000
+
+# A pause can wait hours for its answer, so a short outage must not end it: a
+# poll that still fails after supabase_call's own retries is logged and polling
+# continues. Only this long a run of consecutive failures raises (Build L.2).
+_POLL_INTERVAL_SECONDS = 3
+_POLL_FAILURE_BUDGET_SECONDS = 120.0
+_monotonic = time.monotonic  # module-level so tests can drive the clock
 
 
 async def build_initial_state(
@@ -79,48 +88,135 @@ async def check_for_pause_response(analysis_id: str) -> Optional[dict]:
 
     Returns the value if non-None, otherwise returns None.
     """
-    response = await asyncio.to_thread(
+    response = await supabase_call(
         lambda: get_supabase_client()
         .table("analyses")
         .select("user_pause_response")
         .eq("id", analysis_id)
-        .execute()
+        .execute(),
+        what="pause poll",
     )
     if not response.data:
         return None
     return response.data[0].get("user_pause_response")
 
 
-async def domain_pause_wait_node(state: PipelineState) -> dict:
-    """Set status to domain_pause and poll until the user responds."""
-    analysis_id = state["analysis_id"]
+def _field(value: object, key: str) -> object:
+    return value.get(key) if isinstance(value, dict) else None
 
-    # Clear any leftover user_pause_response from a prior pause cycle before
-    # polling — otherwise check_for_pause_response would read the stale value
-    # and return immediately with the wrong response. pause_data rides in the
-    # same update so the status never shows a pause without its question.
-    await asyncio.to_thread(
+
+def _answers_this_pause(answer: object, status: str, pause_data: Optional[dict]) -> bool:
+    """True when a stored user_pause_response was written for this pause.
+
+    /resume accepts only an answer whose pause_type is the active status and,
+    for a Cleaner pause, whose column_name is the pause's column; the Cleaner's
+    repeat guard (Build F3) means a (pause type, column) never recurs. Any other
+    stored answer is the previous pause's: cleaner_node writes only its status,
+    so that answer is still in the row when the next pause is written.
+    """
+    if _field(answer, "pause_type") != status:
+        return False
+    if status == "domain_pause":
+        return True
+    # A Cleaner pause without a column name cannot be told apart from an earlier one
+    # of its type, so no stored answer counts as its answer: re-showing the question
+    # is recoverable, applying an earlier answer to it is not.
+    column = _field(pause_data, "column_name")
+    return isinstance(column, str) and bool(column) and _field(answer, "column_name") == column
+
+
+def _shows_this_pause(stored_pause_data: object, status: str, pause_data: Optional[dict]) -> bool:
+    if status == "domain_pause":
+        return isinstance(stored_pause_data, dict) and stored_pause_data.get("type") == _field(pause_data, "type")
+    return _field(stored_pause_data, "column_name") == _field(pause_data, "column_name")
+
+
+async def _write_pause(analysis_id: str, status: str, pause_data: Optional[dict]) -> None:
+    """Set the pause status and its question, clearing any earlier answer, in one update.
+
+    Clearing the leftover user_pause_response matters: check_for_pause_response
+    would otherwise read the previous pause's answer and return at once.
+    pause_data rides in the same update so the status never shows a pause
+    without its question.
+
+    Re-sent blindly after a lost response, this write would erase an answer that
+    arrived in between, so a transient failure is resolved by reading the row
+    first (Build L.2). It landed if the row shows this pause, or already holds
+    an answer to it; a stored answer to any other pause means it did not land.
+    """
+
+    def landed() -> bool:
+        rows = (
+            get_supabase_client()
+            .table("analyses")
+            .select("status, pause_data, user_pause_response")
+            .eq("id", analysis_id)
+            .execute()
+            .data
+        )
+        if not rows:
+            return False
+        row = rows[0]
+        if row.get("status") == status and _shows_this_pause(row.get("pause_data"), status, pause_data):
+            return True
+        return _answers_this_pause(row.get("user_pause_response"), status, pause_data)
+
+    await supabase_call(
         lambda: get_supabase_client()
         .table("analyses")
         .update({
-            "status": "domain_pause",
-            "pause_data": state.get("domain_pause_data"),
+            "status": status,
+            "pause_data": pause_data,
             "user_pause_response": None,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         })
         .eq("id", analysis_id)
-        .execute()
+        .execute(),
+        what=f"{status} write",
+        landed=landed,
     )
 
+
+async def _wait_for_answer(analysis_id: str, node: str) -> dict:
+    """Poll every few seconds until the user's answer is stored, then return it."""
+    failing_since: Optional[float] = None
     while True:
-        await asyncio.sleep(3)
-        response = await check_for_pause_response(analysis_id)
-        if response is not None:
-            logger.info(
-                "domain_pause_wait_node: user response received for analysis_id=%s",
-                analysis_id,
+        await asyncio.sleep(_POLL_INTERVAL_SECONDS)
+        try:
+            response = await check_for_pause_response(analysis_id)
+        except TRANSIENT as exc:
+            now = _monotonic()
+            if failing_since is None:
+                failing_since = now
+            if now - failing_since >= _POLL_FAILURE_BUDGET_SECONDS:
+                logger.error(
+                    "%s: pause poll has failed for %.0f s for analysis_id=%s; giving up",
+                    node, now - failing_since, analysis_id,
+                )
+                raise
+            logger.warning(
+                "%s: pause poll failed (%s: %s) for analysis_id=%s; still polling "
+                "(failing for %.0f s of %.0f s allowed)",
+                node, type(exc).__name__, exc, analysis_id,
+                now - failing_since, _POLL_FAILURE_BUDGET_SECONDS,
             )
-            break
+            continue
+        failing_since = None
+        if response is not None:
+            return response
+
+
+async def domain_pause_wait_node(state: PipelineState) -> dict:
+    """Set status to domain_pause and poll until the user responds."""
+    analysis_id = state["analysis_id"]
+
+    await _write_pause(analysis_id, "domain_pause", state.get("domain_pause_data"))
+
+    response = await _wait_for_answer(analysis_id, "domain_pause_wait_node")
+    logger.info(
+        "domain_pause_wait_node: user response received for analysis_id=%s",
+        analysis_id,
+    )
 
     return {
         "user_pause_response": response,
@@ -160,32 +256,17 @@ async def cleaner_pause_wait_node(state: PipelineState) -> dict:
             analysis_id,
         )
 
-    # Clear any leftover user_pause_response before polling — the domain pause
-    # response may still be in the DB and would cause an immediate false return.
-    await asyncio.to_thread(
-        lambda: get_supabase_client()
-        .table("analyses")
-        .update({
-            "status": status,
-            "pause_data": pause_data,
-            "user_pause_response": None,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        })
-        .eq("id", analysis_id)
-        .execute()
-    )
+    # The domain pause's answer, or an earlier Cleaner pause's, may still be in
+    # the DB; _write_pause clears it so the poll cannot return it at once.
+    await _write_pause(analysis_id, status, pause_data)
 
-    while True:
-        await asyncio.sleep(3)
-        response = await check_for_pause_response(analysis_id)
-        if response is not None:
-            logger.info(
-                "cleaner_pause_wait_node: user response received for analysis_id=%s "
-                "(pause_type=%s)",
-                analysis_id,
-                status,
-            )
-            break
+    response = await _wait_for_answer(analysis_id, "cleaner_pause_wait_node")
+    logger.info(
+        "cleaner_pause_wait_node: user response received for analysis_id=%s "
+        "(pause_type=%s)",
+        analysis_id,
+        status,
+    )
 
     # /resume clears the DB copy of the question, and the Cleaner's next run
     # must honor every earlier answer, not only this one — so each answered
@@ -282,7 +363,7 @@ async def run_pipeline(initial_state: PipelineState) -> PipelineState:
         return final_state
     except Exception as exc:
         logger.exception("Pipeline failed for analysis_id=%s", analysis_id)
-        await asyncio.to_thread(
+        await supabase_call(
             lambda: get_supabase_client()
             .table("analyses")
             .update({
@@ -291,6 +372,7 @@ async def run_pipeline(initial_state: PipelineState) -> PipelineState:
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
             .eq("id", analysis_id)
-            .execute()
+            .execute(),
+            what="pipeline error write",
         )
         raise

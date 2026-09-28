@@ -17,6 +17,7 @@ import pathlib
 from typing import Callable
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import numpy as np
 import pandas as pd
 import pytest
@@ -1247,7 +1248,9 @@ def _run_node(
     responses: list,
     charts: list | None = None,
     concerns: object = None,
+    fail_updates: frozenset = frozenset(),
 ) -> dict:
+    """fail_updates: 0-based update indices that fail once with a transient error (Build L.2)."""
     parquet_path = tmp_path / "cleaned.parquet"
     _sparse().to_parquet(parquet_path, index=False)
     cleaned = pd.read_parquet(parquet_path)
@@ -1272,7 +1275,10 @@ def _run_node(
 
     def update(payload: dict) -> MagicMock:
         at_save_time.append(copy.deepcopy(payload))
-        return MagicMock()
+        query = MagicMock()
+        if len(at_save_time) - 1 in fail_updates:
+            query.eq.return_value.execute.side_effect = httpx.RemoteProtocolError("Server disconnected")
+        return query
 
     supabase.table.return_value.update.side_effect = update
     state = {
@@ -1563,3 +1569,28 @@ def test_node_warns_once_for_non_list_concerns(tmp_path: pathlib.Path, caplog: p
 
 def test_analyzer_prompt_concern_field_is_the_issue_text() -> None:
     assert "// the concern's issue text, verbatim" in load_system_prompt("analyzer")
+
+
+# ---------------------------------------------------------------------------
+# Supabase writes after the LLM call survive one transient failure (Build L.2)
+# ---------------------------------------------------------------------------
+
+_ANALYZER_SAVES = ["analysis_report", "chart_paths", "data_quality_score", "updated_at"]
+
+
+@pytest.mark.parametrize("failing", [1, 2, 3, 4], ids=_ANALYZER_SAVES)
+def test_analyzer_saves_survive_one_transient_failure(tmp_path: pathlib.Path, failing: int) -> None:
+    run = _run_node(tmp_path, [_passing(1)], fail_updates=frozenset({failing}))
+    assert not isinstance(run["result"], Exception)
+    keys = ["status" if "status" in p else next(iter(p)) for p in run["saves"]]
+    expected = ["status", *_ANALYZER_SAVES]
+    expected.insert(failing, expected[failing])  # the failed save, re-sent
+    assert keys == expected
+    assert run["result"]["analysis_report"]["call_marker"] == 1
+
+
+def test_analyzer_error_write_survives_one_transient_failure(tmp_path: pathlib.Path) -> None:
+    run = _run_node(tmp_path, [RuntimeError("llm down")], fail_updates=frozenset({1}))
+    assert isinstance(run["result"], RuntimeError) and str(run["result"]) == "llm down"
+    assert [p.get("status") for p in run["saves"]] == ["analyzing", "error", "error"]
+    assert run["saves"][-1]["error_message"] == "SYSTEM_ERROR: llm down"

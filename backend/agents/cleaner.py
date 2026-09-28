@@ -28,6 +28,7 @@ from backend.models.schemas import (
 from backend.utils.file_handler import cleanup_temp_file, upload_to_storage
 from backend.utils.langsmith_client import create_tracer
 from backend.utils.supabase_client import get_supabase_client
+from backend.utils.supabase_retry import supabase_call
 from backend.agents.profiler import PipelineState, load_system_prompt, parse_json_response
 
 logger = logging.getLogger(__name__)
@@ -2116,7 +2117,7 @@ async def cleaner_node(state: PipelineState) -> dict:
     try:
         tracer = create_tracer("cleaner")
 
-        await asyncio.to_thread(
+        await supabase_call(
             lambda: get_supabase_client()
             .table("analyses")
             .update({
@@ -2124,7 +2125,8 @@ async def cleaner_node(state: PipelineState) -> dict:
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
             .eq("id", analysis_id)
-            .execute()
+            .execute(),
+            what="cleaner status write",
         )
 
         df = await load_dataframe_from_uploads(state["stored_filename"])
@@ -2342,7 +2344,7 @@ async def cleaner_node(state: PipelineState) -> dict:
             "operations_summary": operations_summary,
         }
 
-        await asyncio.to_thread(
+        await supabase_call(
             lambda: get_supabase_client()
             .table("analyses")
             .update({
@@ -2352,7 +2354,8 @@ async def cleaner_node(state: PipelineState) -> dict:
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
             .eq("id", analysis_id)
-            .execute()
+            .execute(),
+            what="cleaning report save",
         )
 
         return {
@@ -2368,7 +2371,7 @@ async def cleaner_node(state: PipelineState) -> dict:
 
     except Exception as exc:
         logger.exception("Cleaner node failed for analysis_id=%s", analysis_id)
-        await asyncio.to_thread(
+        await supabase_call(
             lambda: get_supabase_client()
             .table("analyses")
             .update({
@@ -2377,6 +2380,7 @@ async def cleaner_node(state: PipelineState) -> dict:
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
             .eq("id", analysis_id)
-            .execute()
+            .execute(),
+            what="cleaner error write",
         )
         raise

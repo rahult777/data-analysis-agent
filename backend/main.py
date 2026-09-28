@@ -15,6 +15,8 @@ from typing import Optional
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from postgrest import APIResponse
+from postgrest.exceptions import APIError
 
 from backend.agents.explainer import answer_question
 from backend.agents.orchestrator import build_initial_state, run_pipeline
@@ -30,6 +32,7 @@ from backend.models.schemas import (
 )
 from backend.utils.file_handler import cleanup_temp_file, save_temp_file, validate_file
 from backend.utils.supabase_client import get_supabase_client
+from backend.utils.supabase_retry import supabase_call
 
 logger = logging.getLogger(__name__)
 
@@ -190,11 +193,12 @@ async def get_session(
     session_id: str = Header(None, alias="session-id"),
 ) -> str:
     client = get_supabase_client()
-    response = await asyncio.to_thread(
+    response = await supabase_call(
         lambda: client.table("analyses")
         .select("id, session_id")
         .eq("id", analysis_id)
-        .execute()
+        .execute(),
+        what="session check",
     )
     if not response.data:
         raise HTTPException(status_code=404, detail="Analysis not found.")
@@ -229,6 +233,40 @@ async def get_public_read_access(analysis_id: str) -> str:
     if not _is_canonical_uuid(analysis_id):
         raise HTTPException(status_code=404, detail="Analysis not found.")
     return analysis_id
+
+
+async def _insert_row(table: str, row: dict, match_columns: tuple[str, ...], what: str) -> None:
+    """Insert a row whose id was made in Python, at most once (Build L.2).
+
+    The id exists before the insert, so a lost response is resolved by looking
+    for the row: landed() matches every column in match_columns. A duplicate-key
+    error (23505) on a re-send means an earlier attempt committed; on the first
+    send it is a real error.
+    """
+    sends = 0
+
+    def insert() -> None:
+        nonlocal sends
+        sends += 1
+        try:
+            get_supabase_client().table(table).insert(row).execute()
+        except APIError as exc:
+            if sends > 1 and exc.code == "23505":
+                logger.warning("%s: duplicate key on a re-send; an earlier attempt committed", what)
+                return
+            raise
+
+    def landed() -> bool:
+        query = get_supabase_client().table(table).select("id")
+        for column in match_columns:
+            query = query.eq(column, row[column])
+        return bool(query.execute().data)
+
+    await supabase_call(insert, what=what, landed=landed)
+
+
+class _PauseMovedOn(Exception):
+    """Raised by /resume's re-read: the row changed since the pre-read, and not by this answer."""
 
 
 # ---------------------------------------------------------------------------
@@ -277,20 +315,18 @@ async def upload_file(
     analysis_id = str(uuid.uuid4())
     session_id = str(uuid.uuid4())
 
-    client = get_supabase_client()
-    await asyncio.to_thread(
-        lambda: client.table("analyses")
-        .insert(
-            {
-                "id": analysis_id,
-                "status": "profiling",
-                "original_filename": file.filename,
-                "stored_filename": stored_filename,
-                "file_size": len(content),
-                "session_id": session_id,
-            }
-        )
-        .execute()
+    await _insert_row(
+        "analyses",
+        {
+            "id": analysis_id,
+            "status": "profiling",
+            "original_filename": file.filename,
+            "stored_filename": stored_filename,
+            "file_size": len(content),
+            "session_id": session_id,
+        },
+        ("id", "session_id"),
+        "upload insert",
     )
 
     background_tasks.add_task(
@@ -312,11 +348,12 @@ async def get_status(
     _access: str = Depends(get_public_read_access),
 ) -> StatusResponse:
     client = get_supabase_client()
-    response = await asyncio.to_thread(
+    response = await supabase_call(
         lambda: client.table("analyses")
         .select("id, status, error_message, pause_data")
         .eq("id", analysis_id)
-        .execute()
+        .execute(),
+        what="status read",
     )
     if not response.data:
         raise HTTPException(status_code=404, detail="Analysis not found.")
@@ -338,8 +375,9 @@ async def get_analysis(
     _access: str = Depends(get_public_read_access),
 ) -> AnalysisResponse:
     client = get_supabase_client()
-    response = await asyncio.to_thread(
-        lambda: client.table("analyses").select("*").eq("id", analysis_id).execute()
+    response = await supabase_call(
+        lambda: client.table("analyses").select("*").eq("id", analysis_id).execute(),
+        what="analysis read",
     )
     if not response.data:
         raise HTTPException(status_code=404, detail="Analysis not found.")
@@ -370,18 +408,16 @@ async def post_question(
     _session: str = Depends(get_session),
 ) -> QuestionResponse:
     question_id = str(uuid.uuid4())
-    client = get_supabase_client()
-    await asyncio.to_thread(
-        lambda: client.table("questions")
-        .insert(
-            {
-                "id": question_id,
-                "analysis_id": analysis_id,
-                "question": request.question,
-                "status": "pending",
-            }
-        )
-        .execute()
+    await _insert_row(
+        "questions",
+        {
+            "id": question_id,
+            "analysis_id": analysis_id,
+            "question": request.question,
+            "status": "pending",
+        },
+        ("id",),
+        "question insert",
     )
 
     background_tasks.add_task(run_question_task, question_id, analysis_id, request.question)
@@ -408,12 +444,13 @@ async def get_question(
     if not _is_canonical_uuid(question_id):
         raise HTTPException(status_code=404, detail="Question not found")
     client = get_supabase_client()
-    response = await asyncio.to_thread(
+    response = await supabase_call(
         lambda: client.table("questions")
         .select("*")
         .eq("id", question_id)
         .eq("analysis_id", analysis_id)
-        .execute()
+        .execute(),
+        what="question read",
     )
     if not response.data:
         raise HTTPException(status_code=404, detail="Question not found")
@@ -435,11 +472,12 @@ async def resume_analysis(
     _session: str = Depends(get_session),
 ) -> StatusResponse:
     client = get_supabase_client()
-    response = await asyncio.to_thread(
+    response = await supabase_call(
         lambda: client.table("analyses")
         .select("id, status, pause_data, updated_at")
         .eq("id", analysis_id)
-        .execute()
+        .execute(),
+        what="resume read",
     )
     if not response.data:
         raise HTTPException(status_code=404, detail="Analysis not found.")
@@ -477,11 +515,60 @@ async def resume_analysis(
         if read_updated_at is not None
         else query.is_("updated_at", "null")
     )
-    updated = await asyncio.to_thread(query.execute)
-    if not updated.data:
-        raise HTTPException(
-            status_code=409,
-            detail="The pause this response answers is no longer active. Refresh and try again.",
+    # A lost response is resolved by re-reading the row (Build L.2): this answer
+    # stored with pause_data cleared means the update landed; the row exactly as
+    # read means it did not, and the same conditional update is re-sent (its
+    # condition lets it apply at most once); anything else means the pause moved on.
+    moved_on = HTTPException(
+        status_code=409,
+        detail="The pause this response answers is no longer active. Refresh and try again.",
+    )
+    sends = 0
+
+    def send_update() -> APIResponse:
+        nonlocal sends
+        sends += 1
+        return query.execute()
+
+    def reread() -> Optional[dict]:
+        rows = (
+            client.table("analyses")
+            .select("status, pause_data, user_pause_response, updated_at")
+            .eq("id", analysis_id)
+            .execute()
+            .data
+        )
+        return rows[0] if rows else None
+
+    def answer_is_stored(row: Optional[dict]) -> bool:
+        return (
+            row is not None
+            and row.get("user_pause_response") == body.response
+            and row.get("pause_data") is None
+        )
+
+    def update_landed() -> bool:
+        row = reread()
+        if answer_is_stored(row):
+            return True
+        if row is not None and row.get("status") == status and row.get("updated_at") == read_updated_at:
+            return False
+        raise _PauseMovedOn()
+
+    try:
+        updated = await supabase_call(send_update, what="resume update", landed=update_landed)
+    except _PauseMovedOn:
+        logger.warning("resume update for analysis_id=%s: the pause moved on after a lost response", analysis_id)
+        raise moved_on from None
+    if updated is not None and not updated.data:
+        # A re-send matching no rows may follow an earlier attempt that committed
+        # after the re-read; only this answer stored makes it a success.
+        if sends == 1 or not answer_is_stored(await supabase_call(reread, what="resume re-read")):
+            raise moved_on
+        logger.warning(
+            "resume update for analysis_id=%s: a re-send matched no rows, but the answer "
+            "is stored; an earlier attempt committed",
+            analysis_id,
         )
     # Pipeline continues automatically — the polling loop in pause wait nodes
     # detects user_pause_response and resumes execution.
@@ -500,11 +587,12 @@ async def get_charts(
     _access: str = Depends(get_public_read_access),
 ) -> dict:
     client = get_supabase_client()
-    response = await asyncio.to_thread(
+    response = await supabase_call(
         lambda: client.table("analyses")
         .select("chart_paths")
         .eq("id", analysis_id)
-        .execute()
+        .execute(),
+        what="charts read",
     )
     if not response.data:
         raise HTTPException(status_code=404, detail="Analysis not found.")
