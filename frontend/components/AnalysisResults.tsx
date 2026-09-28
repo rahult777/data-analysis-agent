@@ -104,7 +104,8 @@ function AnalysisHeader({
       className="flex flex-col gap-5"
     >
       <div className="flex flex-col gap-1.5">
-        <span className="font-mono text-sm tracking-wide text-muted-foreground">
+        {/* An uploaded name often has no spaces; wrap it anywhere rather than widen the page at 320 px. */}
+        <span className="min-w-0 font-mono text-sm tracking-wide text-muted-foreground [overflow-wrap:anywhere]">
           {filename}
         </span>
         <h2

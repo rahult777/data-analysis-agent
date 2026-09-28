@@ -155,6 +155,8 @@ All four agent prompts exist (see Completed). Open prompt-quality work is tracke
 - [ ] Dynamic Open Graph / social-preview metadata for /analysis/{id} links (title, filename-free summary, maybe a chart thumbnail) — separate from the shared-link fix, which it now depends on: `generateMetadata` in a server component can read the public GET /api/analysis/{id}. Needs a small server wrapper because page.tsx is `"use client"`.
 - [x] Show upload USER_ERROR rejections as user errors in FileUpload — Build E, 2026-09-21. `classifyUploadError()` strips the `USER_ERROR:`/`SYSTEM_ERROR:` prefix and picks amber (user) vs red (api) styling, with a generic fallback for unprefixed failures (e.g. axios "Network Error"). Live-verified at 320px against a real backend 400 (header-only CSV) and with the backend stopped. See decisions.md 2026-09-21.
 
+- [x] Wrap long uploaded filenames at 320 px — 2026-09-28, found by Build L.2's D3 dry run (check 8c: a 37-character name overflowed the results page by 29 px). The results header's filename span wraps anywhere (`min-w-0 [overflow-wrap:anywhere]`); the upload preview already truncates by design. e2e/filename.spec.ts (60-character name, both widths); e2e 80 passed; 2 of 2 mutations caught. See errors.md 2026-09-28 ("A long uploaded filename overflows…")
+
 ### Tests
 
 - [x] tests/fixtures/iris.csv

@@ -8,7 +8,7 @@ import path from "node:path";
 
 import type { Page, Request, Route } from "@playwright/test";
 
-import type { AnalysisStatus, StatusResponse } from "../lib/types";
+import type { AnalysisResponse, AnalysisStatus, StatusResponse } from "../lib/types";
 
 // Deliberately unreachable by default (port 9, "discard"): not a service URL.
 // The app is started with it (playwright.config.ts) so an unmocked call can
@@ -90,6 +90,7 @@ export class MockApi {
   resumeReplies = 0;
   private servedWaiters: Array<() => void> = [];
   private failStatus = false;
+  private analysis: AnalysisResponse | null = null;
   readonly unmocked: string[] = [];
   private pendingHolds: Array<{ onArrive: () => void; wait: Promise<StatusBody> }> = [];
   private uploadHandler: () => Promise<ResumeReply> | ResumeReply = () => ({
@@ -109,6 +110,11 @@ export class MockApi {
 
   setStatus(body: StatusBody): void {
     this.current = body;
+  }
+
+  // The full result GET /api/analysis/{id} returns once the status is complete.
+  setAnalysis(body: AnalysisResponse): void {
+    this.analysis = body;
   }
 
   onResume(handler: (call: ResumeCall) => Promise<ResumeReply> | ResumeReply): void {
@@ -182,6 +188,10 @@ export class MockApi {
       }
       await this.json(route, 200, body);
       for (const served of this.servedWaiters.splice(0)) served();
+      return;
+    }
+    if (request.method() === "GET" && url.pathname === `/api/analysis/${ANALYSIS_ID}` && this.analysis !== null) {
+      await this.json(route, 200, this.analysis);
       return;
     }
     if (request.method() === "POST" && url.pathname === `/api/analysis/${ANALYSIS_ID}/resume`) {
