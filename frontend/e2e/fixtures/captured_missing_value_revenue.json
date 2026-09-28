@@ -10,8 +10,8 @@
   "options": [
     {
       "id": "impute",
-      "label": "Impute the 70 missing values with median ($24,200)",
-      "method": "median ($24,200)",
+      "label": "Impute the 70 missing values with the median",
+      "method": "the median of `revenue`'s recorded values, computed when cleaning runs, after exact duplicate rows are removed; it includes this column's unusual values, which you may be asked about next",
       "method_id": "median",
       "assumption": "missingness is non-informative — the 70 missing accounts are assumed to resemble the 130 recorded accounts in revenue level; this assumption is explicitly contradicted by the Profiler's concern that missingness may be structured by sales rep, region, or product, and any per-rep or per-region revenue aggregate produced from the imputed dataset carries an unknown selection bias"
     },
@@ -28,7 +28,7 @@
     {
       "id": "preserve_missingness",
       "label": "Keep `revenue` as it is: its 70 missing values stay missing",
-      "consequence": "nothing is imputed and no rows are removed. Statistics on `revenue` will use only its 130 recorded values, and the missingness is recorded in the cleaning report, where the Analyzer and Explainer will see it"
+      "consequence": "nothing is imputed and no rows are removed. Statistics on `revenue` will use only its recorded values, and the missingness is recorded in the cleaning report, where the Analyzer and Explainer will see it"
     }
   ]
 }

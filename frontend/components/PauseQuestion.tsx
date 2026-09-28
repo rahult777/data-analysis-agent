@@ -4,12 +4,14 @@
 // no navigation). Select-then-confirm: the options are native radios in a
 // fieldset, the chosen option's consequence is shown, and one button sends
 // it. Every model-written string is rendered as plain text; the only markup
-// derived from it is <code> for `backtick` spans.
+// derived from it is <code> for `backtick` spans. The model's reasoning sits
+// behind a collapsed disclosure above the options, so the decision is never
+// below a screenful of prose at 320px.
 
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
 import Link from "next/link";
 import { AnimatePresence, motion } from "framer-motion";
-import { AlertTriangle, HelpCircle, Loader2 } from "lucide-react";
+import { AlertTriangle, ChevronDown, HelpCircle, Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -334,6 +336,74 @@ function Paragraph({ text, muted = true }: { text: string; muted?: boolean }) {
   );
 }
 
+interface ReasoningSection {
+  label: string | null;
+  text: string;
+}
+
+// A button with aria-expanded/aria-controls, not <details>: its content
+// enters and leaves through Framer Motion (docs/ui-and-frontend.md, section
+// reveals). It renders outside the options' fieldset, so it stays usable when
+// the fieldset is disabled (visitors, while sending).
+function Reasoning({ summary, sections, list = false }: { summary: string; sections: ReasoningSection[]; list?: boolean }) {
+  const [open, setOpen] = useState<boolean>(false);
+  const contentId = useId();
+  if (sections.length === 0) return null;
+  return (
+    <div className="flex flex-col gap-2">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={contentId}
+        onClick={() => setOpen((value) => !value)}
+        className={cn(
+          "-mx-1 flex min-h-11 items-center gap-2 self-start rounded px-1 text-left text-sm font-medium hover:text-primary",
+          FOCUS_RING,
+        )}
+      >
+        <motion.span animate={{ rotate: open ? 180 : 0 }} transition={{ duration: 0.2, ease: "easeOut" }} className="inline-flex">
+          <ChevronDown className="size-4" aria-hidden />
+        </motion.span>
+        {summary}
+      </button>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            id={contentId}
+            data-testid="reasoning"
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            transition={{ duration: 0.3, ease: "easeOut" }}
+            className="flex flex-col gap-3 border-l border-border/60 pl-3"
+          >
+            {list ? (
+              <ul className="flex list-disc flex-col gap-1 pl-5">
+                {sections.map((section, index) => (
+                  <li key={index} className="text-sm text-muted-foreground [overflow-wrap:anywhere]">
+                    <InlineText text={section.text} />
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              sections.map((section, index) => (
+                <div key={index} className="flex flex-col gap-1">
+                  {section.label && <p className="text-sm font-medium">{section.label}</p>}
+                  <Paragraph text={section.text} />
+                </div>
+              ))
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function sectionsOf(entries: Array<[string | null, string | null]>): ReasoningSection[] {
+  return entries.flatMap(([label, text]) => (text === null ? [] : [{ label, text }]));
+}
+
 function QuestionBody({ view, headingRef }: { view: AnswerableView; headingRef: RefObject<HTMLHeadingElement> }) {
   if (view.kind === "domain") {
     const hypothesis = view.hypothesis.trim();
@@ -351,18 +421,12 @@ function QuestionBody({ view, headingRef }: { view: AnswerableView; headingRef: 
               : "."}
           </p>
         )}
-        {view.signals.length > 0 && (
-          <div className="flex flex-col gap-1.5">
-            <p className="text-sm font-medium">What it based this on</p>
-            <ul className="flex list-disc flex-col gap-1 pl-5">
-              {view.signals.map((signal, index) => (
-                <li key={index} className="text-sm text-muted-foreground [overflow-wrap:anywhere]">
-                  <InlineText text={signal} />
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
+        {/* Signals are shown as written: most begin with a column name (x1, ref). */}
+        <Reasoning
+          summary={`What it based this on (${view.signals.length})`}
+          sections={view.signals.map((text) => ({ label: null, text }))}
+          list
+        />
       </div>
     );
   }
@@ -382,14 +446,14 @@ function QuestionBody({ view, headingRef }: { view: AnswerableView; headingRef: 
           <InlineText text={`Missing values in \`${view.columnName}\``} />
         </Heading>
         {counts && <Paragraph text={counts} muted={false} />}
-        {view.represents && <Paragraph text={view.represents} />}
-        {(view.provenance || view.domainContext) && (
-          <div className="flex flex-col gap-1.5">
-            <p className="text-sm font-medium">Why this needs your decision</p>
-            {view.provenance && <Paragraph text={view.provenance} />}
-            {view.domainContext && <Paragraph text={view.domainContext} />}
-          </div>
-        )}
+        <Reasoning
+          summary="Why the Cleaner is asking"
+          sections={sectionsOf([
+            ["What this column is", view.represents],
+            ["What the missingness likely means", view.provenance],
+            ["What each choice costs here", view.domainContext],
+          ])}
+        />
       </div>
     );
   }
@@ -414,7 +478,7 @@ function QuestionBody({ view, headingRef }: { view: AnswerableView; headingRef: 
           muted={false}
         />
       )}
-      {view.note && <Paragraph text={view.note} />}
+      <Reasoning summary="Why the Cleaner is asking" sections={sectionsOf([[null, view.note]])} />
     </div>
   );
 }

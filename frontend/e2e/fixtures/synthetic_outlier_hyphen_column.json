@@ -1,0 +1,23 @@
+{
+  "type": "outlier_decision_required",
+  "domain_context": "financial",
+  "column_name": "order-id",
+  "outlier_count": 2,
+  "outlier_value": 99999,
+  "sd_distance": 4.1,
+  "column_mean": 5021.5,
+  "column_std": 2210.3,
+  "financial_context_note": "order-id values of 99999 look like a placeholder written by the export, not real orders",
+  "options": [
+    {
+      "id": "treat_as_valid",
+      "label": "Treat the 2 outlier value(s) as valid data (legitimate large transaction or expected business event)",
+      "consequence": "order-id keeps both values in every statistic"
+    },
+    {
+      "id": "flag_as_suspected_error",
+      "label": "Flag the 2 outlier value(s) as suspected data entry error or fraud; exclude from aggregate statistics pending investigation",
+      "consequence": "the values are set to missing in `order-id`, so they drop out of every statistic; their rows are kept and marked in `order-id_outlier_flag`"
+    }
+  ]
+}

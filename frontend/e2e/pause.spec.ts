@@ -27,6 +27,8 @@ const OUTLIER_REVENUE = fixture("captured_outlier_revenue_financial.json");
 const OUTLIER_MEDICAL = fixture("synthetic_outlier_medical.json");
 const OUTLIER_NULLS = fixture("synthetic_outlier_null_stats.json");
 const UNRENDERABLE = fixture("synthetic_unrenderable_missing_options.json");
+const MV_CASE_GUARD = fixture("synthetic_missing_value_case_guard.json");
+const OUTLIER_HYPHEN = fixture("synthetic_outlier_hyphen_column.json");
 
 const RECORDED_CLEANER =
   "Answer recorded — the Cleaner is re-running and may ask about another column (this can take a minute or two).";
@@ -93,6 +95,23 @@ function statusLine(page: Page): Locator {
   return page.getByTestId("status-line");
 }
 
+function reasoningButton(page: Page, name: string | RegExp = "Why the Cleaner is asking"): Locator {
+  return question(page).getByRole("button", { name });
+}
+
+function reasoning(page: Page): Locator {
+  return page.getByTestId("reasoning");
+}
+
+// True when `before` precedes `after` in document order.
+async function precedes(before: Locator, after: Locator): Promise<boolean> {
+  const handle = await after.elementHandle();
+  return before.evaluate(
+    (el, other) => Boolean(other && el.compareDocumentPosition(other) & Node.DOCUMENT_POSITION_FOLLOWING),
+    handle,
+  );
+}
+
 async function expectLayout(page: Page): Promise<void> {
   const overflow = await page.evaluate(
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
@@ -138,6 +157,8 @@ test("domain pause: normal hypothesis, calibrated score and signals", async ({ p
   await expect(question(page)).toContainText(
     "Confidence: 71 / 100 — below the 80 needed to continue without asking.",
   );
+  await expect(question(page).getByRole("listitem")).toHaveCount(0);
+  await reasoningButton(page, "What it based this on (3)").click();
   await expect(question(page).getByRole("listitem")).toHaveCount(3);
   await expect(page.getByRole("radio", { name: "Yes, it's Retail and E-commerce" })).toBeVisible();
   await expect(page.getByRole("radio", { name: "No, it's something else" })).toBeVisible();
@@ -156,7 +177,7 @@ test("domain pause: 'unknown' uses the decided wording and confirm sends exactly
 
   await expect(heading(page)).toHaveText("The Profiler couldn't tell what kind of data this is.");
   await expect(question(page)).not.toContainText("best guess");
-  await expect(question(page).getByRole("listitem")).toHaveCount(8);
+  await expect(reasoningButton(page, "What it based this on (8)")).toHaveAttribute("aria-expanded", "false");
   await expectLayout(page);
   await shot(page, info, "domain-unknown");
 
@@ -233,7 +254,7 @@ test("missing-value pause with 4 options: counts, context, select-then-confirm",
   await expect(heading(page)).toHaveText("Missing values in revenue");
   await expect(heading(page).locator("code")).toHaveText("revenue");
   await expect(question(page)).toContainText("70 of 200 values (35%) are missing in the uploaded file.");
-  await expect(question(page)).toContainText("Why this needs your decision");
+  await expect(reasoningButton(page)).toHaveAttribute("aria-expanded", "false");
   await expect(page.getByRole("radio")).toHaveCount(4);
   const keep = question(page).locator("label").filter({ hasText: "as it is" });
   await expect(keep.locator("code")).toHaveText("revenue");
@@ -244,7 +265,10 @@ test("missing-value pause with 4 options: counts, context, select-then-confirm",
   // Selecting is not answering: the consequence shows first, nothing is sent.
   await page.getByRole("radio", { name: /Impute the 70 missing values/ }).check();
   const details = page.getByTestId("choice-details");
-  await expect(details).toContainText("Method: median ($24,200).");
+  await expect(details).toContainText(
+    "Method: the median of revenue's recorded values, computed when cleaning runs, after exact duplicate rows are removed; it includes this column's unusual values, which you may be asked about next.",
+  );
+  await expect(details).not.toContainText("$");
   await expect(details).toContainText("Assumption:");
   await page.getByRole("radio", { name: /Exclude the 70 rows/ }).check();
   await expect(details).toContainText("Preserves revenue as an unimputed column");
@@ -305,6 +329,7 @@ test("outlier pause, medical", async ({ page }, info) => {
   await openAsOwner(page);
 
   await expect(question(page)).toContainText("Medical data");
+  await reasoningButton(page).click();
   await expect(question(page)).toContainText("A creatinine of 12.4 mg/dL likely indicates renal failure.");
   await expect(page.getByRole("radio", { name: /pending clinical review/ })).toBeVisible();
   await expectLayout(page);
@@ -319,6 +344,96 @@ test("outlier pause with null statistics omits the sentence instead of printing 
   // The UI's own sentence is omitted (the note is Python's text and keeps its numbers).
   await expect(question(page)).not.toContainText("The most extreme,");
   await expect(question(page)).not.toContainText(/null|NaN|undefined/);
+});
+
+// ---------------------------------------------------------------------------
+// the reasoning disclosure and display capitalization
+// ---------------------------------------------------------------------------
+
+test("missing-value reasoning is collapsed by default, above the options, and expands with its sub-labels", async ({ page }, info) => {
+  api.setStatus(statusBody("missing_value_pause", MV_REVENUE));
+  await openAsOwner(page);
+
+  const button = reasoningButton(page);
+  await expect(button).toHaveAttribute("aria-expanded", "false");
+  await expect(reasoning(page)).toHaveCount(0);
+  // Collapsed, no model prose stands between the counts and the options.
+  await expect(question(page)).not.toContainText("manually entered");
+  await expect(question(page)).not.toContainText("What this column is");
+  expect(await precedes(button, question(page).locator("fieldset")), "disclosure above the options").toBe(true);
+
+  await button.click();
+  await expect(button).toHaveAttribute("aria-expanded", "true");
+  const region = reasoning(page);
+  await expect(region).toHaveAttribute("id", (await button.getAttribute("aria-controls")) ?? "missing aria-controls");
+  for (const label of ["What this column is", "What the missingness likely means", "What each choice costs here"]) {
+    await expect(region).toContainText(label);
+  }
+  await expect(region).toContainText("This dataset is manually entered, meaning missingness in revenue");
+  expect(await precedes(region, question(page).locator("fieldset")), "expanded reasoning stays above the options").toBe(true);
+  await expectLayout(page);
+  await shot(page, info, "missing-value-reasoning-open");
+
+  await button.click();
+  await expect(button).toHaveAttribute("aria-expanded", "false");
+  await expect(reasoning(page)).toHaveCount(0);
+});
+
+test("the outlier note and the domain signals sit behind the same disclosure", async ({ page }) => {
+  api.setStatus(statusBody("outlier_pause", OUTLIER_REVENUE));
+  await openAsOwner(page);
+  await expect(question(page)).not.toContainText("Not assessed.");
+  await reasoningButton(page).click();
+  await expect(reasoning(page)).toContainText("Not assessed. The Cleaner routed revenue as financial");
+
+  api.setStatus(statusBody("domain_pause", DOMAIN_UNKNOWN));
+  await expect(heading(page)).toHaveText("The Profiler couldn't tell what kind of data this is.");
+  const signals = reasoningButton(page, "What it based this on (8)");
+  await expect(signals).toHaveAttribute("aria-expanded", "false");
+  await expect(question(page).getByRole("listitem")).toHaveCount(0);
+  await signals.click();
+  await expect(question(page).getByRole("listitem")).toHaveCount(8);
+  // Signals are shown as written: they begin with column names.
+  await expect(question(page).getByRole("listitem").nth(1)).toHaveText(/^ref column follows/);
+});
+
+test("a visitor can open the reasoning while the options stay disabled", async ({ page }) => {
+  api.setStatus(statusBody("missing_value_pause", MV_REVENUE));
+  await openAsVisitor(page);
+
+  for (const radio of await page.getByRole("radio").all()) await expect(radio).toBeDisabled();
+  await expect(reasoningButton(page)).toBeEnabled();
+  await reasoningButton(page).click();
+  await expect(reasoning(page)).toContainText("What the missingness likely means");
+  expect(api.resumeCalls).toHaveLength(0);
+});
+
+test("display capitalization raises plain-word fragments only, never identifiers or the column name", async ({ page }) => {
+  api.setStatus(statusBody("missing_value_pause", MV_CASE_GUARD));
+  await openAsOwner(page);
+  await reasoningButton(page).click();
+
+  const region = reasoning(page);
+  await expect(region).toContainText("notes holds free-text comments"); // the pause's own column name
+  await expect(region.locator("code").first()).toHaveText("notes"); // a `code` span first
+  await expect(region).toContainText("In retail data, a missing note"); // a plain fragment
+  const details = page.getByTestId("choice-details");
+  await page.getByRole("radio", { name: /Exclude notes from analysis/ }).check();
+  await expect(details).toContainText("units_sold and every other column"); // underscore
+  await page.getByRole("radio", { name: /Exclude the 91 rows/ }).check();
+  await expect(details).toContainText("x1 and the other columns"); // digit
+  await page.getByRole("radio", { name: /as it is/ }).check();
+  await expect(details).toContainText("Nothing is imputed and no rows are removed.");
+
+  // The pause's own column name stays as written even with a "-" in it.
+  api.setStatus(statusBody("outlier_pause", OUTLIER_HYPHEN));
+  await expect(heading(page)).toHaveText("Unusual values in order-id");
+  await reasoningButton(page).click();
+  await expect(reasoning(page)).toContainText("order-id values of 99999 look like a placeholder");
+  await page.getByRole("radio", { name: /Treat the 2 outlier/ }).check();
+  await expect(details).toContainText("order-id keeps both values");
+  await page.getByRole("radio", { name: /Flag the 2 outlier/ }).check();
+  await expect(details).toContainText("The values are set to missing in order-id");
 });
 
 // ---------------------------------------------------------------------------

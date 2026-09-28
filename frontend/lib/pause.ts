@@ -122,13 +122,30 @@ function readOptions(
   return options;
 }
 
-function consequenceOf(option: Record<string, unknown>): string[] {
-  const consequence = asText(option.consequence);
-  return consequence ? [capitalize(consequence)] : [];
+function consequenceOf(column: string): (option: Record<string, unknown>) => string[] {
+  return (option) => {
+    const consequence = asText(option.consequence);
+    return consequence ? [capitalizeProse(consequence, column)] : [];
+  };
 }
 
-function capitalize(text: string): string {
+// Model fields are sentence fragments ("this dataset is manually entered…").
+// Display-only: the first letter is raised only when the first word is plain
+// lowercase letters — not a name with `_` or a digit (`x1`, `units_sold`), not
+// a `code` span — and the text does not start with the pause's own column
+// name (whose case is part of its identity, even when it contains "-" or a
+// space). Another column whose name is a plain word ("period") cannot be told
+// from an ordinary word: the UI knows only this pause's column (errors.md
+// 2026-09-28).
+export function capitalizeProse(text: string, column: string | null): string {
+  if (column && text.startsWith(column) && !/[A-Za-z0-9_]/.test(text.charAt(column.length))) return text;
+  if (!/^[a-z]+(?=$|[\s.,;:!?)\]—–-])/.test(text)) return text;
   return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+function prose(value: unknown, column: string): string | null {
+  const text = asText(value);
+  return text === null ? null : capitalizeProse(text, column);
 }
 
 function missingValueLabel(column: string): (id: string) => string {
@@ -192,7 +209,7 @@ export function parsePause(status: PauseStatus, raw: unknown): PauseView {
   if (status === "missing_value_pause") {
     if (data.type !== "missing_value_decision_required") return unrenderable;
     const options = readOptions(data.options, missingValueLabel(columnName), (option) => {
-      if (option.id !== "impute") return consequenceOf(option);
+      if (option.id !== "impute") return consequenceOf(columnName)(option);
       const method = asText(option.method);
       const assumption = asText(option.assumption);
       return [
@@ -209,26 +226,28 @@ export function parsePause(status: PauseStatus, raw: unknown): PauseView {
       missingCount: asNumber(data.missing_count),
       missingPct: asNumber(data.missing_pct),
       totalRows: asNumber(data.total_rows),
-      represents: asText(data.what_this_column_represents),
-      provenance: asText(data.provenance_interpretation),
-      domainContext: asText(data.domain_context),
+      represents: prose(data.what_this_column_represents, columnName),
+      provenance: prose(data.provenance_interpretation, columnName),
+      domainContext: prose(data.domain_context, columnName),
       options,
     };
   }
 
   if (data.type !== "outlier_decision_required") return unrenderable;
-  const options = readOptions(data.options, outlierLabel, consequenceOf);
+  const options = readOptions(data.options, outlierLabel, consequenceOf(columnName));
   if (options.length === 0) return unrenderable;
   const context =
     data.domain_context === "medical" || data.domain_context === "financial"
       ? data.domain_context
       : null;
-  const note =
+  const note = prose(
     context === "medical"
-      ? asText(data.clinical_significance_note)
+      ? data.clinical_significance_note
       : context === "financial"
-        ? asText(data.financial_context_note)
-        : (asText(data.financial_context_note) ?? asText(data.clinical_significance_note));
+        ? data.financial_context_note
+        : (asText(data.financial_context_note) ?? data.clinical_significance_note),
+    columnName,
+  );
   return {
     kind: "outlier",
     key,
