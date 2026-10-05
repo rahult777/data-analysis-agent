@@ -165,3 +165,8 @@ def test_supabase_client_connects_with_the_secret_key() -> None:
 def test_publishable_key_is_not_required_by_the_backend() -> None:
     assert "SUPABASE_PUBLISHABLE_KEY" not in config._REQUIRED_VARS
     assert not hasattr(config, "SUPABASE_PUBLISHABLE_KEY")
+
+
+def test_openai_key_is_not_required_by_the_backend() -> None:
+    assert "OPENAI_API_KEY" not in config._REQUIRED_VARS
+    assert not hasattr(config, "OPENAI_API_KEY")

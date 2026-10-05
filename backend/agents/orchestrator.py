@@ -328,7 +328,9 @@ async def run_pipeline(initial_state: PipelineState) -> PipelineState:
     """Build and run the full 4-agent LangGraph pipeline.
 
     Creates a LangSmith tracer and passes it as a config callback so every
-    node execution is traced — required by CLAUDE.md Rule 8.
+    node execution is traced — required by CLAUDE.md Rule 8. With tracing off
+    create_tracer returns None and no callback is passed; the agent-work routes
+    refuse before a pipeline can start (backend/utils/agent_guard.py).
     """
     analysis_id = initial_state["analysis_id"]
     tracer = create_tracer("pipeline")
@@ -355,11 +357,12 @@ async def run_pipeline(initial_state: PipelineState) -> PipelineState:
 
     graph = graph_builder.compile()
 
+    run_config: dict = {"recursion_limit": _RECURSION_LIMIT}
+    if tracer is not None:
+        run_config["callbacks"] = [tracer]
+
     try:
-        final_state = await graph.ainvoke(
-            initial_state,
-            config={"callbacks": [tracer], "recursion_limit": _RECURSION_LIMIT},
-        )
+        final_state = await graph.ainvoke(initial_state, config=run_config)
         return final_state
     except Exception as exc:
         logger.exception("Pipeline failed for analysis_id=%s", analysis_id)

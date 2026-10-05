@@ -256,6 +256,33 @@ def test_failed_pause_write_surfaces_through_run_pipeline_system_error():
     assert updates[1]["error_message"] == "SYSTEM_ERROR: db write failed"
 
 
+def run_pipeline_capturing_config(tracer: BaseCallbackHandler | None) -> dict:
+    """Run run_pipeline with a stub graph and return the config it passes to ainvoke."""
+    graph_class = MagicMock()
+    ainvoke = AsyncMock(return_value={"analysis_id": "test-id"})
+    graph_class.return_value.compile.return_value.ainvoke = ainvoke
+    with (
+        patch("backend.agents.orchestrator.StateGraph", graph_class),
+        patch("backend.agents.orchestrator.create_tracer", return_value=tracer),
+    ):
+        asyncio.run(run_pipeline({"analysis_id": "test-id"}))
+    return ainvoke.call_args.kwargs["config"]
+
+
+def test_run_pipeline_passes_no_callbacks_when_tracing_is_off() -> None:
+    """create_tracer returns None with tracing off; the graph must get no callbacks, not [None]."""
+    run_config = run_pipeline_capturing_config(None)
+    assert "callbacks" not in run_config
+    assert run_config["recursion_limit"] == 1000
+
+
+def test_run_pipeline_passes_the_tracer_as_its_callback_when_tracing_is_on() -> None:
+    tracer = BaseCallbackHandler()
+    run_config = run_pipeline_capturing_config(tracer)
+    assert run_config["callbacks"] == [tracer]
+    assert run_config["recursion_limit"] == 1000
+
+
 # ---------------------------------------------------------------------------
 # Graph-level domain resume — real profiler_node, mocked LLM and services (Build F1)
 # ---------------------------------------------------------------------------

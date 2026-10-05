@@ -545,8 +545,13 @@ def _stage_xlsx(path: pathlib.Path, columns: list) -> None:
 
 
 @pytest.fixture
-def staged_upload():
-    """Write a file into backend/uploads — where both loaders look — and remove it after."""
+def staged_upload(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
+    """Write a file into backend/uploads — where both loaders look — and remove it after.
+
+    The test runs from tmp_path, so that backend/uploads is a per-test directory and the
+    real one is never touched (the loaders resolve backend/uploads from the working directory).
+    """
+    monkeypatch.chdir(tmp_path)
     created: list[pathlib.Path] = []
 
     def _stage(filename: str, writer) -> str:

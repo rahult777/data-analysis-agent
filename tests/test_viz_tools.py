@@ -2,11 +2,12 @@
 
 Covers: the _short_name truncation helper and generate_scatter_plot's title
 recipe (line break, font size, automargin, container-referenced y), including
-the adversarial case of two very long column names. Charts are written to
-CHARTS_DIR and removed afterwards.
+the adversarial case of two very long column names. Charts are written to a
+per-test CHARTS_DIR under tmp_path, never to backend/outputs/charts.
 """
 
 import json
+import pathlib
 import re
 
 import pandas as pd
@@ -17,6 +18,13 @@ from backend.tools.viz_tools import _short_name, generate_scatter_plot
 
 LONG_X = "extremely_long_measurement_column_name_for_x_axis"
 LONG_Y = "equally_long_measurement_column_name_for_y_axis"
+
+
+@pytest.fixture(autouse=True)
+def charts_dir(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
+    """Every chart a test writes goes to tmp_path; the real chart directory is never touched."""
+    monkeypatch.setattr(viz_tools, "CHARTS_DIR", tmp_path)
+    return tmp_path
 
 
 @pytest.fixture

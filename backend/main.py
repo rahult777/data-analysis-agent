@@ -30,6 +30,7 @@ from backend.models.schemas import (
     StatusResponse,
     UploadResponse,
 )
+from backend.utils.agent_guard import require_agent_work_enabled
 from backend.utils.file_handler import cleanup_temp_file, save_temp_file, validate_file
 from backend.utils.supabase_client import get_supabase_client
 from backend.utils.supabase_retry import supabase_call
@@ -298,7 +299,7 @@ async def run_question_task(
 # ---------------------------------------------------------------------------
 
 
-@app.post("/api/upload")
+@app.post("/api/upload", dependencies=[Depends(require_agent_work_enabled)])
 async def upload_file(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -400,7 +401,11 @@ async def get_analysis(
     )
 
 
-@app.post("/api/analysis/{analysis_id}/question", response_model=QuestionResponse)
+@app.post(
+    "/api/analysis/{analysis_id}/question",
+    response_model=QuestionResponse,
+    dependencies=[Depends(require_agent_work_enabled)],
+)
 async def post_question(
     analysis_id: str,
     request: QuestionRequest,
@@ -465,7 +470,11 @@ async def get_question(
     )
 
 
-@app.post("/api/analysis/{analysis_id}/resume", response_model=StatusResponse)
+@app.post(
+    "/api/analysis/{analysis_id}/resume",
+    response_model=StatusResponse,
+    dependencies=[Depends(require_agent_work_enabled)],
+)
 async def resume_analysis(
     analysis_id: str,
     body: PauseResumeRequest,

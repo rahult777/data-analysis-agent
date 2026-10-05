@@ -5,7 +5,9 @@ All Supabase calls are mocked using unittest.mock.patch with backend.main.X patc
 main.py imports get_supabase_client into its own namespace so backend.main is the only
 interceptable namespace.
 
-All tests run from the project root (CWD must be the repo root).
+All tests run from the project root (CWD must be the repo root). Every test here runs with the
+agent-work routes open (tracing_on, tests/conftest.py); the read-only refusal is tested in
+test_tracing.py.
 """
 
 import io
@@ -17,6 +19,8 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 from backend.main import app
 from backend.models.schemas import AnalysisStatus
+
+pytestmark = pytest.mark.usefixtures("tracing_on")
 
 client = TestClient(app)
 
@@ -797,8 +801,12 @@ def _route_dependency_calls(path: str, method: str) -> list:
 
 def test_route_auth_boundary_structural() -> None:
     """Strict POST routes use get_session; the four read-only GETs use
-    get_public_read_access and never get_session."""
+    get_public_read_access and never get_session. Every non-GET route runs the
+    agent-work guard first (before get_session's database read); no GET route has it."""
+    from fastapi.routing import APIRoute
+
     from backend.main import get_public_read_access, get_session
+    from backend.utils.agent_guard import require_agent_work_enabled
 
     for path in ("/api/analysis/{analysis_id}/question", "/api/analysis/{analysis_id}/resume"):
         calls = _route_dependency_calls(path, "POST")
@@ -813,6 +821,22 @@ def test_route_auth_boundary_structural() -> None:
         calls = _route_dependency_calls(path, "GET")
         assert get_public_read_access in calls
         assert get_session not in calls
+
+    guarded = set()
+    for route in app.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        calls = [dep.call for dep in route.dependant.dependencies]
+        if route.methods - {"GET", "HEAD"}:
+            assert calls[:1] == [require_agent_work_enabled], f"{route.path} must run the guard first"
+            guarded.add(route.path)
+        else:
+            assert require_agent_work_enabled not in calls, f"GET {route.path} must not carry the guard"
+    assert {
+        "/api/upload",
+        "/api/analysis/{analysis_id}/question",
+        "/api/analysis/{analysis_id}/resume",
+    } <= guarded
 
 
 # ---------------------------------------------------------------------------
