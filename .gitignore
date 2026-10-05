@@ -41,3 +41,10 @@ backend/outputs/
 
 # Local live-validation harnesses and their saved state (never committed)
 .live/
+
+# Supabase CLI local state (written if the CLI is ever linked to a project)
+supabase/.temp/
+supabase/.branches/
+
+# Claude Code per-user settings
+.claude/settings.local.json
