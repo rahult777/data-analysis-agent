@@ -247,9 +247,9 @@ This section maps every build task to the specific plugins that must be activate
 |------|--------|
 | Before designing the agent's approach | Sequential Thinking MCP |
 | Before implementing any library function | Context7 MCP |
-| At start of every agent run (runtime) | Memory MCP — read |
-| At end of every agent run (runtime) | Memory MCP — write |
-| For every agent run (runtime) | LangSmith Tracing |
+| At start of every agent run (runtime) | Memory MCP — read (at runtime the earlier agents' keys come from the LangGraph pipeline state; no MCP server is called) |
+| At end of every agent run (runtime) | Memory MCP — write (at runtime the agent returns its outputs into the pipeline state and saves its report to Supabase; no MCP server is called) |
+| For every agent run (runtime) | LangSmith Tracing — enforced in code (Rule 8): with tracing off, the agent-work routes refuse with 503 |
 | After agent file is complete | Code Review Plugin |
 | After tests pass | GitHub MCP |
 
@@ -326,7 +326,7 @@ This section maps every build task to the specific plugins that must be activate
 
 These are CLAUDE.md rule violations. They are not judgment calls:
 
-- Running an agent without LangSmith tracing = Rule 8 violation
+- Running an agent without LangSmith tracing = Rule 8 violation (enforced in code since M1: with tracing off, every route that starts or continues agent work refuses with 503; never bypass or weaken that guard)
 - Writing pandas code without Code Review = Rule 13 violation
 - Using a library without Context7 check = Rule 12 violation
 - Committing without a descriptive message = Rule 15 violation

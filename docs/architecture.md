@@ -42,9 +42,9 @@ User (Browser)
 |  |(profiler)|  |(cleaner) |  |(analyzer)|  |(explainer| |
 |  +----------+  +----------+  +----------+  +--------+  |
 |                                                         |
-|  Each agent reads Memory MCP at start                   |
-|  Each agent writes to Memory MCP at end                 |
-|  Every agent run traced in LangSmith                    |
+|  Each agent reads earlier agents' keys from graph state |
+|  Each agent saves its report to Supabase at its end     |
+|  Pipeline traced in LangSmith; tracing off: read-only   |
 +------------------+--------------------------------------+
                    |
          +---------+---------+
@@ -100,10 +100,12 @@ Handles the full lifecycle of uploaded files:
 
 ### LangSmith Client (backend/utils/langsmith_client.py)
 
-Sets up LangSmith tracing for all agent runs. Provides:
+Sets up LangSmith tracing when tracing is on. `backend/config.py` decides that once at import (`LANGCHAIN_TRACING_V2` equal to "true", case-insensitive) and exposes it as `TRACING_ENABLED`, which this module reads at call time. Provides:
 - get_langsmith_client() — returns a LangSmith Client instance
-- create_tracer(run_name) — returns a LangChainTracer for LangGraph callbacks
-- validate_langsmith_connection() — verifies connectivity on import
+- create_tracer(run_name) — returns a LangChainTracer for LangGraph callbacks, or None when tracing is off
+- validate_langsmith_connection() — verifies connectivity on import when tracing is on (a failure stops the server); it does not run when tracing is off
+
+With tracing off, `backend/utils/agent_guard.py` makes POST `/api/upload`, `/question` and `/resume` refuse with 503, so no agent runs untraced (CLAUDE.md Rule 8).
 
 ### Pydantic Schemas (backend/models/schemas.py)
 
@@ -222,11 +224,10 @@ This is not per-user authentication. Adding Supabase Auth later would need expli
 
 ## Observability Model
 
-Every agent run is traced in LangSmith with a named trace. The trace includes:
-- Which agent ran
-- What tools it called
-- What decisions it made
-- What it wrote to Supabase
-- Any errors encountered
+When tracing is on, every pipeline run is traced in LangSmith. The orchestrator attaches one tracer (`create_tracer("pipeline")`) to the graph run's callbacks, and LangGraph records each node it runs (profiler, cleaner, the pause-wait nodes, analyzer, explainer) with the state it received, the state it returned, and any error. The agents call the Anthropic SDK directly, so each model call is not recorded as a separate LLM run; what an agent decided and saved shows in its node's returned state, and its full report is stored in Supabase.
+
+Known gap: custom questions (POST `/question` → `answer_question`) run outside the graph, and their tracer is never attached, so they are not traced (errors.md 2026-10-05).
+
+When tracing is off, the server is read-only: the routes that start or continue agent work refuse with 503 (CLAUDE.md Rule 8, enforced in code).
 
 This enables debugging, quality auditing, and understanding of agent reasoning without inspecting code.

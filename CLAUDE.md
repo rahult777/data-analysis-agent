@@ -50,11 +50,11 @@ Installed and available. For invocation details see `docs/plugins-and-mcps.md`.
 
 ## Tech Stack Summary
 
-Backend: Python 3.11, FastAPI, Uvicorn, LangChain, LangGraph, LangSmith, Supabase client, pandas, numpy, matplotlib, seaborn, plotly, pydantic, pyarrow.
+Backend: Python 3.11, FastAPI, Uvicorn, langchain-core (tracing callbacks), LangGraph, LangSmith, Supabase client, pandas, numpy, matplotlib, seaborn, plotly, pydantic, pyarrow.
 
 Frontend: Next.js 14 App Router, TypeScript strict, Tailwind, shadcn/ui, Recharts, Framer Motion, axios.
 
-Exact versions pinned in `requirements.txt`. Never install packages without stating the reason.
+Every package, direct and transitive, is pinned in `requirements.txt` (a full lock; its header lists the direct dependencies); test tools are pinned in `requirements-dev.txt`. Never install packages without stating the reason.
 
 ---
 
@@ -67,7 +67,7 @@ Exact versions pinned in `requirements.txt`. Never install packages without stat
 5. NEVER mark any task complete without running tests.
 6. NEVER write a new function without checking if it already exists.
 7. NEVER put system prompts inline in Python. Load from `backend/prompts/` folder always.
-8. NEVER run an agent without LangSmith tracing attached.
+8. NEVER run an agent without LangSmith tracing attached. Enforced in code: when tracing is off (LANGCHAIN_TRACING_V2 is not 'true', case-insensitive) the server boots for read-only use, but every route that starts or continues agent work refuses with 503. Never bypass or weaken this guard.
 9. NEVER present a correlation as an explanation. Always label correlations as correlations and reason about causality separately.
 10. NEVER remove an outlier without domain-appropriate reasoning documented in the cleaning report.
 11. NEVER produce a statistic that looks authoritative but cannot be reliably computed from the available data. State limitations explicitly.

@@ -38,7 +38,7 @@ The complete pipeline executes as follows:
 
 **Step 13:** Save CleaningReport to `analyses.cleaning_report`. Save the decisions list separately to `analyses.cleaning_decisions`. Update `analyses.updated_at`.
 
-**Step 14:** Serialize the cleaned DataFrame to parquet format. Upload to Supabase Storage bucket `cleaned-datasets` with key `{analysis_id}.parquet`. Verify the upload succeeded by reading back the file size.
+**Step 14:** Serialize the cleaned DataFrame to parquet format. Upload to Supabase Storage bucket `cleaned-datasets` with key `{analysis_id}.parquet` (upsert, so a re-sent upload overwrites the same bytes). Verify the upload by checking that the object exists (Storage `exists()`); the file size is not read back.
 
 **Step 15:** After successful upload verification, delete the original uploaded file from temporary local storage. If deletion fails, log the error to `errors.md` but do not fail the pipeline. The parquet file in Supabase Storage is now the authoritative cleaned dataset.
 
@@ -166,8 +166,8 @@ Read-only GET endpoints are public by analysis_id: the UUID4 id is the access ca
 |--------|------|---------|-------|
 | id | uuid | gen_random_uuid() | Primary key |
 | created_at | timestamptz | now() | |
-| updated_at | timestamptz | now() | Updated on every status change |
-| session_id | uuid | gen_random_uuid() | Minimal auth token |
+| updated_at | timestamptz | now() | Set by the backend in its own writes (status changes, report saves, pause stamps); no database trigger |
+| session_id | uuid | gen_random_uuid() | Capability for POST question and resume; nullable (see the notes below) |
 | original_filename | text NOT NULL | — | The name the user uploaded |
 | stored_filename | text NOT NULL | — | UUID-based name on disk |
 | file_size | integer | — | Bytes |
@@ -179,10 +179,14 @@ Read-only GET endpoints are public by analysis_id: the UUID4 id is the access ca
 | analysis_report | jsonb | — | Full AnalysisReport object |
 | insight_report | jsonb | — | Full FullInsightReport object (all 3 layers) |
 | executive_summary | jsonb | — | ExecutiveSummary (5 bullets) |
-| chart_paths | text[] | — | Array of chart file paths |
-| row_count | integer | — | Populated after profiling |
-| column_count | integer | — | Populated after profiling |
+| chart_paths | text[] | — | Chart file names, not paths (e.g. `{analysis_id}_histogram_revenue.png`), served at `/charts/{name}` |
+| row_count | integer | — | Populated after profiling (from the upload, not the cleaned data: errors.md 2026-10-03) |
+| column_count | integer | — | Populated after profiling (from the upload) |
 | data_quality_score | numeric | — | 0.0 to 1.0, populated after analyzing |
+| user_pause_response | jsonb | — | The latest pause answer, written by POST /resume and cleared by each pause-wait node before it polls (not cleared at completion) |
+| pause_data | jsonb | — | The active pause question, non-null only while a pause is active (migration `20260922035037`) |
+
+**21 columns.** This table groups them by purpose; the physical order is the baseline migration's (`supabase/migrations/20260413000000_baseline_analyses_questions_bucket.sql`), with `user_pause_response` at 20 and `pause_data` at 21. NOT NULL: `id`, `original_filename`, `stored_filename`, `status`. Every other column is nullable, including `session_id`: it has a default and `/upload` always writes one, but a row inserted without it would weaken the `get_session` check (errors.md 2026-10-05).
 
 **Correction note:** `profile_report`, `analysis_report`, `insight_report`, and `executive_summary` are stored as raw LLM-contract dicts, not validated instances of the pydantic models named above — the model field names above do not match the actual stored keys. See decisions.md `2026-05-07 | Raw dict save to Supabase JSONB...` and `2026-06-04 | AnalysisResponse relaxes profile_report, analysis_report, insight_report, executive_summary to dict...` for the authoritative stored shapes and rationale. `cleaning_report` and `cleaning_decisions` are unaffected — they validate cleanly against their pydantic models.
 
@@ -197,6 +201,8 @@ Read-only GET endpoints are public by analysis_id: the UUID4 id is the access ca
 | answer | text | — | The computed answer in plain language |
 | pandas_code | text | — | The exact pandas code used |
 | status | text | 'pending' | See QuestionStatus enum |
+
+NOT NULL: `id`, `question`; `analysis_id` is nullable. Foreign key `questions.analysis_id` → `analyses(id)` with NO ACTION on delete and update: an analysis that has questions cannot be deleted until its questions are.
 
 ### Indexes
 
@@ -236,7 +242,7 @@ Bucket: `cleaned-datasets`
 
 Keys follow the pattern: `{analysis_id}.parquet`
 
-The bucket must exist before the Cleaner runs. Create it manually in the Supabase dashboard or via migration before the first pipeline run.
+The bucket must exist before the Cleaner runs. The baseline migration (`supabase/migrations/20260413000000_baseline_analyses_questions_bucket.sql`) creates it as a private bucket, so applying the migrations is enough on a new project; on the original project it was created in the dashboard (decisions.md 2026-05-01, corrected 2026-10-05). Objects are removed only through the Storage API: SQL deletes on the storage tables are blocked.
 
 The bucket is private (`public = false`), and `storage.objects` has RLS enabled with no policies, so only the backend's secret key can list, upload or download objects; the publishable key gets 400 on download and sees no buckets (verified 2026-09-28).
 
@@ -245,6 +251,8 @@ The bucket is private (`public = false`), and `storage.objects` has RLS enabled 
 **Rule 4 in CLAUDE.md is absolute:** Never modify the Supabase schema directly from Claude Code or by hand in the dashboard. All schema changes go through migration files. Migration files are committed to the repository before being applied.
 
 Files live in `supabase/migrations/<timestamp>_<name>.sql`, end with a commented `-- DOWN (manual rollback):` block, are committed first, and are then applied with the Supabase MCP `apply_migration` using the same `<name>`. The remote history records its own apply-time version, not the filename's (decisions.md 2026-09-22).
+
+**Baseline.** The first file, `20260413000000_baseline_analyses_questions_bucket.sql`, recreates the tables, indexes, RLS, revokes and bucket that existed before migrations were tracked. All three files together were proved on a fresh project to rebuild the live schema exactly (decisions.md 2026-10-05). The baseline is never applied to the live project: live already has that schema, its history does not list the baseline, and it records the other two files under apply-time versions. The repair sequence for adopting the Supabase CLI is in decisions.md 2026-10-05.
 
 **New-table rule:** a migration that creates a table in `public` must, in the same file, `ENABLE ROW LEVEL SECURITY` on it. If the backend is the only client, it grants nothing to `anon`/`authenticated`; any grant to them needs its own decision and matching policies. A migration that creates a function in `public` must `REVOKE EXECUTE ... FROM PUBLIC, anon, authenticated` unless the function is meant to be public (errors.md 2026-09-28). `tests/test_migrations.py` enforces the table rules for every table the backend uses.
 
@@ -352,20 +360,42 @@ requirements.txt
 
 ---
 
+## Run Locally
+
+Tested with Python 3.11.3 and Node 24 (`.python-version`, `.nvmrc`, and `engines` in `frontend/package.json`).
+
+**Database.** Create your own Supabase project and apply every file in `supabase/migrations/` in filename order: paste each into the SQL editor, or run `supabase db push` against your own fresh project. Then copy `.env.example` to `.env` and fill it in.
+
+**Backend.** From the repository root (the backend refuses to start from any other directory):
+
+````
+pip install -r requirements.txt    # or requirements-dev.txt, which adds pytest for the tests
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1 --loop asyncio --http h11
+````
+
+`--reload` is for local development only; `watchfiles`, which is in the lock, is used only by `--reload`.
+
+**Frontend.** In `frontend/`, copy `.env.example` to `.env.local`, run `npm ci`, then `npm run dev` (or `npm run build && npm start`).
+
+**Tracing on or off.** CLAUDE.md Rule 8 is enforced in code. With `LANGCHAIN_TRACING_V2=true` (case-insensitive), `LANGSMITH_API_KEY` and `LANGSMITH_PROJECT` are required, the backend checks its LangSmith connection at startup and stops if that fails, and every pipeline run is traced. With any other value, or unset, the backend makes no LangSmith call: it starts with one warning and serves every read-only route, while POST `/api/upload`, `/api/analysis/{id}/question` and `/api/analysis/{id}/resume` refuse with 503 (`SYSTEM_ERROR: Analysis is not available on this server (read-only mode).`), so no agent runs untraced.
+
+---
+
 ## Environment Variables Required
 
-All loaded via `backend/config.py`. All required — system fails fast on import if any are missing. `SUPABASE_PUBLISHABLE_KEY` is not listed: nothing in the backend or frontend uses it, and since Build K the backend no longer loads or requires it. It may stay in `.env` for the `.live/` verification harness, which reads it directly.
+The backend's variables are loaded via `backend/config.py`, which fails fast on import if a required one is missing. Always required: `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `SUPABASE_URL`, `SUPABASE_SECRET_KEY`. `LANGSMITH_API_KEY` and `LANGSMITH_PROJECT` are required only when `LANGCHAIN_TRACING_V2` is "true" (see Run Locally). Templates: `.env.example` (backend) and `frontend/.env.example`. `SUPABASE_PUBLISHABLE_KEY` is not listed: nothing in the backend or frontend uses it, and since Build K the backend no longer loads or requires it. It may stay in `.env` for the `.live/` verification harness, which reads it directly.
 
 | Variable | Purpose |
 |----------|---------|
 | ANTHROPIC_API_KEY | Claude API access for all agents |
-| OPENAI_API_KEY | OpenAI API access (fallback or embedding use) |
+| ANTHROPIC_MODEL | Claude model id the agents call (`.env.example`: `claude-sonnet-4-6`) |
 | SUPABASE_URL | Supabase project URL |
 | SUPABASE_SECRET_KEY | Supabase secret key (`sb_secret_…`, authenticates as `service_role`, bypasses RLS) — the backend's only database key |
-| LANGSMITH_API_KEY | LangSmith tracing |
-| LANGSMITH_PROJECT | LangSmith project name (data-analysis-agent) |
-| LANGCHAIN_TRACING_V2 | Must be set to "true" |
-| GITHUB_TOKEN | GitHub MCP authentication |
+| LANGSMITH_API_KEY | LangSmith tracing — required only when tracing is on |
+| LANGSMITH_PROJECT | LangSmith project name — required only when tracing is on |
+| LANGCHAIN_TRACING_V2 | "true" (case-insensitive) turns tracing on and allows agent work; any other value, or unset, runs the backend read-only (503 on the agent routes) |
+| GITHUB_TOKEN | Not read by the app; only the GitHub MCP server uses it |
+| NEXT_PUBLIC_API_URL | Frontend only (`frontend/.env.local`): the backend's base URL; `lib/api.ts` falls back to `http://localhost:8000` when it is unset |
 
 ---
 

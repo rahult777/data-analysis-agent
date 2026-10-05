@@ -7,9 +7,64 @@
 
 ---
 
+## Roadmap (M1–M4)
+
+Added 2026-10-05. The goal is a read-only public demo; the owner must never be billed because a stranger uses the system. Interactive mode comes later. Decisions: decisions.md 2026-10-05.
+
+### M1 — Reproducible (2026-10-05)
+
+- [x] Baseline migration for the pre-migration schema and the `cleaned-datasets` bucket (`supabase/migrations/20260413000000_baseline_analyses_questions_bucket.sql`), proved on a fresh project: every catalog comparison identical to live; the live migration history is untouched (decisions.md 2026-10-05).
+- [x] Reproducible dependencies: requirements.txt is a full lock of the tested venv (98 packages; the 18 direct ones in its header); requirements-dev.txt adds the test tools; `.python-version` 3.11, `.nvmrc` 24, `engines` node 24.x; `openai`, `langchain` and `OPENAI_API_KEY` removed (decisions.md 2026-10-05).
+- [x] LangSmith optional at boot, Rule 8 enforced in code: with tracing off the server is read-only and POST `/api/upload`, `/question` and `/resume` refuse with 503 (`backend/utils/agent_guard.py`); backend/config.py normalizes the tracing switches (decisions.md 2026-10-05).
+- [x] Start commands and env examples: docs/infrastructure.md "Run Locally"; the backend refuses to start outside the repository root; `.env.example` updated; new `frontend/.env.example`.
+- [x] The test suite runs offline and isolated: 794 passed / 16 skipped; 0 network attempts; no writes under backend/outputs or backend/uploads.
+- [x] Six obsolete analyses and one question deleted from the live project after a verified private backup; 77faa166-668b-4001-92e0-94e037de7e3b kept (decisions.md 2026-10-05).
+- [x] Logs and docs: the 2026-10-03 audit's unlogged findings in errors.md (security findings in public-safe wording), corrections to superseded decisions, docs/infrastructure.md schema, storage and environment sections, CLAUDE.md Rule 8.
+
+### M2 — Demo hardening
+
+- [ ] UX copy for the 503 read-only refusal (upload, custom question, pause answer).
+- [ ] Refuse before the request body is read, with a request-size limit (FastAPI 0.111 parses the body before any dependency runs; decisions.md 2026-10-05).
+- [ ] `DEMO_MODE` that refuses agent work by default, independent of tracing.
+- [ ] Close the Rule 8 gap: trace custom-question runs (answer_question attaches no tracer; errors.md 2026-10-05).
+- [ ] Second refusal layer: run_pipeline and answer_question refuse when tracing is off (or DEMO_MODE is on), not only the routes (M1 code review).
+- [ ] Fix `get_session`'s NULL-session check before any seeding (errors.md 2026-10-05).
+- [ ] Results header Rows / Columns describe the upload, not the cleaned data (errors.md 2026-10-03; the Frontend line below).
+- [ ] The scatter plot's clipped title (errors.md 2026-09-28; the Backend — Tools line below).
+- [ ] Pin the Supabase MCP server's version and make its configuration read-only by default.
+- [ ] npm audit reports pre-existing findings (seen during M1's npm ci); triage in M2's security scans.
+
+### M3 — Deploy
+
+- [ ] A base image with glibc 2.28 or later (pyarrow 23.0.1 ships only manylinux_2_28 wheels; decisions.md 2026-10-05).
+- [ ] Anchor the paths that are relative to the working directory (backend/uploads, the /charts mount, backend/prompts), so the backend no longer has to start from the repository root.
+- [ ] Chart serving for the deployed demo (charts live on the server's local disk today).
+- [ ] The free plan pauses an idle project; decide how the demo survives that.
+- [ ] A separate demo database whose seeded row has a non-NULL, never-published session_id.
+- [ ] The Linux install check of the lock on the target image.
+- [ ] Before any public URL: the security findings in errors.md 2026-10-05 and the Security Review plugin (Rule 14).
+- [ ] Remaining doc drift: docs/architecture.md:78 (session_id is checked only on POST question and resume since 2026-09-21) and :80 (CORS allows every origin, not the frontend's); the docs/infrastructure.md folder tree; tasks.md:87 ("all 26 pydantic models"); errors.md:146 (MAX_FILE_SIZE lives in backend/utils/file_handler.py, not backend/config.py).
+
+### M4 — README
+
+- [ ] A README for the repository (frontend/README.md is the create-next-app boilerplate).
+
+### Tech debt found in M1
+
+- [ ] Per-agent tracers are created and never used: profiler.py:392, cleaner.py:2118, analyzer.py:940, explainer.py:79 and :232. The pipeline is traced through the orchestrator's tracer; the explainer.py:232 one means custom-question runs are not traced at all (errors.md 2026-10-05).
+- [ ] `.live/l_live.py:91` `EXPECTED_COUNTS` is 6/1/6 (analyses, questions, Storage objects) but live is now 1/0/1, so the gitignored harness refuses to start until it is updated.
+- [ ] The Appendix A items logged without a milestone: errors.md 2026-10-05 ("Status of the 2026-10-03 system audit's Appendix A"), items 8, 9, 10, 12, 13, 14, 16, 17, 18 and 19.
+- [ ] The `tracing_on` test fixture (tests/conftest.py) patches `create_tracer` in a fixed list of modules, so a new module that imports it would get a real tracer in tracing-on tests; patch it once at its source instead (maintenance; M1 code review).
+- [ ] Nothing configures logging in the backend, so every backend info line (including "LangSmith tracing is on.") never shows; only warnings reach stderr (pre-existing; M1 code review).
+- [ ] `LANGCHAIN_ENDPOINT` is hard-coded in backend/utils/langsmith_client.py and set at import, overriding any value from the environment (Rule 1; pre-existing; M1 code review).
+
+---
+
 ## Next Build
 
 - [x] **HIGH PRIORITY — Execute the Cleaner's own (model-authored) decisions by structured operation id instead of keyword matching** — Build G, 2026-09-26, committed in 042e798. Every Cleaner decision names an operation from a closed set (convert_type, standardize_values, fill_missing, leave_missing, flag_outliers, note) that Python validates without raising and runs in a fixed order (system duplicate removal, conversions, standardizations, fills, the user's pause choices, flags); Python writes every record from what ran and logs `cleaning_report.operations`; the keyword router is removed (approved, after the pure-move proof: 30 captured F3 inputs + 4,000 random cases, 0 mismatches); the filter keeps a note, a flag where the user answered only the missing-value pause, and a fill or leave_missing where the user answered only the outlier pause (the last approved after Code Review); max_tokens 16000 with a stop_reason check; S6 (the Profiler's semantically_categorical_columns and Python's duplicate count sent, the Profiler's pattern fields not); profiler_concerns_addressed "not assessed". 525 passed / 16 skipped; 66 of 66 mutations caught; Code Review: 9 findings (5 fixed, 2 resolved, 2 declined and logged), second pass 2 more, fixed; the approved filter change's scoped review 1 more, fixed. Live-validated 2026-09-26: R1 22 of 22 checks (LangSmith cb1e4375-73b3-43f4-b96b-876a5747bbe1; $0.1417). See decisions.md 2026-09-26 (Build G) and errors.md 2026-09-25 / 2026-09-26.
+
+**Status update (2026-10-05):** the Build G item above is done. M1 is complete; the next build is M2 (Demo hardening) — see Roadmap (M1–M4) above.
 
 ---
 
@@ -30,7 +85,7 @@
 - [x] backend/utils/supabase_client.py
 - [x] backend/utils/langsmith_client.py
 - [x] backend/models/schemas.py — all 26 pydantic models
-- [x] Supabase tables and indexes
+- [x] Supabase tables and indexes — Status update (2026-10-05, M1): now reproducible from the repository. The baseline migration `supabase/migrations/20260413000000_baseline_analyses_questions_bucket.sql` creates both tables, their indexes, RLS, the client-role revokes and the `cleaned-datasets` bucket; proved on a fresh project (decisions.md 2026-10-05).
 - [x] backend/utils/file_handler.py
 - [x] backend/main.py — FastAPI app, all endpoints
 - [x] backend/prompts/profiler_system.md
