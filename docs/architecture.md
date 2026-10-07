@@ -44,7 +44,7 @@ User (Browser)
 |                                                         |
 |  Each agent reads earlier agents' keys from graph state |
 |  Each agent saves its report to Supabase at its end     |
-|  Pipeline traced in LangSmith; tracing off: read-only   |
+|  Pipeline traced; agent work opt-in, refused in layers  |
 +------------------+--------------------------------------+
                    |
          +---------+---------+
@@ -75,9 +75,9 @@ The entry point for all HTTP traffic. Responsibilities:
 - Serves analysis results and status from Supabase
 - Accepts and routes custom user questions to the Explainer
 - Serves generated chart images via StaticFiles mount at `/charts/`
-- Validates session_id on every request except upload
+- Validates session_id on the routes that change state or cost money (POST question and resume); reads are public by analysis_id
 
-All endpoints are async. CORS configured for frontend origin.
+All endpoints are async. CORS allows only ALLOWED_ORIGINS (default: the local frontend).
 
 ### Config Layer (backend/config.py)
 
@@ -105,7 +105,7 @@ Sets up LangSmith tracing when tracing is on. `backend/config.py` decides that o
 - create_tracer(run_name) — returns a LangChainTracer for LangGraph callbacks, or None when tracing is off
 - validate_langsmith_connection() — verifies connectivity on import when tracing is on (a failure stops the server); it does not run when tracing is off
 
-With tracing off, `backend/utils/agent_guard.py` makes POST `/api/upload`, `/question` and `/resume` refuse with 503, so no agent runs untraced (CLAUDE.md Rule 8).
+Agent work needs AGENT_WORK_ENABLED and tracing, and is refused in layers: the ASGI gate before the request body is read, the route guard, and the first statement of run_pipeline and answer_question (CLAUDE.md Rule 8).
 
 ### Pydantic Schemas (backend/models/schemas.py)
 
@@ -139,7 +139,6 @@ One markdown file per agent. Loaded at runtime — never inline in Python code. 
 ### Tools (backend/tools/)
 
 Shared utilities used by agents:
-- data_tools.py — pandas operations for loading, profiling, cleaning, analyzing
 - viz_tools.py — chart generation with matplotlib/seaborn/plotly, saves to backend/outputs/charts/
 - code_executor.py — safely executes pandas code for custom user questions
 
@@ -203,6 +202,7 @@ Pipeline:
 Minimal session-based authentication at the API, and a database only the backend can reach.
 
 - **API.** On upload, a UUID session_id is generated and stored in the analyses record; the uploading browser keeps it in localStorage. Only the state-changing routes — POST `/question` and POST `/resume` — require it in the `session-id` header (`get_session`). The four read-only GET routes are public by analysis_id (`get_public_read_access`; decisions.md 2026-09-21).
+- **Agent work.** Every request that would start or continue agent work needs AGENT_WORK_ENABLED (set per session) and tracing, and a request whose Origin header is outside ALLOWED_ORIGINS is refused (403) before its body is read, so a web page cannot make the owner's browser start work on his local server.
 - **Database.** Only the backend talks to Supabase, using the secret key, which authenticates as `service_role` (BYPASSRLS). `analyses` and `questions` have Row Level Security enabled with zero policies, and `anon`/`authenticated` hold no privileges on them, so the publishable key can neither read nor write them through the Data API or GraphQL (decisions.md 2026-09-28, Build K). The frontend never uses Supabase directly.
 - **Storage.** The `cleaned-datasets` bucket is private and `storage.objects` has no policies, so only the secret key can list, upload or download objects.
 
@@ -226,8 +226,8 @@ This is not per-user authentication. Adding Supabase Auth later would need expli
 
 When tracing is on, every pipeline run is traced in LangSmith. The orchestrator attaches one tracer (`create_tracer("pipeline")`) to the graph run's callbacks, and LangGraph records each node it runs (profiler, cleaner, the pause-wait nodes, analyzer, explainer) with the state it received, the state it returned, and any error. The agents call the Anthropic SDK directly, so each model call is not recorded as a separate LLM run; what an agent decided and saved shows in its node's returned state, and its full report is stored in Supabase.
 
-Known gap: custom questions (POST `/question` → `answer_question`) run outside the graph, and their tracer is never attached, so they are not traced (errors.md 2026-10-05).
+Custom questions (POST /question → answer_question) run outside the graph; since M2a their tracer is attached through a traced run named explainer-question.
 
-When tracing is off, the server is read-only: the routes that start or continue agent work refuse with 503 (CLAUDE.md Rule 8, enforced in code).
+When agent work is not allowed, the server is read-only: every request that would start or continue agent work is refused with 503, in layers (CLAUDE.md Rule 8).
 
 This enables debugging, quality auditing, and understanding of agent reasoning without inspecting code.

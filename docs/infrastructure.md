@@ -83,14 +83,14 @@ The pause states are **DB-polling nodes**, not LangGraph `interrupt()` — the i
 
 ## API Endpoints
 
-Read-only GET endpoints are public by analysis_id: the UUID4 id is the access capability, and no `session-id` header is required or checked (dependency `get_public_read_access` in backend/main.py, which also returns 404 for a malformed id). Endpoints that change state or can trigger an LLM call — POST question and POST resume — require a `session-id` header matching the `session_id` stored in the analyses record (dependency `get_session`). POST /api/upload has no auth. See decisions.md 2026-09-21.
+Read-only GET endpoints are public by analysis_id: the UUID4 id is the access capability, and no `session-id` header is required or checked (dependency `get_public_read_access` in backend/main.py, which also returns 404 for a malformed id). Endpoints that change state or can trigger an LLM call — POST question and POST resume — require a `session-id` header matching the `session_id` stored in the analyses record (dependency `get_session`). POST /api/upload has no auth. Every agent-work route runs only when agent work is enabled (AGENT_WORK_ENABLED and tracing); a browser request from an origin not in ALLOWED_ORIGINS gets 403. See decisions.md 2026-09-21.
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| POST | `/api/upload` | Upload CSV or Excel. Returns analysis_id and session_id. | No |
+| POST | `/api/upload` | Upload CSV or Excel. Returns analysis_id and session_id. | No (agent work must be enabled) |
 | GET | `/api/analysis/{id}/status` | Get current pipeline status and current_agent name. | No (public by id) |
 | GET | `/api/analysis/{id}` | Get full analysis result including all agent outputs. | No (public by id) |
-| POST | `/api/analysis/{id}/question` | Submit a custom question. Returns question_id with status pending. | Yes |
+| POST | `/api/analysis/{id}/question` | Submit a custom question. Returns question_id with status pending; 409 unless the analysis is complete. | Yes |
 | GET | `/api/analysis/{id}/question/{question_id}` | Poll a submitted question for its computed answer and pandas code. Filters on both ids. | No (public by id) |
 | POST | `/api/analysis/{id}/resume` | Submit the user's response to an active pause state (`{"response": {...}}`). Only valid when status is `domain_pause`, `missing_value_pause`, or `outlier_pause`; returns 400 before any write unless `response.pause_type` matches the status and `option_id` (plus `column_name`, or `corrected_domain` for a domain `correct`) matches the stored `pause_data` (if no usable option ids are stored, `option_id` is skipped but `column_name` is still checked — decisions.md 2026-09-22), which is what rejects a stale tab's answer when the active pause is on a different column; restores status to `profiling` or `cleaning` and clears `pause_data` in one update that applies only if the pause read by this request (status and `updated_at`) has not changed before the write, else 409; the polling pause-wait node then picks it up. | Yes |
 | GET | `/api/analysis/{id}/charts` | Get list of chart file paths for this analysis (not currently called by the frontend). | No (public by id) |
@@ -299,6 +299,10 @@ backend/
                                   (one HTTP/1.1 httpx client)
     supabase_retry.py             supabase_call: every Supabase call,
                                   retried on transient transport errors
+    agent_guard.py                agent_work_allowed(), the route guard
+                                  and the shared refusal texts
+    request_gate.py               ASGI gate: Origin check, read-only
+                                  refusal before the body, size caps
     langsmith_client.py           LangSmith tracing setup
     file_handler.py               Local file ops + Supabase Storage
                                   upload/download + cleanup()
@@ -377,13 +381,13 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1 --lo
 
 **Frontend.** In `frontend/`, copy `.env.example` to `.env.local`, run `npm ci`, then `npm run dev` (or `npm run build && npm start`).
 
-**Tracing on or off.** CLAUDE.md Rule 8 is enforced in code. With `LANGCHAIN_TRACING_V2=true` (case-insensitive), `LANGSMITH_API_KEY` and `LANGSMITH_PROJECT` are required, the backend checks its LangSmith connection at startup and stops if that fails, and every pipeline run is traced. With any other value, or unset, the backend makes no LangSmith call: it starts with one warning and serves every read-only route, while POST `/api/upload`, `/api/analysis/{id}/question` and `/api/analysis/{id}/resume` refuse with 503 (`SYSTEM_ERROR: Analysis is not available on this server (read-only mode).`), so no agent runs untraced.
+**Agent work on or off.** CLAUDE.md Rule 8 is enforced in code. The backend is read-only by default: it starts with one warning, serves every read-only route and refuses every request that would start or continue agent work. Turn agent work on for one session with `AGENT_WORK_ENABLED=true python -m uvicorn …` (the start command above). Do not set it in `.env`: the start fails if `.env` sets it. It needs `LANGCHAIN_TRACING_V2=true`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, `ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL`, or the start fails with a message naming what is missing. With tracing on, the backend checks its LangSmith connection at every start, read-only included, and stops if that fails. Refusals: 503 (`SYSTEM_ERROR: Analysis is not available on this server (read-only mode).`) while agent work is off; 403 for a browser request from an origin outside `ALLOWED_ORIGINS`, Swagger's "Try it out" on `/docs` included (use curl instead); 413 for a request over the size limit; 409 for a question before the analysis is complete. Browsing the frontend from another origin (another port, or a LAN address for phone testing) needs that origin in `ALLOWED_ORIGINS` for the session.
 
 ---
 
 ## Environment Variables Required
 
-The backend's variables are loaded via `backend/config.py`, which fails fast on import if a required one is missing. Always required: `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `SUPABASE_URL`, `SUPABASE_SECRET_KEY`. `LANGSMITH_API_KEY` and `LANGSMITH_PROJECT` are required only when `LANGCHAIN_TRACING_V2` is "true" (see Run Locally). Templates: `.env.example` (backend) and `frontend/.env.example`. `SUPABASE_PUBLISHABLE_KEY` is not listed: nothing in the backend or frontend uses it, and since Build K the backend no longer loads or requires it. It may stay in `.env` for the `.live/` verification harness, which reads it directly.
+The backend's variables are loaded via `backend/config.py`, which fails fast on import if a required one is missing. Always required: `SUPABASE_URL`, `SUPABASE_SECRET_KEY`; `ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL` only with agent work on. `LANGSMITH_API_KEY` and `LANGSMITH_PROJECT` are required only when `LANGCHAIN_TRACING_V2` is "true" (see Run Locally). Templates: `.env.example` (backend) and `frontend/.env.example`. `SUPABASE_PUBLISHABLE_KEY` is not listed: nothing in the backend or frontend uses it, and since Build K the backend no longer loads or requires it. It may stay in `.env` for the `.live/` verification harness, which reads it directly.
 
 | Variable | Purpose |
 |----------|---------|
@@ -393,7 +397,9 @@ The backend's variables are loaded via `backend/config.py`, which fails fast on 
 | SUPABASE_SECRET_KEY | Supabase secret key (`sb_secret_…`, authenticates as `service_role`, bypasses RLS) — the backend's only database key |
 | LANGSMITH_API_KEY | LangSmith tracing — required only when tracing is on |
 | LANGSMITH_PROJECT | LangSmith project name — required only when tracing is on |
-| LANGCHAIN_TRACING_V2 | "true" (case-insensitive) turns tracing on and allows agent work; any other value, or unset, runs the backend read-only (503 on the agent routes) |
+| LANGCHAIN_TRACING_V2 | "true" (case-insensitive) turns tracing on; agent work also needs AGENT_WORK_ENABLED |
+| AGENT_WORK_ENABLED | Unset = off. "true" (case-insensitive) allows agent work, with tracing on; set it inline per session, not in `.env` |
+| ALLOWED_ORIGINS | Browser origins the API accepts: exact origins, comma-separated; default `http://localhost:3000,http://127.0.0.1:3000`; "*" refused |
 | GITHUB_TOKEN | Not read by the app; only the GitHub MCP server uses it |
 | NEXT_PUBLIC_API_URL | Frontend only (`frontend/.env.local`): the backend's base URL; `lib/api.ts` falls back to `http://localhost:8000` when it is unset |
 

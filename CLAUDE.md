@@ -67,7 +67,7 @@ Every package, direct and transitive, is pinned in `requirements.txt` (a full lo
 5. NEVER mark any task complete without running tests.
 6. NEVER write a new function without checking if it already exists.
 7. NEVER put system prompts inline in Python. Load from `backend/prompts/` folder always.
-8. NEVER run an agent without LangSmith tracing attached. Enforced in code: when tracing is off (LANGCHAIN_TRACING_V2 is not 'true', case-insensitive) the server boots for read-only use, but every route that starts or continues agent work refuses with 503. Never bypass or weaken this guard.
+8. NEVER run an agent without LangSmith tracing attached. Enforced in code: agent work runs only when AGENT_WORK_ENABLED is 'true' (opt-in, set per session) and tracing is on (LANGCHAIN_TRACING_V2 'true', case-insensitive); otherwise the server boots read-only and every request that would start or continue agent work is refused with 503, in layers. Never bypass or weaken these guards.
 9. NEVER present a correlation as an explanation. Always label correlations as correlations and reason about causality separately.
 10. NEVER remove an outlier without domain-appropriate reasoning documented in the cleaning report.
 11. NEVER produce a statistic that looks authoritative but cannot be reliably computed from the available data. State limitations explicitly.

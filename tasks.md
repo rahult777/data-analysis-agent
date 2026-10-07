@@ -34,6 +34,8 @@ Added 2026-10-05. The goal is a read-only public demo; the owner must never be b
 - [ ] Pin the Supabase MCP server's version and make its configuration read-only by default.
 - [ ] npm audit reports pre-existing findings (seen during M1's npm ci); triage in M2's security scans.
 
+**Status update (2026-10-06):** superseded by "Roadmap (revised 2026-10-06, option B)" below; `DEMO_MODE` is implemented as `AGENT_WORK_ENABLED` (M2a).
+
 ### M3 — Deploy
 
 - [ ] A base image with glibc 2.28 or later (pyarrow 23.0.1 ships only manylinux_2_28 wheels; decisions.md 2026-10-05).
@@ -45,18 +47,51 @@ Added 2026-10-05. The goal is a read-only public demo; the owner must never be b
 - [ ] Before any public URL: the security findings in errors.md 2026-10-05 and the Security Review plugin (Rule 14).
 - [ ] Remaining doc drift: docs/architecture.md:78 (session_id is checked only on POST question and resume since 2026-09-21) and :80 (CORS allows every origin, not the frontend's); the docs/infrastructure.md folder tree; tasks.md:87 ("all 26 pydantic models"); errors.md:146 (MAX_FILE_SIZE lives in backend/utils/file_handler.py, not backend/config.py).
 
+**Status update (2026-10-06):** under option B the backend is not deployed (decisions.md 2026-10-06). The glibc 2.28+ image, the anchored paths and the Linux check move to M5. Chart serving, the demo's free-plan idle pause and the separate demo database are closed; the owner's own project can still pause when idle and may need restoring before local runs. docs/architecture.md :78/:80 and errors.md:146 are fixed in M2a; the remaining doc drift moves to M4.
+
 ### M4 — README
 
 - [ ] A README for the repository (frontend/README.md is the create-next-app boilerplate).
 
 ### Tech debt found in M1
 
-- [ ] Per-agent tracers are created and never used: profiler.py:392, cleaner.py:2118, analyzer.py:940, explainer.py:79 and :232. The pipeline is traced through the orchestrator's tracer; the explainer.py:232 one means custom-question runs are not traced at all (errors.md 2026-10-05).
+- [ ] Per-agent tracers are created and never used: profiler.py:392, cleaner.py:2118, analyzer.py:940, explainer.py:79 and :232. The pipeline is traced through the orchestrator's tracer; the explainer.py:232 one means custom-question runs are not traced at all (errors.md 2026-10-05). (2026-10-06, M2a: explainer.py's question tracer is now used, so custom-question runs are traced; the node-level ones remain.)
 - [ ] `.live/l_live.py:91` `EXPECTED_COUNTS` is 6/1/6 (analyses, questions, Storage objects) but live is now 1/0/1, so the gitignored harness refuses to start until it is updated.
-- [ ] The Appendix A items logged without a milestone: errors.md 2026-10-05 ("Status of the 2026-10-03 system audit's Appendix A"), items 8, 9, 10, 12, 13, 14, 16, 17, 18 and 19.
-- [ ] The `tracing_on` test fixture (tests/conftest.py) patches `create_tracer` in a fixed list of modules, so a new module that imports it would get a real tracer in tracing-on tests; patch it once at its source instead (maintenance; M1 code review).
-- [ ] Nothing configures logging in the backend, so every backend info line (including "LangSmith tracing is on.") never shows; only warnings reach stderr (pre-existing; M1 code review).
+- [ ] The Appendix A items logged without a milestone: errors.md 2026-10-05 ("Status of the 2026-10-03 system audit's Appendix A"), items 8, 9, 10, 12, 13, 14, 16, 17, 18 and 19. (2026-10-06, M2a: item 8 resolved (409); item 13's code comment fixed; item 12 moves to M2c.)
+- [x] The `tracing_on` test fixture (tests/conftest.py) patches `create_tracer` in a fixed list of modules, so a new module that imports it would get a real tracer in tracing-on tests; patch it once at its source instead (maintenance; M1 code review). (2026-10-06, M2a: replaced by the `agent_work_on` fixture, which patches `LangChainTracer` at its source.)
+- [ ] Nothing configures logging in the backend, so every backend info line (including "LangSmith tracing is on.") never shows; only warnings reach stderr (pre-existing; M1 code review). (2026-10-06, M2a: that info line is now "Agent work is on (AGENT_WORK_ENABLED and LangSmith tracing)."; it still does not show.)
 - [ ] `LANGCHAIN_ENDPOINT` is hard-coded in backend/utils/langsmith_client.py and set at import, overriding any value from the environment (Rule 1; pre-existing; M1 code review).
+
+## Roadmap (revised 2026-10-06, option B)
+The public demo, Omnalynt, is a static snapshot of the frontend; the backend runs only on the owner's Mac, with agent work opt-in per session. Decisions: decisions.md 2026-10-06. M1 stands.
+### M2a — Local safety and correctness
+- [x] Agent work opt-in (AGENT_WORK_ENABLED; boot fails on misconfiguration); Anthropic variables required only with agent work on.
+- [x] Explicit CORS origins (ALLOWED_ORIGINS) and an Origin check on every state-changing request.
+- [x] Refusal before the request body is read, with request-size limits.
+- [x] A refusal inside run_pipeline and answer_question.
+- [x] get_session rejects a missing header and a NULL stored session_id; a malformed id gets 404.
+- [x] Questions only on a complete analysis (409).
+- [x] Custom-question runs traced (dashboard check at the next paid run).
+### M2b — The Omnalynt website (static snapshot)
+- [ ] Branding (name, title, icon, link-preview metadata); a landing page (what Omnalynt is, how the four agents work, a link to the example analysis, the GitHub link).
+- [ ] The demo analysis rendered from built-in snapshot data (an export step captures exactly what the public GET routes return, plus the chart files); read-only copy; the header shows 185 × 10 after cleaning with 200 × 9 uploaded as secondary text.
+- [ ] Scatter-title fix in viz_tools (and generate_line_chart) and an offline regeneration of the demo scatter, with a STOP before overwriting; sandboxed, lazy-loaded charts; 320 px; e2e.
+- [ ] Design questions for M2b's evaluation: static export versus the dynamic /analysis/[id] route and the owner's local mode; headers from the host when exporting.
+- [ ] Decide whether the snapshot shows the flag and identifier-column charts (errors.md 2026-10-06).
+- [ ] Question box: a maxLength that keeps the request under the backend's 64 KiB cap (a longer paste gets 413 today).
+### M2c — Dependencies and scans
+- [ ] Remove shadcn, recharts and tw-animate-css with globals.css's two dead @imports; bump axios; a Next 15 upgrade only if the static export leaves Next server exposure.
+- [ ] Python patch and minor bumps (python-multipart only after a scratch import check); majors deferred with reachability notes; triage log; Security Review, report-only.
+- [ ] Owner action: pin the Supabase MCP server's version; read-only and project-scoped by default.
+### M2d — More sample analyses (optional; paid; owner approval per run)
+- [ ] 2–3 analyses on other datasets through the .live harness, re-exported into the snapshot. The harness first needs AGENT_WORK_ENABLED and ALLOWED_ORIGINS (its port) set in its own process, updated EXPECTED_COUNTS, a new output name, the frontend's read-only flag off for its next dev, and canned dry-run texts for each new dataset.
+### M3 — Static deploy
+- [ ] Vercel, at the owner's chosen address; outside-in checks; Security Review before deploy (Rule 14).
+### M4 — README
+- [ ] A README and a short video of a real run (a paid run: owner approval).
+- [ ] Remaining doc drift: the infrastructure.md folder tree; tasks.md's "all 26 pydantic models".
+### M5 — Interactive mode (later)
+- [ ] Visitors' own keys: a deployed backend, executor isolation, per-request key handling, rate limits; backend security headers, /docs off and the deployed origin in ALLOWED_ORIGINS; a glibc 2.28+ image, anchored paths, the Linux lock check; the NOT NULL session_id migration.
 
 ---
 
@@ -65,6 +100,8 @@ Added 2026-10-05. The goal is a read-only public demo; the owner must never be b
 - [x] **HIGH PRIORITY — Execute the Cleaner's own (model-authored) decisions by structured operation id instead of keyword matching** — Build G, 2026-09-26, committed in 042e798. Every Cleaner decision names an operation from a closed set (convert_type, standardize_values, fill_missing, leave_missing, flag_outliers, note) that Python validates without raising and runs in a fixed order (system duplicate removal, conversions, standardizations, fills, the user's pause choices, flags); Python writes every record from what ran and logs `cleaning_report.operations`; the keyword router is removed (approved, after the pure-move proof: 30 captured F3 inputs + 4,000 random cases, 0 mismatches); the filter keeps a note, a flag where the user answered only the missing-value pause, and a fill or leave_missing where the user answered only the outlier pause (the last approved after Code Review); max_tokens 16000 with a stop_reason check; S6 (the Profiler's semantically_categorical_columns and Python's duplicate count sent, the Profiler's pattern fields not); profiler_concerns_addressed "not assessed". 525 passed / 16 skipped; 66 of 66 mutations caught; Code Review: 9 findings (5 fixed, 2 resolved, 2 declined and logged), second pass 2 more, fixed; the approved filter change's scoped review 1 more, fixed. Live-validated 2026-09-26: R1 22 of 22 checks (LangSmith cb1e4375-73b3-43f4-b96b-876a5747bbe1; $0.1417). See decisions.md 2026-09-26 (Build G) and errors.md 2026-09-25 / 2026-09-26.
 
 **Status update (2026-10-05):** the Build G item above is done. M1 is complete; the next build is M2 (Demo hardening) — see Roadmap (M1–M4) above.
+
+**Status update (2026-10-06):** the next build is M2a — see "Roadmap (revised 2026-10-06, option B)" above.
 
 ---
 
