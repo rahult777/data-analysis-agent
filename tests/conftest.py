@@ -14,10 +14,13 @@ def _never_load_dotenv(*args: object, **kwargs: object) -> bool:
 
 
 # Test settings. pytest imports this file before any test module, so these run before anything
-# imports backend.config: no real .env, dummy credentials that reach no real service, tracing off.
+# imports backend.config: no real .env, dummy credentials that reach no real service, tracing and
+# agent work off, the default browser origins.
 dotenv.load_dotenv = _never_load_dotenv
 for _name in [name for name in os.environ if name.startswith(("LANGSMITH_", "LANGCHAIN_TRACING"))]:
     del os.environ[_name]
+for _name in ("AGENT_WORK_ENABLED", "ALLOWED_ORIGINS"):
+    os.environ.pop(_name, None)
 os.environ["ANTHROPIC_API_KEY"] = "test-anthropic-key"
 os.environ["ANTHROPIC_MODEL"] = "claude-sonnet-4-6"
 os.environ["SUPABASE_URL"] = "http://127.0.0.1:9"
@@ -33,14 +36,15 @@ def retry_sleep() -> Iterator[AsyncMock]:
 
 
 @pytest.fixture
-def tracing_on(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The agent-work routes open as with tracing on, but nothing reaches LangSmith:
-    TRACING_ENABLED is True and every create_tracer import site returns a no-op handler."""
+def agent_work_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Agent work is allowed (AGENT_WORK_ENABLED and tracing on), but nothing reaches LangSmith:
+    LangChainTracer is replaced at its source, so create_tracer, wherever it was imported, returns a
+    no-op handler."""
     from langchain_core.callbacks import BaseCallbackHandler
 
-    def no_op_tracer(run_name: str) -> BaseCallbackHandler:
+    def no_op_tracer(*args: object, **kwargs: object) -> BaseCallbackHandler:
         return BaseCallbackHandler()
 
     monkeypatch.setattr("backend.config.TRACING_ENABLED", True)
-    for module in ("orchestrator", "profiler", "cleaner", "analyzer", "explainer"):
-        monkeypatch.setattr(f"backend.agents.{module}.create_tracer", no_op_tracer)
+    monkeypatch.setattr("backend.config.AGENT_WORK_ENABLED", True)
+    monkeypatch.setattr("backend.utils.langsmith_client.LangChainTracer", no_op_tracer)

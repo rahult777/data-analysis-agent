@@ -15,6 +15,7 @@ from backend.utils.supabase_retry import supabase_call
 logger = logging.getLogger(__name__)
 
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 MB
+FILE_TOO_LARGE_MESSAGE = "USER_ERROR: This file is too large. Maximum size is 100MB."
 
 TEMP_DIR = Path("backend/uploads")
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -30,9 +31,7 @@ def validate_file(filename: str, content: bytes) -> None:
             "USER_ERROR: Please upload a CSV or Excel file (.csv, .xls, .xlsx)"
         )
     if len(content) > MAX_FILE_SIZE:
-        raise ValueError(
-            "USER_ERROR: This file is too large. Maximum size is 100MB."
-        )
+        raise ValueError(FILE_TOO_LARGE_MESSAGE)
     if len(content) == 0:
         raise ValueError(
             "USER_ERROR: This file is empty. Please upload a file with data."

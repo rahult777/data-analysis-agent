@@ -95,6 +95,8 @@ import json  # noqa: E402
 import pathlib  # noqa: E402
 from unittest.mock import AsyncMock, MagicMock, patch  # noqa: E402
 
+from langchain_core.callbacks import BaseCallbackHandler  # noqa: E402
+
 from backend.agents.explainer import answer_question, explainer_node  # noqa: E402
 from tests.fake_supabase import recording_client  # noqa: E402
 
@@ -147,7 +149,13 @@ def _reply(payload: dict) -> MagicMock:
     return reply
 
 
-def _answer_question_failing(tmp_path: pathlib.Path, code: str, fail_updates: frozenset, download_error: Exception | None = None) -> tuple:
+def _answer_question_failing(
+    tmp_path: pathlib.Path,
+    code: str,
+    fail_updates: frozenset,
+    download_error: Exception | None = None,
+    tracer: BaseCallbackHandler | None = None,
+) -> tuple:
     parquet = tmp_path / "q.parquet"
     pd.DataFrame({"a": [1, 2, 3]}).to_parquet(parquet, index=False)
     supabase, updates = recording_client(fail_updates)
@@ -155,7 +163,7 @@ def _answer_question_failing(tmp_path: pathlib.Path, code: str, fail_updates: fr
     with (
         patch("backend.agents.explainer.client") as mock_client,
         patch("backend.agents.explainer.get_supabase_client", return_value=supabase),
-        patch("backend.agents.explainer.create_tracer"),
+        patch("backend.agents.explainer.create_tracer", return_value=tracer),
         patch("backend.agents.explainer.download_from_storage", new=download),
         patch("backend.agents.explainer.cleanup_temp_file", new=AsyncMock()),
     ):
@@ -165,6 +173,7 @@ def _answer_question_failing(tmp_path: pathlib.Path, code: str, fail_updates: fr
     return result, [payload for _, payload in updates]
 
 
+@pytest.mark.usefixtures("agent_work_on")
 @pytest.mark.parametrize("failing", [0, 1], ids=["answering", "complete"])
 def test_question_writes_survive_one_transient_failure(tmp_path: pathlib.Path, failing: int) -> None:
     result, payloads = _answer_question_failing(tmp_path, "result = df['a'].sum()", frozenset({failing}))
@@ -174,6 +183,7 @@ def test_question_writes_survive_one_transient_failure(tmp_path: pathlib.Path, f
     assert [p["status"] for p in payloads] == statuses
 
 
+@pytest.mark.usefixtures("agent_work_on")
 @pytest.mark.parametrize(
     "code, expected",
     [("", "The code generator did not produce pandas code."), ("result = df['zzz'].sum()", None)],
@@ -187,7 +197,48 @@ def test_question_error_writes_survive_one_transient_failure(tmp_path: pathlib.P
         assert payloads[-1]["answer"] == expected
 
 
+@pytest.mark.usefixtures("agent_work_on")
 def test_question_failure_write_survives_one_transient_failure(tmp_path: pathlib.Path) -> None:
     result, payloads = _answer_question_failing(tmp_path, "", frozenset({0}), download_error=RuntimeError("no parquet"))
     assert result["answer"] == "An error occurred while computing the answer."
     assert payloads == [{"status": "error"}, {"status": "error"}]
+
+
+# ---------------------------------------------------------------------------
+# Custom-question runs are traced (CLAUDE.md Rule 8)
+# ---------------------------------------------------------------------------
+
+
+class RecordingHandler(BaseCallbackHandler):
+    """Stands in for the LangSmith tracer and records the chain runs it is told about."""
+
+    def __init__(self) -> None:
+        self.started: list[tuple[str | None, dict]] = []
+        self.ended: list[object] = []
+
+    def on_chain_start(self, serialized: object, inputs: dict, **kwargs: object) -> None:
+        self.started.append((kwargs.get("name"), inputs))
+
+    def on_chain_end(self, outputs: object, **kwargs: object) -> None:
+        self.ended.append(outputs)
+
+
+@pytest.mark.usefixtures("agent_work_on")
+def test_question_runs_inside_a_traced_run_named_explainer_question(tmp_path: pathlib.Path) -> None:
+    handler = RecordingHandler()
+    result, payloads = _answer_question_failing(tmp_path, "result = df['a'].sum()", frozenset(), tracer=handler)
+    assert result == {"answer": "The total is 6.", "pandas_code": "result = df['a'].sum()"}
+    assert handler.started == [
+        ("explainer-question", {"analysis_id": "test-id", "question_id": "q-1", "question": "What is the total?"})
+    ]
+    assert len(handler.ended) == 1
+    assert [p["status"] for p in payloads] == ["answering", "complete"]
+
+
+@pytest.mark.usefixtures("agent_work_on")
+def test_question_without_a_tracer_runs_no_runnable(tmp_path: pathlib.Path) -> None:
+    with patch("backend.agents.explainer.RunnableLambda") as runnable:
+        result, payloads = _answer_question_failing(tmp_path, "result = df['a'].sum()", frozenset())
+    runnable.assert_not_called()
+    assert result == {"answer": "The total is 6.", "pandas_code": "result = df['a'].sum()"}
+    assert [p["status"] for p in payloads] == ["answering", "complete"]

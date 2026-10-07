@@ -4,8 +4,9 @@ a LangChainTracer for use as a callback in LangGraph graph.invoke() calls,
 and a fail-fast connection validator that runs on import when tracing is on.
 
 Tracing is on only when backend.config says so (config.TRACING_ENABLED). With
-tracing off this module makes no network call and create_tracer returns None;
-the agent-work routes refuse instead (backend/utils/agent_guard.py).
+tracing off this module makes no network call and create_tracer returns None.
+Agent work needs tracing (and AGENT_WORK_ENABLED); without both it is refused
+(backend/utils/agent_guard.py).
 """
 
 import os

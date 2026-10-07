@@ -25,6 +25,9 @@ from backend.agents.orchestrator import (
     run_pipeline,
 )
 
+# run_pipeline refuses unless agent work is allowed (that refusal is tested in test_tracing.py).
+pytestmark = pytest.mark.usefixtures("agent_work_on")
+
 
 def test_imports():
     """Verify all orchestrator exports import without error."""
@@ -269,8 +272,8 @@ def run_pipeline_capturing_config(tracer: BaseCallbackHandler | None) -> dict:
     return ainvoke.call_args.kwargs["config"]
 
 
-def test_run_pipeline_passes_no_callbacks_when_tracing_is_off() -> None:
-    """create_tracer returns None with tracing off; the graph must get no callbacks, not [None]."""
+def test_run_pipeline_passes_no_callbacks_when_create_tracer_returns_none() -> None:
+    """With agent work allowed but no tracer, the graph must get no callbacks, not [None]."""
     run_config = run_pipeline_capturing_config(None)
     assert "callbacks" not in run_config
     assert run_config["recursion_limit"] == 1000

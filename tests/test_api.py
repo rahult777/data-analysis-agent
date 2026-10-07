@@ -6,7 +6,7 @@ main.py imports get_supabase_client into its own namespace so backend.main is th
 interceptable namespace.
 
 All tests run from the project root (CWD must be the repo root). Every test here runs with the
-agent-work routes open (tracing_on, tests/conftest.py); the read-only refusal is tested in
+agent-work routes open (agent_work_on, tests/conftest.py); the read-only refusal is tested in
 test_tracing.py.
 """
 
@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 from backend.main import app
 from backend.models.schemas import AnalysisStatus
 
-pytestmark = pytest.mark.usefixtures("tracing_on")
+pytestmark = pytest.mark.usefixtures("agent_work_on")
 
 client = TestClient(app)
 
@@ -373,7 +373,7 @@ def test_resume_not_in_pause_state() -> None:
     """Resume on status=complete returns 400 with 'not in a pause state' message."""
     mock_client = make_supabase_mock(
         {
-            "id": "test-id",
+            "id": AID,
             "session_id": "test-session",
             "status": "complete",
             "error_message": None,
@@ -381,7 +381,7 @@ def test_resume_not_in_pause_state() -> None:
     )
     with patch("backend.main.get_supabase_client", return_value=mock_client):
         response = client.post(
-            "/api/analysis/test-id/resume",
+            f"/api/analysis/{AID}/resume",
             json={"response": {"decision": "confirm"}},
             headers={"session-id": "test-session"},
         )
@@ -393,7 +393,7 @@ def test_resume_valid_domain_pause() -> None:
     """Resume on status=domain_pause returns 200 with status=profiling."""
     mock_client = make_supabase_mock(
         {
-            "id": "test-id",
+            "id": AID,
             "session_id": "test-session",
             "status": "domain_pause",
             "pause_data": DOMAIN_PAUSE_DATA,
@@ -401,7 +401,7 @@ def test_resume_valid_domain_pause() -> None:
     )
     with patch("backend.main.get_supabase_client", return_value=mock_client):
         response = client.post(
-            "/api/analysis/test-id/resume",
+            f"/api/analysis/{AID}/resume",
             json={"response": {"pause_type": "domain_pause", "option_id": "confirm"}},
             headers={"session-id": "test-session"},
         )
@@ -411,10 +411,10 @@ def test_resume_valid_domain_pause() -> None:
 
 def post_resume(stored: dict, resume_body: dict) -> tuple:
     """POST a resume against a mocked stored record; return (response, update mock)."""
-    mock_client = make_supabase_mock({"id": "test-id", "session_id": "test-session", **stored})
+    mock_client = make_supabase_mock({"id": AID, "session_id": "test-session", **stored})
     with patch("backend.main.get_supabase_client", return_value=mock_client):
         response = client.post(
-            "/api/analysis/test-id/resume",
+            f"/api/analysis/{AID}/resume",
             json={"response": resume_body},
             headers={"session-id": "test-session"},
         )
@@ -567,30 +567,30 @@ def test_resume_missing_option_id_is_400_not_500() -> None:
 def test_resume_write_is_conditional_on_validated_pause() -> None:
     """The update matches id, the validated status, and the pause's updated_at."""
     mock_client = make_supabase_mock(
-        {"id": "test-id", "session_id": "test-session", "status": "missing_value_pause",
+        {"id": AID, "session_id": "test-session", "status": "missing_value_pause",
          "pause_data": MISSING_VALUE_PAUSE_DATA, "updated_at": "2026-09-22T03:50:37.123456+00:00"}
     )
     with patch("backend.main.get_supabase_client", return_value=mock_client):
         response = client.post(
-            "/api/analysis/test-id/resume",
+            f"/api/analysis/{AID}/resume",
             json={"response": {"pause_type": "missing_value_pause", "column_name": "revenue", "option_id": "impute"}},
             headers={"session-id": "test-session"},
         )
     assert response.status_code == 200
     filters = mock_client.table.return_value.update.return_value.eq.call_args_list
-    assert call("id", "test-id") in filters
+    assert call("id", AID) in filters
     assert call("status", "missing_value_pause") in filters
     assert call("updated_at", "2026-09-22T03:50:37.123456+00:00") in filters
 
 
 def test_resume_write_with_null_updated_at_matches_null() -> None:
     mock_client = make_supabase_mock(
-        {"id": "test-id", "session_id": "test-session", "status": "domain_pause",
+        {"id": AID, "session_id": "test-session", "status": "domain_pause",
          "pause_data": DOMAIN_PAUSE_DATA, "updated_at": None}
     )
     with patch("backend.main.get_supabase_client", return_value=mock_client):
         response = client.post(
-            "/api/analysis/test-id/resume",
+            f"/api/analysis/{AID}/resume",
             json={"response": {"pause_type": "domain_pause", "option_id": "confirm"}},
             headers={"session-id": "test-session"},
         )
@@ -603,7 +603,7 @@ def test_resume_stale_response_returns_409() -> None:
     """The pipeline left the validated pause before the write (e.g. re-paused on
     another column): the conditional update matches no rows and the resume is a 409."""
     mock_client = make_supabase_mock(
-        {"id": "test-id", "session_id": "test-session", "status": "missing_value_pause",
+        {"id": AID, "session_id": "test-session", "status": "missing_value_pause",
          "pause_data": MISSING_VALUE_PAUSE_DATA, "updated_at": "2026-09-22T03:50:37.123456+00:00"}
     )
     stale_result = MagicMock()
@@ -611,7 +611,7 @@ def test_resume_stale_response_returns_409() -> None:
     mock_client.table.return_value.update.return_value.execute.return_value = stale_result
     with patch("backend.main.get_supabase_client", return_value=mock_client):
         response = client.post(
-            "/api/analysis/test-id/resume",
+            f"/api/analysis/{AID}/resume",
             json={"response": {"pause_type": "missing_value_pause", "column_name": "revenue", "option_id": "impute"}},
             headers={"session-id": "test-session"},
         )
@@ -926,6 +926,13 @@ def paused_fake() -> FakeSupabase:
     }]})
 
 
+def complete_fake() -> FakeSupabase:
+    """paused_fake's rows with the analysis complete: questions are accepted only then."""
+    fake = paused_fake()
+    fake.row("analyses", AID)["status"] = "complete"
+    return fake
+
+
 def resume_on_fake(fake: FakeSupabase, answer: dict = MV_ANSWER, test_client: TestClient = client) -> Response:
     with patch("backend.main.get_supabase_client", return_value=fake):
         return test_client.post(
@@ -960,8 +967,8 @@ def test_read_route_survives_one_transient_failure(path: str, table: str) -> Non
 
 
 def test_get_session_survives_one_transient_failure() -> None:
-    fake = paused_fake()
-    fake.faults.append(Fault("select", "analyses", when=lambda p: p["columns"] == "id, session_id"))
+    fake = complete_fake()
+    fake.faults.append(Fault("select", "analyses", when=lambda p: p["columns"] == "id, session_id, status"))
     task = AsyncMock()
     with (
         patch("backend.main.get_supabase_client", return_value=fake),
@@ -970,6 +977,7 @@ def test_get_session_survives_one_transient_failure() -> None:
         response = client.post(f"/api/analysis/{AID}/question", json={"question": "q?"}, headers={"session-id": "s"})
     assert response.status_code == 200
     task.assert_called_once()
+    assert not fake.faults
 
 
 def upload_on_fake(fake: FakeSupabase, pipeline: AsyncMock) -> Response:
@@ -1045,7 +1053,7 @@ def question_on_fake(fake: FakeSupabase, task: AsyncMock) -> Response:
 
 @pytest.mark.parametrize("mode, sends", [("after", 1), ("late", 2)])
 def test_question_lost_success_returns_200_with_exactly_one_task(mode: str, sends: int) -> None:
-    fake = paused_fake()
+    fake = complete_fake()
     fake.faults.append(Fault("insert", "questions", mode=mode))
     task = AsyncMock()
     response = question_on_fake(fake, task)
@@ -1057,7 +1065,7 @@ def test_question_lost_success_returns_200_with_exactly_one_task(mode: str, send
 
 
 def test_question_landed_check_looks_up_our_id() -> None:
-    fake = paused_fake()
+    fake = complete_fake()
     fake.faults.append(Fault("insert", "questions", mode="after"))
     question_id = question_on_fake(fake, AsyncMock()).json()["question_id"]
     (landed_read,) = fake.executes("select", "questions")
@@ -1137,3 +1145,94 @@ def test_resume_persistent_failure_is_500_with_nothing_written() -> None:
     assert response.status_code == 500
     assert len(fake.executes("update", "analyses")) == 3
     assert fake.row("analyses", AID)["status"] == "missing_value_pause"
+
+
+# ---------------------------------------------------------------------------
+# Group 8 — get_session refuses a missing, empty, NULL or malformed session
+# ---------------------------------------------------------------------------
+
+
+def session_fake(stored: str | None) -> FakeSupabase:
+    return FakeSupabase(rows={"analyses": [{
+        "id": AID, "session_id": stored, "status": "complete", "pause_data": None,
+        "user_pause_response": None, "updated_at": UPDATED_AT,
+    }]})
+
+
+def post_with_session(route: str, fake: FakeSupabase, headers: dict) -> tuple[Response, AsyncMock]:
+    task = AsyncMock()
+    body = {"question": "q?"} if route == "question" else {"response": MV_ANSWER}
+    with (
+        patch("backend.main.get_supabase_client", return_value=fake),
+        patch("backend.main.run_question_task", new=task),
+    ):
+        response = client.post(f"/api/analysis/{AID}/{route}", json=body, headers=headers)
+    return response, task
+
+
+@pytest.mark.parametrize("route", ["question", "resume"])
+@pytest.mark.parametrize(
+    "stored, headers",
+    [
+        (None, {}),
+        (None, {"session-id": "s"}),
+        (None, {"session-id": "None"}),
+        ("s", {"session-id": ""}),
+        ("", {"session-id": ""}),
+        ("s", {"session-id": "é".encode("latin-1")}),
+    ],
+    ids=["null-no-header", "null-with-header", "null-vs-text-None", "empty-header", "empty-both", "non-ascii-header"],
+)
+def test_session_check_refuses_with_403_before_any_write(route: str, stored: str | None, headers: dict) -> None:
+    fake = session_fake(stored)
+    response, task = post_with_session(route, fake, headers)
+    assert (response.status_code, response.json()) == (403, {"detail": "Invalid or missing session-id header."})
+    assert [c.op for c in fake.calls] == ["select"]
+    task.assert_not_called()
+
+
+def test_session_check_passes_the_matching_header() -> None:
+    fake = session_fake("s")
+    response, task = post_with_session("question", fake, {"session-id": "s"})
+    assert response.status_code == 200
+    assert len(fake.executes("insert", "questions")) == 1
+    task.assert_called_once()
+
+
+@pytest.mark.parametrize("route", ["question", "resume"])
+@pytest.mark.parametrize(
+    "analysis_id", ["not-a-uuid", AID.replace("-", ""), f"urn:uuid:{AID}"], ids=["not-a-uuid", "no-hyphens", "urn"]
+)
+def test_session_check_refuses_a_malformed_id_with_404_before_any_database_call(route: str, analysis_id: str) -> None:
+    task = AsyncMock()
+    body = {"question": "q?"} if route == "question" else {"response": MV_ANSWER}
+    with (
+        patch("backend.main.get_supabase_client") as get_client,
+        patch("backend.main.run_question_task", new=task),
+    ):
+        response = client.post(f"/api/analysis/{analysis_id}/{route}", json=body, headers={"session-id": "s"})
+    assert (response.status_code, response.json()) == (404, {"detail": "Analysis not found."})
+    get_client.assert_not_called()
+    task.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Group 9 — Questions need a complete analysis
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["profiling", "domain_pause", "cleaning", "cleaned", "missing_value_pause", "outlier_pause", "analyzing",
+     "explaining", "error"],
+)
+def test_question_before_the_analysis_is_complete_is_409_with_nothing_written(status: str) -> None:
+    fake = complete_fake()
+    fake.row("analyses", AID)["status"] = status
+    response, task = post_with_session("question", fake, {"session-id": "s"})
+    assert (response.status_code, response.json()) == (
+        409,
+        {"detail": "USER_ERROR: Questions can be asked only after the analysis is complete."},
+    )
+    assert [c.op for c in fake.calls] == ["select"]
+    task.assert_not_called()

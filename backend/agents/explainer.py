@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 import pandas as pd
 from anthropic import Anthropic
+from langchain_core.runnables import RunnableLambda
 
 from backend.config import ANTHROPIC_API_KEY, ANTHROPIC_MODEL
 from backend.models.schemas import (
@@ -25,6 +26,7 @@ from backend.models.schemas import (
     QuestionStatus,
 )
 from backend.tools.code_executor import run_question
+from backend.utils.agent_guard import agent_work_allowed
 from backend.utils.file_handler import cleanup_temp_file, download_from_storage
 from backend.utils.langsmith_client import create_tracer
 from backend.utils.supabase_client import get_supabase_client
@@ -44,6 +46,9 @@ client = Anthropic(api_key=ANTHROPIC_API_KEY)
 # synthesis call MUST use messages.stream(). The smaller custom-question calls
 # (max_tokens=2000/1000) stay non-streaming. See errors.md 2026-06-04.
 EXPLAINER_MAX_TOKENS = 32000
+
+# The stored answer when a question is refused because agent work is not allowed.
+_QUESTIONS_UNAVAILABLE = "Questions are not available on this server right now."
 
 
 def build_explainer_message(state: PipelineState) -> str:
@@ -227,173 +232,202 @@ async def answer_question(
     """Answer a custom user question by executing pandas code on the cleaned dataset.
 
     Called directly by main.py — not by the orchestrator. question_id is required
-    to update the questions table record throughout execution.
+    to update the questions table record throughout execution. Refuses first
+    unless agent work is allowed (backend/utils/agent_guard.py): the question is
+    marked as an error and nothing else runs.
     """
-    tracer = create_tracer("explainer-question")  # noqa: F841
-
-    # Memory MCP read — required per explainer_system.md §10 even in Custom Questions Mode.
-    # Keys are not available without PipelineState in this standalone function; log gracefully.
-    memory_keys = [
-        "profiler.domain_hypothesis", "profiler.top_3_concerns", "profiler.top_3_patterns",
-        "cleaner.key_cleaning_decisions", "cleaner.excluded_columns", "cleaner.outliers_handled",
-        "cleaner.user_decisions_incorporated", "analyzer.most_important_finding",
-        "analyzer.most_surprising_finding", "analyzer.strong_correlations",
-        "analyzer.anomalies_found", "analyzer.chart_paths", "analyzer.data_quality_score",
-        "analyzer.open_questions", "analyzer.user_question_addressed",
-    ]
-    logger.info(
-        "Memory MCP read for explainer-question (analysis_id=%s question_id=%s): "
-        "attempting %d keys — not available in standalone context, treating as missing",
-        analysis_id,
-        question_id,
-        len(memory_keys),
-    )
-
-    try:
-        file_path = await download_from_storage(analysis_id)
-        df = await asyncio.to_thread(pd.read_parquet, file_path)
-
-        try:
-            await cleanup_temp_file(f"{analysis_id}.parquet")
-        except Exception as cleanup_exc:
-            logger.warning(
-                "Failed to clean up local parquet for analysis_id=%s: %s",
-                analysis_id,
-                cleanup_exc,
-            )
-
-        columns_info: dict[str, str] = {col: str(df[col].dtype) for col in df.columns}
-        sample = df.head(3).to_dict(orient="records")
-
+    if not agent_work_allowed():
         await supabase_call(
             lambda: get_supabase_client()
             .table("questions")
-            .update({"status": "answering"})
+            .update({"status": "error", "answer": _QUESTIONS_UNAVAILABLE, "pandas_code": ""})
             .eq("id", question_id)
             .execute(),
-            what="question answering write",
+            what="question refusal write",
+        )
+        logger.warning(
+            "Question refused for question_id=%s: agent work is not allowed on this server.", question_id
+        )
+        return {"answer": _QUESTIONS_UNAVAILABLE, "pandas_code": ""}
+
+    tracer = create_tracer("explainer-question")
+
+    async def answer(inputs: dict) -> dict:
+        """The question flow; inputs are the traced run's inputs."""
+        analysis_id = inputs["analysis_id"]
+        question_id = inputs["question_id"]
+        question = inputs["question"]
+
+        # Memory MCP read — required per explainer_system.md §10 even in Custom Questions Mode.
+        # Keys are not available without PipelineState in this standalone function; log gracefully.
+        memory_keys = [
+            "profiler.domain_hypothesis", "profiler.top_3_concerns", "profiler.top_3_patterns",
+            "cleaner.key_cleaning_decisions", "cleaner.excluded_columns", "cleaner.outliers_handled",
+            "cleaner.user_decisions_incorporated", "analyzer.most_important_finding",
+            "analyzer.most_surprising_finding", "analyzer.strong_correlations",
+            "analyzer.anomalies_found", "analyzer.chart_paths", "analyzer.data_quality_score",
+            "analyzer.open_questions", "analyzer.user_question_addressed",
+        ]
+        logger.info(
+            "Memory MCP read for explainer-question (analysis_id=%s question_id=%s): "
+            "attempting %d keys — not available in standalone context, treating as missing",
+            analysis_id,
+            question_id,
+            len(memory_keys),
         )
 
-        # First LLM call — generate pandas code for the question.
-        code_system_prompt = load_system_prompt("question_code_generator")
-        code_message = json.dumps(
-            {
-                "question": question,
-                "columns_info": columns_info,
-                "sample_rows": sample,
-            },
-            default=str,
-        )
+        try:
+            file_path = await download_from_storage(analysis_id)
+            df = await asyncio.to_thread(pd.read_parquet, file_path)
 
-        code_api_response = await asyncio.to_thread(
-            lambda: client.messages.create(
-                model=ANTHROPIC_MODEL,
-                max_tokens=2000,
-                system=code_system_prompt,
-                messages=[{"role": "user", "content": code_message}],
-            )
-        )
+            try:
+                await cleanup_temp_file(f"{analysis_id}.parquet")
+            except Exception as cleanup_exc:
+                logger.warning(
+                    "Failed to clean up local parquet for analysis_id=%s: %s",
+                    analysis_id,
+                    cleanup_exc,
+                )
 
-        code_response = parse_json_response(code_api_response.content[0].text)
-        pandas_code: str = code_response.get("pandas_code", "")
+            columns_info: dict[str, str] = {col: str(df[col].dtype) for col in df.columns}
+            sample = df.head(3).to_dict(orient="records")
 
-        if not pandas_code:
             await supabase_call(
                 lambda: get_supabase_client()
                 .table("questions")
-                .update({
-                    "status": "error",
-                    "answer": "The code generator did not produce pandas code.",
-                    "pandas_code": "",
-                })
+                .update({"status": "answering"})
                 .eq("id", question_id)
                 .execute(),
-                what="question no-code error write",
+                what="question answering write",
             )
-            return {
-                "answer": "The code generator did not produce pandas code.",
-                "pandas_code": "",
-            }
 
-        result_value, error = await asyncio.to_thread(run_question, df, pandas_code)
+            # First LLM call — generate pandas code for the question.
+            code_system_prompt = load_system_prompt("question_code_generator")
+            code_message = json.dumps(
+                {
+                    "question": question,
+                    "columns_info": columns_info,
+                    "sample_rows": sample,
+                },
+                default=str,
+            )
 
-        if error is not None:
+            code_api_response = await asyncio.to_thread(
+                lambda: client.messages.create(
+                    model=ANTHROPIC_MODEL,
+                    max_tokens=2000,
+                    system=code_system_prompt,
+                    messages=[{"role": "user", "content": code_message}],
+                )
+            )
+
+            code_response = parse_json_response(code_api_response.content[0].text)
+            pandas_code: str = code_response.get("pandas_code", "")
+
+            if not pandas_code:
+                await supabase_call(
+                    lambda: get_supabase_client()
+                    .table("questions")
+                    .update({
+                        "status": "error",
+                        "answer": "The code generator did not produce pandas code.",
+                        "pandas_code": "",
+                    })
+                    .eq("id", question_id)
+                    .execute(),
+                    what="question no-code error write",
+                )
+                return {
+                    "answer": "The code generator did not produce pandas code.",
+                    "pandas_code": "",
+                }
+
+            result_value, error = await asyncio.to_thread(run_question, df, pandas_code)
+
+            if error is not None:
+                await supabase_call(
+                    lambda: get_supabase_client()
+                    .table("questions")
+                    .update({
+                        "status": "error",
+                        "answer": error,
+                        "pandas_code": pandas_code,
+                    })
+                    .eq("id", question_id)
+                    .execute(),
+                    what="question run error write",
+                )
+                return {
+                    "answer": f"I could not compute the answer: {error}",
+                    "pandas_code": pandas_code,
+                }
+
+            # Second LLM call — translate computed result to plain-English answer.
+            answer_system_prompt = load_system_prompt("question_answer")
+            answer_message = json.dumps(
+                {
+                    "question": question,
+                    "pandas_code": pandas_code,
+                    "result": str(result_value),
+                },
+                default=str,
+            )
+
+            answer_api_response = await asyncio.to_thread(
+                lambda: client.messages.create(
+                    model=ANTHROPIC_MODEL,
+                    max_tokens=1000,
+                    system=answer_system_prompt,
+                    messages=[{"role": "user", "content": answer_message}],
+                )
+            )
+
+            answer_response = parse_json_response(answer_api_response.content[0].text)
+            answer_text: str = answer_response.get("answer", "I could not formulate an answer.")
+
             await supabase_call(
                 lambda: get_supabase_client()
                 .table("questions")
                 .update({
-                    "status": "error",
-                    "answer": error,
+                    "status": "complete",
+                    "answer": answer_text,
                     "pandas_code": pandas_code,
                 })
                 .eq("id", question_id)
                 .execute(),
-                what="question run error write",
+                what="question answer save",
             )
-            return {
-                "answer": f"I could not compute the answer: {error}",
-                "pandas_code": pandas_code,
-            }
 
-        # Second LLM call — translate computed result to plain-English answer.
-        answer_system_prompt = load_system_prompt("question_answer")
-        answer_message = json.dumps(
-            {
-                "question": question,
-                "pandas_code": pandas_code,
-                "result": str(result_value),
-            },
-            default=str,
-        )
+            return {"answer": answer_text, "pandas_code": pandas_code}
 
-        answer_api_response = await asyncio.to_thread(
-            lambda: client.messages.create(
-                model=ANTHROPIC_MODEL,
-                max_tokens=1000,
-                system=answer_system_prompt,
-                messages=[{"role": "user", "content": answer_message}],
-            )
-        )
-
-        answer_response = parse_json_response(answer_api_response.content[0].text)
-        answer_text: str = answer_response.get("answer", "I could not formulate an answer.")
-
-        await supabase_call(
-            lambda: get_supabase_client()
-            .table("questions")
-            .update({
-                "status": "complete",
-                "answer": answer_text,
-                "pandas_code": pandas_code,
-            })
-            .eq("id", question_id)
-            .execute(),
-            what="question answer save",
-        )
-
-        return {"answer": answer_text, "pandas_code": pandas_code}
-
-    except Exception as exc:
-        logger.exception(
-            "answer_question failed for analysis_id=%s question_id=%s",
-            analysis_id,
-            question_id,
-        )
-        try:
-            await supabase_call(
-                lambda: get_supabase_client()
-                .table("questions")
-                .update({"status": "error"})
-                .eq("id", question_id)
-                .execute(),
-                what="question failure write",
-            )
-        except Exception:
-            logger.warning(
-                "Failed to update questions error status for question_id=%s",
+        except Exception as exc:
+            logger.exception(
+                "answer_question failed for analysis_id=%s question_id=%s",
+                analysis_id,
                 question_id,
             )
-        return {
-            "answer": "An error occurred while computing the answer.",
-            "pandas_code": "",
-        }
+            try:
+                await supabase_call(
+                    lambda: get_supabase_client()
+                    .table("questions")
+                    .update({"status": "error"})
+                    .eq("id", question_id)
+                    .execute(),
+                    what="question failure write",
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to update questions error status for question_id=%s",
+                    question_id,
+                )
+            return {
+                "answer": "An error occurred while computing the answer.",
+                "pandas_code": "",
+            }
+
+    args = {"analysis_id": analysis_id, "question_id": question_id, "question": question}
+    if tracer is not None:
+        return await RunnableLambda(answer).ainvoke(
+            args, config={"run_name": "explainer-question", "callbacks": [tracer]}
+        )
+    return await answer(args)

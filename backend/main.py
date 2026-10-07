@@ -5,6 +5,7 @@ and manages application lifespan.
 """
 
 import asyncio
+import hmac
 import logging
 import uuid
 from contextlib import asynccontextmanager
@@ -18,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from postgrest import APIResponse
 from postgrest.exceptions import APIError
 
+from backend import config
 from backend.agents.explainer import answer_question
 from backend.agents.orchestrator import build_initial_state, run_pipeline
 from backend.models.schemas import (
@@ -32,6 +34,7 @@ from backend.models.schemas import (
 )
 from backend.utils.agent_guard import require_agent_work_enabled
 from backend.utils.file_handler import cleanup_temp_file, save_temp_file, validate_file
+from backend.utils.request_gate import RequestGate
 from backend.utils.supabase_client import get_supabase_client
 from backend.utils.supabase_retry import supabase_call
 
@@ -171,12 +174,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# Refuses a state-changing request before its body is read (backend/utils/request_gate.py). Added before
+# CORSMiddleware, so it runs inside it: preflights never reach it, and its refusals carry CORS headers.
+app.add_middleware(RequestGate, allowed_origins=config.ALLOWED_ORIGINS)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # TODO: restrict to frontend URL before production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=config.ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["content-type", "session-id"],
 )
 
 # Directory must exist before StaticFiles initializes; lifespan also creates it.
@@ -191,12 +198,21 @@ app.mount("/charts", StaticFiles(directory="backend/outputs/charts"), name="char
 
 async def get_session(
     analysis_id: str,
-    session_id: str = Header(None, alias="session-id"),
-) -> str:
+    session_id: Optional[str] = Header(None, alias="session-id"),
+) -> dict:
+    """Return the analysis record (id, session_id, status) once the session-id header matches it.
+
+    404 for a malformed analysis_id, before any database read (as get_public_read_access does). 403 when
+    the header is missing or empty, the stored session_id is NULL, or the two differ. They are compared
+    as UTF-8 bytes in constant time: Starlette decodes header values as latin-1, and hmac.compare_digest
+    raises TypeError on a non-ASCII str.
+    """
+    if not _is_canonical_uuid(analysis_id):
+        raise HTTPException(status_code=404, detail="Analysis not found.")
     client = get_supabase_client()
     response = await supabase_call(
         lambda: client.table("analyses")
-        .select("id, session_id")
+        .select("id, session_id, status")
         .eq("id", analysis_id)
         .execute(),
         what="session check",
@@ -204,9 +220,14 @@ async def get_session(
     if not response.data:
         raise HTTPException(status_code=404, detail="Analysis not found.")
     record = response.data[0]
-    if session_id != record["session_id"]:
+    stored = record.get("session_id")
+    if (
+        not session_id
+        or stored is None
+        or not hmac.compare_digest(session_id.encode("utf-8"), str(stored).encode("utf-8"))
+    ):
         raise HTTPException(status_code=403, detail="Invalid or missing session-id header.")
-    return session_id
+    return record
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +292,7 @@ class _PauseMovedOn(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Background task stubs — agents wired in when backend/agents/ is built
+# Background tasks — the pipeline and custom-question runs
 # ---------------------------------------------------------------------------
 
 
@@ -410,8 +431,14 @@ async def post_question(
     analysis_id: str,
     request: QuestionRequest,
     background_tasks: BackgroundTasks,
-    _session: str = Depends(get_session),
+    record: dict = Depends(get_session),
 ) -> QuestionResponse:
+    # A question reads the cleaned dataset, which exists only once the analysis is complete.
+    if record.get("status") != "complete":
+        raise HTTPException(
+            status_code=409,
+            detail="USER_ERROR: Questions can be asked only after the analysis is complete.",
+        )
     question_id = str(uuid.uuid4())
     await _insert_row(
         "questions",
@@ -478,7 +505,7 @@ async def get_question(
 async def resume_analysis(
     analysis_id: str,
     body: PauseResumeRequest,
-    _session: str = Depends(get_session),
+    _session: dict = Depends(get_session),
 ) -> StatusResponse:
     client = get_supabase_client()
     response = await supabase_call(

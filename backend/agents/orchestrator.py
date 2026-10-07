@@ -18,6 +18,7 @@ from backend.agents.analyzer import analyzer_node
 from backend.agents.cleaner import cleaner_node
 from backend.agents.explainer import explainer_node
 from backend.agents.profiler import PipelineState, profiler_node
+from backend.utils.agent_guard import READ_ONLY_DETAIL, agent_work_allowed
 from backend.utils.langsmith_client import create_tracer
 from backend.utils.supabase_client import get_supabase_client
 from backend.utils.supabase_retry import TRANSIENT, supabase_call
@@ -327,11 +328,32 @@ def route_after_cleaner(state: PipelineState) -> str:
 async def run_pipeline(initial_state: PipelineState) -> PipelineState:
     """Build and run the full 4-agent LangGraph pipeline.
 
-    Creates a LangSmith tracer and passes it as a config callback so every
-    node execution is traced — required by CLAUDE.md Rule 8. With tracing off
-    create_tracer returns None and no callback is passed; the agent-work routes
-    refuse before a pipeline can start (backend/utils/agent_guard.py).
+    Refuses first unless agent work is allowed (backend/utils/agent_guard.py):
+    the analysis is marked as an error with the read-only refusal and the state
+    is returned unchanged, with no tracer, graph, Storage or model call.
+    Otherwise creates a LangSmith tracer and passes it as a config callback so
+    every node execution is traced — required by CLAUDE.md Rule 8 (no callback
+    is passed if create_tracer returns None).
     """
+    if not agent_work_allowed():
+        await supabase_call(
+            lambda: get_supabase_client()
+            .table("analyses")
+            .update({
+                "status": "error",
+                "error_message": READ_ONLY_DETAIL,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+            .eq("id", initial_state["analysis_id"])
+            .execute(),
+            what="pipeline refusal write",
+        )
+        logger.warning(
+            "Pipeline refused for analysis_id=%s: agent work is not allowed on this server.",
+            initial_state["analysis_id"],
+        )
+        return initial_state
+
     analysis_id = initial_state["analysis_id"]
     tracer = create_tracer("pipeline")
 
