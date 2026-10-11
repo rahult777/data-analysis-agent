@@ -33,6 +33,6 @@ export default defineConfig({
     reuseExistingServer: false,
     timeout: 180_000,
     // A process env value takes precedence over frontend/.env.local.
-    env: { NEXT_PUBLIC_API_URL: MOCK_API_URL },
+    env: { NEXT_PUBLIC_API_URL: MOCK_API_URL, NEXT_PUBLIC_DATA_SOURCE: "" },
   },
 });

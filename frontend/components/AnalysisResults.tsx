@@ -6,7 +6,8 @@ import { motion } from "framer-motion";
 import { AlertTriangle } from "lucide-react";
 
 import { getAnalysis } from "@/lib/api";
-import type { AnalysisResponse } from "@/lib/types";
+import { isSnapshot } from "@/lib/mode";
+import type { AnalysisView } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import {
   InsightReportExecutive,
@@ -19,6 +20,9 @@ interface AnalysisResultsProps {
   analysisId: string;
   // null for read-only visitors (no uploader session in this browser).
   sessionId: string | null;
+  // The public snapshot build passes the saved analysis: the results start
+  // loaded and nothing is fetched.
+  initialData?: AnalysisView;
 }
 
 type ViewState = "loading" | "error" | "loaded";
@@ -26,12 +30,14 @@ type ViewState = "loading" | "error" | "loaded";
 export function AnalysisResults({
   analysisId,
   sessionId,
+  initialData,
 }: AnalysisResultsProps) {
   const router = useRouter();
-  const [view, setView] = useState<ViewState>("loading");
-  const [data, setData] = useState<AnalysisResponse | null>(null);
+  const [view, setView] = useState<ViewState>(initialData ? "loaded" : "loading");
+  const [data, setData] = useState<AnalysisView | null>(initialData ?? null);
 
   useEffect(() => {
+    if (initialData) return;
     let cancelled = false;
     async function load(): Promise<void> {
       try {
@@ -48,7 +54,7 @@ export function AnalysisResults({
     return () => {
       cancelled = true;
     };
-  }, [analysisId]);
+  }, [analysisId, initialData]);
 
   if (view === "loading") {
     return <ResultsSkeleton />;
@@ -78,7 +84,16 @@ export function AnalysisResults({
         analysisReport={data.analysis_report}
       />
 
-      <QuestionInput analysisId={analysisId} sessionId={sessionId} />
+      {/* The public snapshot build has no backend to ask: one line of copy
+          takes the question box's place. */}
+      {isSnapshot ? (
+        <p className="text-sm text-muted-foreground">
+          This is a read-only copy of a finished analysis, so you can&apos;t ask
+          questions about its data here.
+        </p>
+      ) : (
+        <QuestionInput analysisId={analysisId} sessionId={sessionId} />
+      )}
     </div>
   );
 }

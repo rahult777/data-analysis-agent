@@ -1,0 +1,72 @@
+{
+  "id": "00000000-0000-4000-a000-000000000001",
+  "filename": "synthetic_fixture.csv",
+  "row_count": 12,
+  "column_count": 3,
+  "data_quality_score": 0.9,
+  "cleaning_report": {
+    "summary": {
+      "rows_before": 12,
+      "rows_after": 11,
+      "rows_removed": 1,
+      "columns_before": 3,
+      "columns_after": 3,
+      "columns_removed": 0
+    }
+  },
+  "cleaning_decisions": [
+    {
+      "column_name": "fixture_value",
+      "issue": "Synthetic fixture issue.",
+      "action": "Synthetic fixture action.",
+      "reason": "Synthetic fixture reason, written for the public e2e tests."
+    }
+  ],
+  "analysis_report": {
+    "correlation_matrix": {
+      "matrix": {
+        "fixture_x": { "fixture_x": 1.0, "fixture_y": 0.25 },
+        "fixture_y": { "fixture_x": 0.25, "fixture_y": 1.0 }
+      },
+      "strong_pairs": []
+    }
+  },
+  "insight_report": {
+    "analyst_layer": {
+      "narrative": "Synthetic analyst narrative for the public e2e fixture. It describes no real data.",
+      "chart_references": ["00000000-0000-4000-a000-000000000001_histogram_fixture_value.png"]
+    },
+    "open_questions": [
+      {
+        "question": "Synthetic open question?",
+        "why_unanswerable": "The fixture holds no real data.",
+        "what_data_would_answer": "None: this is a test fixture."
+      }
+    ],
+    "technical_layer": {
+      "statistical_methodology": "Synthetic methodology note.",
+      "code_blocks": ["print(\"synthetic fixture\")"],
+      "limitations": "Synthetic fixture: no real data.",
+      "lead_override_note": null
+    },
+    "user_question_addressed": null
+  },
+  "executive_summary": {
+    "bullets": [
+      {
+        "finding": "Synthetic finding one for the public e2e fixture.",
+        "context": "Synthetic context.",
+        "recommended_action": "No action: this is test data."
+      },
+      {
+        "finding": "Synthetic finding two.",
+        "context": "Synthetic context.",
+        "recommended_action": "No action: this is test data."
+      }
+    ]
+  },
+  "chart_paths": [
+    "00000000-0000-4000-a000-000000000001_histogram_fixture_value.png",
+    "00000000-0000-4000-a000-000000000001_scatter_fixture_x_fixture_y.html"
+  ]
+}

@@ -101,6 +101,8 @@ export class MockApi {
     status: 500,
     body: { detail: "no resume handler set in this test" },
   });
+  // Chart files served at GET /charts/{name} (ChartGrid's image and iframe sources).
+  private readonly charts = new Map<string, { body: Buffer; contentType: string }>();
 
   constructor(private readonly page: Page) {}
 
@@ -123,6 +125,10 @@ export class MockApi {
 
   onUpload(handler: () => Promise<ResumeReply> | ResumeReply): void {
     this.uploadHandler = handler;
+  }
+
+  setChart(name: string, body: Buffer, contentType: string): void {
+    this.charts.set(name, { body, contentType });
   }
 
   // Resolves when the next status request has been answered — right after an
@@ -219,6 +225,17 @@ export class MockApi {
       }
       await this.json(route, reply.status, reply.body);
       return;
+    }
+    if (request.method() === "GET" && url.pathname.startsWith("/charts/")) {
+      const chart = this.charts.get(decodeURIComponent(url.pathname.slice("/charts/".length)));
+      if (chart) {
+        await route.fulfill({
+          status: 200,
+          headers: { ...CORS_HEADERS, "content-type": chart.contentType },
+          body: chart.body,
+        });
+        return;
+      }
     }
     this.unmocked.push(`${request.method()} ${url.pathname}`);
     await route.abort("failed");

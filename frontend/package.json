@@ -8,9 +8,13 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:public": "NEXT_PUBLIC_DATA_SOURCE=snapshot next build && node scripts/copy-snapshot-charts.mjs",
     "start": "next start",
-    "lint": "next lint --dir app --dir components --dir lib --dir e2e",
-    "test:e2e": "playwright test"
+    "lint": "next lint --dir app --dir components --dir lib --dir e2e --dir e2e-public",
+    "test:unit": "node --test lib/snapshot-rules.test.mjs lib/mode.test.mjs",
+    "test:builds": "node scripts/test-builds.mjs",
+    "test:e2e": "playwright test",
+    "test:e2e:public": "playwright test -c playwright.public.config.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.4.1",

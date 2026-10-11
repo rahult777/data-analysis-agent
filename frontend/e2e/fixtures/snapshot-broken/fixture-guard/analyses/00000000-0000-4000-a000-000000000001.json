@@ -1,0 +1,38 @@
+{
+  "id": "00000000-0000-4000-a000-000000000001",
+  "filename": "synthetic_broken_fixture.csv",
+  "row_count": 1,
+  "column_count": 1,
+  "data_quality_score": 1,
+  "cleaning_report": {
+    "summary": {
+      "rows_before": 1,
+      "rows_after": 1,
+      "rows_removed": 0,
+      "columns_before": 1,
+      "columns_after": 1,
+      "columns_removed": 0
+    }
+  },
+  "cleaning_decisions": [],
+  "analysis_report": {
+    "correlation_matrix": {
+      "matrix": {},
+      "strong_pairs": []
+    }
+  },
+  "insight_report": {
+    "analyst_layer": {},
+    "open_questions": [],
+    "technical_layer": {},
+    "user_question_addressed": null
+  },
+  "executive_summary": {
+    "bullets": [
+      {
+        "finding": "Synthetic finding."
+      }
+    ]
+  },
+  "chart_paths": []
+}

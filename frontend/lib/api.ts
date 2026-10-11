@@ -1,5 +1,6 @@
 import axios from "axios";
 
+import { API_URL, isSnapshot } from "./mode";
 import type {
   AnalysisResponse,
   QuestionResponse,
@@ -7,7 +8,7 @@ import type {
   UploadResponse,
 } from "./types";
 
-export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+export { API_URL };
 
 const client = axios.create({ baseURL: API_URL });
 
@@ -30,6 +31,22 @@ export class ApiError extends Error {
   }
 }
 
+// The public snapshot build makes no API request: every network function
+// below refuses before one starts.
+function refuseInSnapshot(): void {
+  if (isSnapshot) {
+    throw new ApiError("This is a read-only snapshot: it makes no API requests.", null);
+  }
+}
+
+// Where a chart file is served. Local mode: the backend's /charts route. The
+// snapshot build copies the charts into out/demo/charts/ and Vercel strips
+// ".html" from exported files, so an HTML chart's URL drops it; PNG names stay.
+export function chartUrl(filename: string): string {
+  if (isSnapshot) return `/demo/charts/${filename.replace(/\.html$/, "")}`;
+  return `${API_URL}/charts/${filename}`;
+}
+
 function toError(error: unknown, fallback: string): ApiError {
   if (axios.isAxiosError(error)) {
     const data = error.response?.data as { detail?: unknown } | undefined;
@@ -47,6 +64,7 @@ export async function uploadFile(
   context?: string,
   userType?: string,
 ): Promise<UploadResponse> {
+  refuseInSnapshot();
   const formData = new FormData();
   formData.append("file", file);
   if (context) formData.append("context", context);
@@ -62,6 +80,7 @@ export async function uploadFile(
 export async function getAnalysisStatus(
   analysisId: string,
 ): Promise<StatusResponse> {
+  refuseInSnapshot();
   try {
     const { data } = await client.get<StatusResponse>(
       `/api/analysis/${analysisId}/status`,
@@ -75,6 +94,7 @@ export async function getAnalysisStatus(
 export async function getAnalysis(
   analysisId: string,
 ): Promise<AnalysisResponse> {
+  refuseInSnapshot();
   try {
     const { data } = await client.get<AnalysisResponse>(
       `/api/analysis/${analysisId}`,
@@ -88,6 +108,7 @@ export async function getAnalysis(
 export async function getCharts(
   analysisId: string,
 ): Promise<{ chart_paths: string[] }> {
+  refuseInSnapshot();
   try {
     const { data } = await client.get<{ chart_paths: string[] }>(
       `/api/analysis/${analysisId}/charts`,
@@ -103,6 +124,7 @@ export async function postQuestion(
   sessionId: string,
   question: string,
 ): Promise<QuestionResponse> {
+  refuseInSnapshot();
   try {
     const { data } = await client.post<QuestionResponse>(
       `/api/analysis/${analysisId}/question`,
@@ -119,6 +141,7 @@ export async function getQuestion(
   analysisId: string,
   questionId: string,
 ): Promise<QuestionResponse> {
+  refuseInSnapshot();
   try {
     const { data } = await client.get<QuestionResponse>(
       `/api/analysis/${analysisId}/question/${questionId}`,
@@ -139,6 +162,7 @@ export async function resumeAnalysis(
   sessionId: string,
   response: Record<string, unknown>,
 ): Promise<StatusResponse> {
+  refuseInSnapshot();
   try {
     const { data } = await client.post<StatusResponse>(
       `/api/analysis/${analysisId}/resume`,

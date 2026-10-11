@@ -1,10 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { Maximize2, Minimize2 } from "lucide-react";
 
-import { API_URL } from "@/lib/api";
+import { chartUrl } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -149,8 +149,13 @@ interface ChartCardProps {
 
 function ChartCard({ filename, expanded, onToggle }: ChartCardProps) {
   const [loaded, setLoaded] = useState<boolean>(false);
+  // The image or iframe renders only once mounted. In the prerendered snapshot
+  // build a chart in the static HTML can finish loading before React hydrates
+  // and listens for its load event, which would leave the placeholder up.
+  const [mounted, setMounted] = useState<boolean>(false);
+  useEffect(() => setMounted(true), []);
   const parsed = parseChartFilename(filename);
-  const src = `${API_URL}/charts/${filename}`;
+  const src = chartUrl(filename);
   const mediaHeight = expanded ? "h-[70vh]" : "h-56";
 
   return (
@@ -186,21 +191,31 @@ function ChartCard({ filename, expanded, onToggle }: ChartCardProps) {
         {!loaded && (
           <div className="absolute inset-0 animate-pulse bg-muted" aria-hidden />
         )}
-        {parsed.format === "png" ? (
-          // Cross-origin static PNG served by FastAPI StaticFiles; next/image
-          // would require remotePatterns config. no-img-element is warn-only.
+        {!mounted ? null : parsed.format === "png" ? (
+          // A static PNG: cross-origin from FastAPI StaticFiles locally,
+          // /demo/charts/ in the snapshot build; next/image would require
+          // remotePatterns config. no-img-element is warn-only.
           // eslint-disable-next-line @next/next/no-img-element
           <img
             src={src}
             alt={parsed.label}
+            loading="lazy"
+            decoding="async"
             onLoad={() => setLoaded(true)}
             onClick={onToggle}
             className="relative h-full w-full cursor-zoom-in object-contain"
           />
         ) : (
+          // Scripts only: never allow-same-origin, so the chart runs in an
+          // opaque origin. No allow-downloads either, so plotly's "Download
+          // plot as a png" button and its logo link do nothing (owner ruling
+          // D1; M2b.2 removes both from regenerated charts).
           <iframe
             src={src}
             title={parsed.label}
+            sandbox="allow-scripts"
+            loading="lazy"
+            referrerPolicy="no-referrer"
             onLoad={() => setLoaded(true)}
             className="relative h-full w-full"
           />

@@ -1,36 +1,31 @@
-"use client";
-
-import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
-import { AnimatePresence, motion } from "framer-motion";
-
-import { AnalysisProgress } from "@/components/AnalysisProgress";
 import { AnalysisResults } from "@/components/AnalysisResults";
+import { isSnapshot } from "@/lib/mode";
+import { snapshotAnalyses, snapshotAnalysis } from "@/lib/snapshot";
 
-export default function AnalysisPage() {
-  const params = useParams<{ id: string }>();
-  const analysisId = params.id;
+import AnalysisPageClient from "./AnalysisPageClient";
 
-  // Read access is public by analysis_id; a locally stored session_id only
-  // marks this browser as the uploader (a UI hint — the question and resume
-  // endpoints still enforce it).
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [sessionChecked, setSessionChecked] = useState<boolean>(false);
-  const [isComplete, setIsComplete] = useState<boolean>(false);
+// Local mode renders the client page: live progress from the backend API, then
+// the results. The public snapshot build (`npm run build:public`) exports one
+// static page per saved analysis instead: the finished results only, already
+// loaded from the snapshot JSON, with no progress view, status call,
+// localStorage or fetch. Any other id is a 404.
 
-  useEffect(() => {
-    const stored = localStorage.getItem(`session_id_${analysisId}`);
-    setSessionId(stored);
-    setSessionChecked(true);
-  }, [analysisId]);
+// Every snapshot check runs here, so a broken snapshot fails the build with its
+// own message. Local mode returns [] without touching the snapshot dir: `next
+// build` marks the route ● with nothing prerendered, and `next start` renders
+// each visited id on its first request and caches it.
+export function generateStaticParams(): { id: string }[] {
+  if (!isSnapshot) return [];
+  return snapshotAnalyses().map(({ id }) => ({ id }));
+}
 
+export default function AnalysisPage({ params }: { params: { id: string } }) {
+  if (!isSnapshot) return <AnalysisPageClient />;
+
+  const analysis = snapshotAnalysis(params.id);
   return (
     <main className="min-h-screen w-full px-6 py-8 sm:py-12 md:py-16">
-      <div
-        className={`mx-auto flex w-full flex-col gap-12 transition-[max-width] duration-500 ${
-          isComplete ? "max-w-4xl" : "max-w-2xl"
-        }`}
-      >
+      <div className="mx-auto flex w-full max-w-4xl flex-col gap-12">
         <header className="flex flex-col gap-4 text-center">
           <h1
             className="text-4xl sm:text-5xl md:text-6xl italic leading-tight"
@@ -39,39 +34,7 @@ export default function AnalysisPage() {
             Analysis
           </h1>
         </header>
-
-        {sessionChecked && (
-          <AnimatePresence mode="wait" initial={false}>
-            {!isComplete ? (
-              <motion.div
-                key="progress"
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.3, ease: "easeOut" }}
-              >
-                <AnalysisProgress
-                  analysisId={analysisId}
-                  sessionId={sessionId}
-                  onComplete={() => setIsComplete(true)}
-                />
-              </motion.div>
-            ) : (
-              <motion.div
-                key="results"
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.3, ease: "easeOut" }}
-              >
-                <AnalysisResults
-                  analysisId={analysisId}
-                  sessionId={sessionId}
-                />
-              </motion.div>
-            )}
-          </AnimatePresence>
-        )}
+        <AnalysisResults analysisId={analysis.id} sessionId={null} initialData={analysis} />
       </div>
     </main>
   );
