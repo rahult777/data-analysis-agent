@@ -73,20 +73,24 @@ The public demo, Omnalynt, is a static snapshot of the frontend; the backend run
 - [x] Questions only on a complete analysis (409).
 - [x] Custom-question runs traced (dashboard check at the next paid run).
 ### M2b — The Omnalynt website (static snapshot)
+- [x] M2b.1 static foundation (2026-10-09): `npm run build:public` (NEXT_PUBLIC_DATA_SOURCE=snapshot) exports saved analyses from built-in JSON as static files and fails closed on a bad snapshot; read-only "/" placeholder and analysis page, no API request; sandboxed, lazy-loaded charts in both modes; a 404 page; unit, public e2e and broken-build tests (86, 27, 4), local e2e 82. A synthetic fixture only: the real snapshot is M2b.3. See decisions.md 2026-10-09.
 - [ ] Branding (name, title, icon, link-preview metadata); a landing page (what Omnalynt is, how the four agents work, a link to the example analysis, the GitHub link).
 - [ ] The demo analysis rendered from built-in snapshot data (an export step captures exactly what the public GET routes return, plus the chart files); read-only copy; the header shows 185 × 10 after cleaning with 200 × 9 uploaded as secondary text.
-- [ ] Scatter-title fix in viz_tools (and generate_line_chart) and an offline regeneration of the demo scatter, with a STOP before overwriting; sandboxed, lazy-loaded charts; 320 px; e2e.
-- [ ] Design questions for M2b's evaluation: static export versus the dynamic /analysis/[id] route and the owner's local mode; headers from the host when exporting.
+- [ ] Scatter-title fix in viz_tools (and generate_line_chart) and an offline regeneration of the demo scatter, with a STOP before overwriting; sandboxed, lazy-loaded charts; 320 px; e2e. (2026-10-09, M2b.1: sandboxed, lazy-loaded charts done.)
+- [ ] Design questions for M2b's evaluation: static export versus the dynamic /analysis/[id] route and the owner's local mode; headers from the host when exporting. (2026-10-09, M2b.1: static export chosen, local mode kept; host headers remain for M2b.4's vercel.json.)
 - [ ] Decide whether the snapshot shows the flag and identifier-column charts (errors.md 2026-10-06).
 - [ ] Question box: a maxLength that keeps the request under the backend's 64 KiB cap (a longer paste gets 413 today).
+- [ ] M2b.4 polish: the static HTML's framer-motion entry styles (`opacity:0; transform:translateY(8px)`; 5 with the e2e fixture: the results header, each executive-summary bullet and each chart card) keep that content invisible until JavaScript runs.
+- [ ] M2b.4 polish: refine ChartCard's mount gate (components/ChartGrid.tsx) to images only; today it holds every chart's request until hydration (M2b.1 Code Review #7). Check iframes first: the STOP 2 analysis found the same load race there.
 ### M2c — Dependencies and scans
 - [ ] Remove shadcn, recharts and tw-animate-css with globals.css's two dead @imports; bump axios; a Next 15 upgrade only if the static export leaves Next server exposure.
 - [ ] Python patch and minor bumps (python-multipart only after a scratch import check); majors deferred with reachability notes; triage log; Security Review, report-only.
 - [ ] Owner action: pin the Supabase MCP server's version; read-only and project-scoped by default.
 ### M2d — More sample analyses (optional; paid; owner approval per run)
-- [ ] 2–3 analyses on other datasets through the .live harness, re-exported into the snapshot. The harness first needs AGENT_WORK_ENABLED and ALLOWED_ORIGINS (its port) set in its own process, updated EXPECTED_COUNTS, a new output name, the frontend's read-only flag off for its next dev, and canned dry-run texts for each new dataset.
+- [ ] 2–3 analyses on other datasets through the .live harness, re-exported into the snapshot. The harness first needs AGENT_WORK_ENABLED and ALLOWED_ORIGINS (its port) set in its own process, updated EXPECTED_COUNTS, a new output name, `NEXT_PUBLIC_DATA_SOURCE` unset for its next dev, and canned dry-run texts for each new dataset.
 ### M3 — Static deploy
 - [ ] Vercel, at the owner's chosen address; outside-in checks; Security Review before deploy (Rule 14).
+- [ ] On the live site: the chart files the copy step put in out/demo/charts/ are served (Vercel collects out/ after the whole build command), and `VERCEL=1` is present in the build environment (the SNAPSHOT_DIR guard relies on it; decisions.md 2026-10-09).
 ### M4 — README
 - [ ] A README and a short video of a real run (a paid run: owner approval).
 - [ ] Remaining doc drift: the infrastructure.md folder tree; tasks.md's "all 26 pydantic models".

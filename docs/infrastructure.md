@@ -381,6 +381,10 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1 --lo
 
 **Frontend.** In `frontend/`, copy `.env.example` to `.env.local`, run `npm ci`, then `npm run dev` (or `npm run build && npm start`).
 
+**Public snapshot build.** In `frontend/`, `npm run build:public` builds the public site as static files in `out/`: `next build` with `NEXT_PUBLIC_DATA_SOURCE=snapshot` set inline, then a step that copies the chart files into `out/demo/charts/`. It reads the snapshot from `frontend/snapshot/` and fails closed on anything wrong with it (decisions.md 2026-10-09). No real snapshot is committed yet (M2b.3), so until then it fails with `Snapshot: no manifest at snapshot/manifest.json`. `npm run dev` refuses snapshot mode.
+
+**Frontend tests.** In `frontend/`: `npm run test:unit` (the snapshot rules and the mode flag; Node's built-in test runner), `npm run test:e2e` (the local app with every API call route-mocked; `next dev` on port 3100), `npm run test:e2e:public` (the public build from the synthetic fixture in `e2e/fixtures/snapshot/`, served on port 3200 the way Vercel serves a static export; `E2E_SCREENSHOT_DIR` and `E2E_REQUEST_LOG_DIR` save screenshots and request logs) and `npm run test:builds` (four representative broken snapshots, each of which must fail the build with its own message). The builds and both e2e suites share `.next` and `out/`: run them one after the other.
+
 **Agent work on or off.** CLAUDE.md Rule 8 is enforced in code. The backend is read-only by default: it starts with one warning, serves every read-only route and refuses every request that would start or continue agent work. Turn agent work on for one session with `AGENT_WORK_ENABLED=true python -m uvicorn …` (the start command above). Do not set it in `.env`: the start fails if `.env` sets it. It needs `LANGCHAIN_TRACING_V2=true`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, `ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL`, or the start fails with a message naming what is missing. With tracing on, the backend checks its LangSmith connection at every start, read-only included, and stops if that fails. Refusals: 503 (`SYSTEM_ERROR: Analysis is not available on this server (read-only mode).`) while agent work is off; 403 for a browser request from an origin outside `ALLOWED_ORIGINS`, Swagger's "Try it out" on `/docs` included (use curl instead); 413 for a request over the size limit; 409 for a question before the analysis is complete. Browsing the frontend from another origin (another port, or a LAN address for phone testing) needs that origin in `ALLOWED_ORIGINS` for the session.
 
 ---
@@ -401,7 +405,10 @@ The backend's variables are loaded via `backend/config.py`, which fails fast on 
 | AGENT_WORK_ENABLED | Unset = off. "true" (case-insensitive) allows agent work, with tracing on; set it inline per session, not in `.env` |
 | ALLOWED_ORIGINS | Browser origins the API accepts: exact origins, comma-separated; default `http://localhost:3000,http://127.0.0.1:3000`; "*" refused |
 | GITHUB_TOKEN | Not read by the app; only the GitHub MCP server uses it |
-| NEXT_PUBLIC_API_URL | Frontend only (`frontend/.env.local`): the backend's base URL; `lib/api.ts` falls back to `http://localhost:8000` when it is unset |
+| NEXT_PUBLIC_API_URL | Frontend only (`frontend/.env.local`): the backend's base URL; `lib/mode.ts` falls back to `http://localhost:8000` when it is unset; unused in the public build |
+| NEXT_PUBLIC_DATA_SOURCE | Frontend build mode: unset or empty = local; "snapshot" = the public static build, set inline by `npm run build:public`. Never in a `.env` file |
+| SNAPSHOT_DIR | Public build only: the snapshot directory, relative to `frontend/` and inside it, but not in its `public/`, `out/`, `.next/` or `node_modules/` (default `snapshot/`); must be unset on Vercel |
+| SNAPSHOT_ALLOW_FIXTURE | Public build only: "1" lets a test fixture (`"fixture": true`) build; only the public e2e sets it |
 
 ---
 

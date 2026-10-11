@@ -144,11 +144,17 @@ Shared utilities used by agents:
 
 ### Frontend (frontend/)
 
-Next.js 14 App Router with TypeScript strict mode. Two main routes:
+Next.js 14 App Router with TypeScript strict mode, built in one of two modes, fixed at build time by `NEXT_PUBLIC_DATA_SOURCE` (decisions.md 2026-10-09).
+
+**Local mode** (unset; `npm run dev`, `npm run build`). Two main routes:
 - `/` — home page with file upload
 - `/analysis/[id]` — results page with three-layer output display
 
-Polls `/api/analysis/{id}/status` every 3 seconds while pipeline is running. Displays agent progress in real time. Serves charts from `/charts/{filename}`. Full UI specification in `docs/ui-and-frontend.md`.
+Polls `/api/analysis/{id}/status` every 3 seconds while pipeline is running. Displays agent progress in real time. Serves charts from the backend's `/charts/{filename}`.
+
+**Public snapshot** (`npm run build:public`). A static export of saved analyses read at build time from `frontend/snapshot/`; lib/snapshot-rules.mjs validates the snapshot and fails the build closed. It makes no API request: `/` links to each analysis, `/analysis/<id>` shows its finished results with no progress view or question box, and the charts are copied into `out/demo/charts/`. No backend, database or key is online.
+
+Both modes sandbox chart iframes (`allow-scripts` only) and lazy-load charts. Full UI specification in `docs/ui-and-frontend.md`.
 
 ---
 

@@ -18,6 +18,18 @@ This document contains the complete UI design rules, component specifications, a
 
 ---
 
+## Two Modes
+
+The frontend builds in one of two modes, fixed at build time by `NEXT_PUBLIC_DATA_SOURCE` (decisions.md 2026-10-09):
+- **Local mode** (unset; `npm run dev`, `npm run build`): the pages below, backed by the API.
+- **Public snapshot** (`npm run build:public`): static pages of saved analyses, with no API at all.
+  - "/" is a minimal placeholder (the landing page comes in M2b.4): "Data Analysis Agent", "Example analyses, saved as read-only copies." ("read-only" never breaks at its hyphen), and one card per analysis with its filename and "Open the analysis", a plain `<a>` link. No upload UI.
+  - `/analysis/[id]` shows the finished results only, already loaded: no progress view, no polling, no localStorage. One line takes the question box's place: "This is a read-only copy of a finished analysis, so you can't ask questions about its data here."
+  - Charts come from the site's own `/demo/charts/`.
+  - Any other address gets the 404 page.
+
+---
+
 ## Page Structure
 
 ### Page 1 — Home (/)
@@ -98,6 +110,10 @@ When the pipeline enters a pause state (domain confirmation, a missing-value dec
 - **Visitors** (no `session_id_{analysis_id}` in this browser, including the real owner on another device) see the question read-only: "Only the browser that started this analysis can answer. If that's you, open this link in that browser — the analysis is waiting for this answer." A 403 from /resume switches the owner's view to the same read-only state
 - Every model-written string is rendered as plain text; the only markup derived from it is `<code>` for backtick spans. A question the UI cannot render or answer (malformed or missing `pause_data`) shows "This question can't be displayed" and polling continues
 - The interaction is inline — no modal, no page navigation
+
+#### Not found
+
+Any unknown address, in both modes (`app/not-found.tsx`; the public build exports it as 404.html): "Page not found", "There is nothing at this address." and a plain link, "Go to the home page". Plain and neutral, with no upload wording.
 
 #### State 2 — Pipeline Complete
 
@@ -187,7 +203,8 @@ When status is `complete`, the full results are displayed.
 **Behavior:**
 - Displays all generated charts in a responsive grid
 - 2 columns on desktop, 1 column on mobile
-- Each chart: image loaded from `/charts/{filename}` via the StaticFiles endpoint
+- Each chart: loaded from `chartUrl(filename)` (lib/api.ts): the backend's `/charts/{filename}` (StaticFiles) in local mode, the site's `/demo/charts/` in the public snapshot
+- HTML charts render in `<iframe sandbox="allow-scripts">`, never `allow-same-origin`: they run in an opaque origin, and plotly's "Download plot as a png" button and logo link do nothing (owner ruling D1). Iframes and images are lazy-loaded and render once the card has mounted
 - Hover overlay on each chart showing the chart type and column name
 - Click to expand any chart to full width with a close button
 - All charts use the project's color scheme — no default matplotlib colors
@@ -338,4 +355,6 @@ The pause-state UI is covered by committed, route-mocked Playwright tests (`fron
 - Run: `npm run test:e2e`. It is separate from `npm run build`, `npm run lint` and pytest, none of which need a browser. Run it and `npm run build` one after the other — both use `.next`.
 - Mock data: `e2e/fixtures/captured_*.json` are real stored pause questions (the `pause_data` payloads only, from the F2 and F3/F3b live validations); `synthetic_*.json` are hand-written variants (a medical outlier, a 2-option missing-value pause, null statistics, malformed payloads).
 - Screenshots for a build report: set `E2E_SCREENSHOT_DIR` (e.g. to the gitignored `.playwright-mcp/<build>/`); test output (`test-results/`, `playwright-report/`) is gitignored.
-- `npm run lint` covers `app`, `components`, `lib` and `e2e`.
+- `npm run lint` covers `app`, `components`, `lib`, `e2e` and `e2e-public`.
+- The public snapshot build has its own suite: `npm run test:e2e:public` (`playwright.public.config.ts`, specs in `e2e-public/`). Its web server runs `npm run build:public` from the synthetic fixture `e2e/fixtures/snapshot/` (the only place that sets `SNAPSHOT_ALLOW_FIXTURE=1`) and serves `out/` the way Vercel serves a static export. At 320 and 1280 px it asserts that every request stays on the site's origin and none goes to `/api`, that no upload, question or progress UI renders, the exact chart attributes, the sandboxed chart's opaque origin, the 404s and no horizontal overflow; one project checks the exported files.
+- `npm run test:unit` runs the snapshot rules' and the mode flag's unit tests (Node's built-in runner), and `npm run test:builds` builds four broken snapshots, each of which must fail with its own message.
