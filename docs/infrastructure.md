@@ -250,7 +250,7 @@ The bucket is private (`public = false`), and `storage.objects` has RLS enabled 
 
 **Rule 4 in CLAUDE.md is absolute:** Never modify the Supabase schema directly from Claude Code or by hand in the dashboard. All schema changes go through migration files. Migration files are committed to the repository before being applied.
 
-Files live in `supabase/migrations/<timestamp>_<name>.sql`, end with a commented `-- DOWN (manual rollback):` block, are committed first, and are then applied with the Supabase MCP `apply_migration` using the same `<name>`. The remote history records its own apply-time version, not the filename's (decisions.md 2026-09-22).
+Files live in `supabase/migrations/<timestamp>_<name>.sql`, end with a commented `-- DOWN (manual rollback):` block, and are committed first. Until 2026-10-11 they were then applied with the Supabase MCP `apply_migration` using the same `<name>`; the MCP is read-only since then, so applying the next one needs a temporary write path the owner approves at the time (decisions.md 2026-10-11). The remote history records its own apply-time version, not the filename's (decisions.md 2026-09-22).
 
 **Baseline.** The first file, `20260413000000_baseline_analyses_questions_bucket.sql`, recreates the tables, indexes, RLS, revokes and bucket that existed before migrations were tracked. All three files together were proved on a fresh project to rebuild the live schema exactly (decisions.md 2026-10-05). The baseline is never applied to the live project: live already has that schema, its history does not list the baseline, and it records the other two files under apply-time versions. The repair sequence for adopting the Supabase CLI is in decisions.md 2026-10-05.
 

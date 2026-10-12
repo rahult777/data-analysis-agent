@@ -43,7 +43,7 @@ Installed and available. For invocation details see `docs/plugins-and-mcps.md`.
 - GitHub MCP — version control
 - Frontend Design Plugin — UI components
 - Security Review Plugin — pre-deployment scanning
-- Supabase MCP — database introspection and migrations
+- Supabase MCP — read-only database introspection (it cannot apply migrations)
 - Brave Search MCP — last-resort error resolution
 
 ---

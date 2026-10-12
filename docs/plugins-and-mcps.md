@@ -199,19 +199,19 @@ Every plugin has a specific trigger condition. When that condition is met, the p
 
 ## Supabase MCP
 
-**What it does:** Provides direct database access from Claude Code — read schema, run queries, execute migrations, verify data. Eliminates the need to switch to the Supabase dashboard for database work.
+**What it does:** Provides read-only database access from Claude Code — read schema, run SELECT queries, verify data. Since 2026-10-11 it cannot write or apply migrations (decisions.md 2026-10-11). Eliminates the need to switch to the Supabase dashboard for reading the database.
 
 **When to invoke:**
 - When verifying that a migration ran correctly
 - When reading the current schema to confirm column names and types
 - When checking that data was written correctly after an agent run
 - When designing a new migration — read the current schema first
-- When applying a migration file that is already committed (`apply_migration`, same name as the file)
+- Not for applying a migration: the server is read-only, so applying a committed migration file needs a temporary write path the owner approves (decisions.md 2026-10-11)
 - When debugging a database-related error
 
 **How to invoke:** Use natural language queries like "Use the Supabase MCP to read the current schema of the analyses table" or "Use the Supabase MCP to check if the cleaned-datasets storage bucket exists."
 
-**Important:** The MCP is not read-only: it has write access and applies migrations. Schema changes are made only by applying a committed `supabase/migrations/` file with `apply_migration` (decisions.md 2026-09-22). Never run DDL ad hoc through `execute_sql`; use `execute_sql` for introspection and SELECTs. All schema changes go through migration files per CLAUDE.md Rule 4.
+**Important:** Since 2026-10-11 the MCP is read-only: Supabase's remote server with OAuth, `read_only=true`, limited to this one project, with no token in the configuration; its transactions run read-only and its write tools are absent (decisions.md 2026-10-11). Use `execute_sql` for introspection and SELECTs only. All schema changes still go through committed `supabase/migrations/` files per CLAUDE.md Rule 4; the MCP can no longer apply them (it did, with `apply_migration`, until 2026-10-11: decisions.md 2026-09-22), so applying the next one needs a temporary write path the owner approves at the time.
 
 ---
 

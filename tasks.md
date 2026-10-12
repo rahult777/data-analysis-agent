@@ -76,7 +76,8 @@ The public demo, Omnalynt, is a static snapshot of the frontend; the backend run
 - [x] M2b.1 static foundation (2026-10-09): `npm run build:public` (NEXT_PUBLIC_DATA_SOURCE=snapshot) exports saved analyses from built-in JSON as static files and fails closed on a bad snapshot; read-only "/" placeholder and analysis page, no API request; sandboxed, lazy-loaded charts in both modes; a 404 page; unit, public e2e and broken-build tests (86, 27, 4), local e2e 82. A synthetic fixture only: the real snapshot is M2b.3. See decisions.md 2026-10-09.
 - [ ] Branding (name, title, icon, link-preview metadata); a landing page (what Omnalynt is, how the four agents work, a link to the example analysis, the GitHub link).
 - [ ] The demo analysis rendered from built-in snapshot data (an export step captures exactly what the public GET routes return, plus the chart files); read-only copy; the header shows 185 × 10 after cleaning with 200 × 9 uploaded as secondary text.
-- [ ] Scatter-title fix in viz_tools (and generate_line_chart) and an offline regeneration of the demo scatter, with a STOP before overwriting; sandboxed, lazy-loaded charts; 320 px; e2e. (2026-10-09, M2b.1: sandboxed, lazy-loaded charts done.)
+- [ ] M2b.3: the snapshot rules must require plotly.min.js whenever an analysis lists an .html chart; a snapshot without it renders a blank chart (M2b.2 Code Review #2).
+- [ ] Scatter-title fix in viz_tools (and generate_line_chart) and an offline regeneration of the demo scatter, with a STOP before overwriting; sandboxed, lazy-loaded charts; 320 px; e2e. (2026-10-09, M2b.1: sandboxed, lazy-loaded charts done.) (2026-10-12, M2b.2: the scatter and line-chart title fix and the offline regeneration of the demo scatter done, with the STOP before overwriting; charts load one shared plotly.min.js; titles checked at 270 px, the chart card of a 320 px screen; its e2e part (a real plotly chart on the public build) is M2b.3. See decisions.md 2026-10-12.)
 - [ ] Design questions for M2b's evaluation: static export versus the dynamic /analysis/[id] route and the owner's local mode; headers from the host when exporting. (2026-10-09, M2b.1: static export chosen, local mode kept; host headers remain for M2b.4's vercel.json.)
 - [ ] Decide whether the snapshot shows the flag and identifier-column charts (errors.md 2026-10-06).
 - [ ] Question box: a maxLength that keeps the request under the backend's 64 KiB cap (a longer paste gets 413 today).
@@ -85,12 +86,16 @@ The public demo, Omnalynt, is a static snapshot of the frontend; the backend run
 ### M2c — Dependencies and scans
 - [ ] Remove shadcn, recharts and tw-animate-css with globals.css's two dead @imports; bump axios; a Next 15 upgrade only if the static export leaves Next server exposure.
 - [ ] Python patch and minor bumps (python-multipart only after a scratch import check); majors deferred with reachability notes; triage log; Security Review, report-only.
-- [ ] Owner action: pin the Supabase MCP server's version; read-only and project-scoped by default.
+- [x] Owner action: pin the Supabase MCP server's version; read-only and project-scoped by default. (2026-10-11: done by the owner's MCP change: the remote server with OAuth, read-only and limited to one project; a hosted server has no version to pin. See decisions.md 2026-10-11.)
+- [ ] plotly.min.js is written once and never replaced (plotly writes it only when it is missing): after any plotly upgrade, regenerate it in backend/outputs/charts/ and in the snapshot. plotly.py 6 base64-encodes arrays, so point checks like M2b.2's would need decoding.
+- [ ] plotly writes plotly.min.js non-atomically (only when the file is missing, after the chart HTML) and never repairs a truncated one: a process killed or a disk filled during that first write leaves a broken bundle for every later chart in the folder (M2b.2 Code Review #1).
+- [ ] If plotly's bundle write fails after the chart HTML is written, generate_scatter_plot and generate_line_chart return None and leave an HTML file that no chart_paths entry lists (M2b.2 Code Review #5).
 ### M2d — More sample analyses (optional; paid; owner approval per run)
 - [ ] 2–3 analyses on other datasets through the .live harness, re-exported into the snapshot. The harness first needs AGENT_WORK_ENABLED and ALLOWED_ORIGINS (its port) set in its own process, updated EXPECTED_COUNTS, a new output name, `NEXT_PUBLIC_DATA_SOURCE` unset for its next dev, and canned dry-run texts for each new dataset.
 ### M3 — Static deploy
 - [ ] Vercel, at the owner's chosen address; outside-in checks; Security Review before deploy (Rule 14).
 - [ ] On the live site: the chart files the copy step put in out/demo/charts/ are served (Vercel collects out/ after the whole build command), and `VERCEL=1` is present in the build environment (the SNAPSHOT_DIR guard relies on it; decisions.md 2026-10-09).
+- [ ] Check the chart CSP (`script-src 'self' 'unsafe-inline'; sandbox allow-scripts`) in Firefox and Safari: M2b.2 verified it in Chromium only (decisions.md 2026-10-12).
 ### M4 — README
 - [ ] A README and a short video of a real run (a paid run: owner approval).
 - [ ] Remaining doc drift: the infrastructure.md folder tree; tasks.md's "all 26 pydantic models".
@@ -168,9 +173,9 @@ All four agent prompts exist (see Completed). Open prompt-quality work is tracke
 - [x] backend/tools/__init__.py
 - [x] backend/tools/viz_tools.py
 - [x] backend/tools/code_executor.py
-- [ ] Fix the scatter plot's two-line title, which loses its first line ("x vs") in the card and expanded views — the Build E recipe itself; fix it before copying it to generate_line_chart (next line); see errors.md 2026-09-28 ("The scatter plot's two-line title…")
+- [x] Fix the scatter plot's two-line title, which loses its first line ("x vs") in the card and expanded views — the Build E recipe itself; fix it before copying it to generate_line_chart (next line); see errors.md 2026-09-28 ("The scatter plot's two-line title…") (2026-10-12, M2b.2: fixed with plotly's default title placement, fixed margins and names cut at 19 characters; the demo scatter regenerated offline; see decisions.md 2026-10-12.)
 - [ ] Decide a floor for drawing the highest-correlation scatter (it is drawn even at r = 0.08 on messy_data.csv); with the Analyzer's owner; see errors.md 2026-09-28 ("The scatter is drawn for the highest-correlation pair…")
-- [ ] Apply the Build E chart-title fix to generate_line_chart (viz_tools.py:149) — same long-title clipping the scatter plot had, left untreated because it is untested and was out of Build E scope; found during Build E; see errors.md 2026-09-21
+- [x] Apply the Build E chart-title fix to generate_line_chart (viz_tools.py:149) — same long-title clipping the scatter plot had, left untreated because it is untested and was out of Build E scope; found during Build E; see errors.md 2026-09-21 (2026-10-12, M2b.2: done with M2b.2's recipe rather than Build E's, which lost the scatter's first line; now tested; see decisions.md 2026-10-12.)
 
 ### Backend — Agents
 

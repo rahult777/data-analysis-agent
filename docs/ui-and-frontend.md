@@ -204,7 +204,7 @@ When status is `complete`, the full results are displayed.
 - Displays all generated charts in a responsive grid
 - 2 columns on desktop, 1 column on mobile
 - Each chart: loaded from `chartUrl(filename)` (lib/api.ts): the backend's `/charts/{filename}` (StaticFiles) in local mode, the site's `/demo/charts/` in the public snapshot
-- HTML charts render in `<iframe sandbox="allow-scripts">`, never `allow-same-origin`: they run in an opaque origin, and plotly's "Download plot as a png" button and logo link do nothing (owner ruling D1). Iframes and images are lazy-loaded and render once the card has mounted
+- HTML charts render in `<iframe sandbox="allow-scripts">`, never `allow-same-origin`: they run in an opaque origin, and plotly's "Download plot as a png" button and logo link do nothing (owner ruling D1); charts generated since M2b.2 have neither (decisions.md 2026-10-12). Iframes and images are lazy-loaded and render once the card has mounted
 - Hover overlay on each chart showing the chart type and column name
 - Click to expand any chart to full width with a close button
 - All charts use the project's color scheme — no default matplotlib colors
