@@ -4,7 +4,9 @@ Chart generation for the analysis pipeline.
 Generates all static (PNG via matplotlib/seaborn) and interactive (HTML via plotly)
 charts required by the Analyzer agent. Every function saves to CHARTS_DIR and returns
 only the filename — never the full path — so analyzer.py can store it in Supabase and
-the frontend can construct /charts/{filename} URLs via the StaticFiles mount.
+the frontend can construct /charts/{filename} URLs via the StaticFiles mount. The
+interactive charts load plotly.min.js from beside them: plotly writes it into
+CHARTS_DIR with the first one and never replaces it.
 """
 
 import logging
@@ -29,6 +31,11 @@ sns.set_style("whitegrid")
 CHARTS_DIR = Path(__file__).parent.parent / "outputs" / "charts"
 
 CHART_DPI: int = 150
+
+# Column names in chart titles are cut to this length, so that a name and its
+# suffix (" (r=-0.42)", " Over Time") fit on the 270 px chart card of a 320 px
+# screen (measured in Chromium; decisions.md 2026-10-12).
+TITLE_NAME_LIMIT: int = 19
 
 PROJECT_COLORS: List[str] = [
     "#264653",
@@ -166,10 +173,21 @@ def generate_line_chart(
             sorted_df,
             x=date_column,
             y=value_column,
-            title=f"{value_column} Over Time",
+        )
+        fig.update_layout(
+            title=dict(
+                text=f"{_short_name(value_column, limit=TITLE_NAME_LIMIT)} Over Time",
+                font=dict(size=14),
+            ),
+            margin=dict(t=80, l=60, r=20, b=50),
         )
         filename = f"{analysis_id}_linechart_{_safe_name(value_column)}.html"
-        fig.write_html(str(CHARTS_DIR / filename))
+        fig.write_html(
+            str(CHARTS_DIR / filename),
+            include_plotlyjs="directory",
+            div_id="chart",
+            config={"displaylogo": False, "modeBarButtonsToRemove": ["toImage"]},
+        )
         return filename
     except Exception as e:
         logger.warning(
@@ -196,16 +214,20 @@ def generate_scatter_plot(
         fig.update_layout(
             title=dict(
                 text=(
-                    f"{_short_name(x_column)} vs<br>"
-                    f"{_short_name(y_column)} (r={correlation:.2f})"
+                    f"{_short_name(x_column, limit=TITLE_NAME_LIMIT)} vs<br>"
+                    f"{_short_name(y_column, limit=TITLE_NAME_LIMIT)} (r={correlation:.2f})"
                 ),
                 font=dict(size=14),
-                automargin=True,
-                yref="container",
-            )
+            ),
+            margin=dict(t=80, l=60, r=20, b=50),
         )
         filename = f"{analysis_id}_scatter_{_safe_name(x_column)}_{_safe_name(y_column)}.html"
-        fig.write_html(str(CHARTS_DIR / filename))
+        fig.write_html(
+            str(CHARTS_DIR / filename),
+            include_plotlyjs="directory",
+            div_id="chart",
+            config={"displaylogo": False, "modeBarButtonsToRemove": ["toImage"]},
+        )
         return filename
     except Exception as e:
         logger.warning(
