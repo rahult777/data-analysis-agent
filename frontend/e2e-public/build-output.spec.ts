@@ -6,7 +6,7 @@ import path from "node:path";
 
 import { expect, test } from "@playwright/test";
 
-import { CANARY_API_URL, FIXTURE_ABS, FIXTURE_ID, HTML_CHART, PNG_CHART } from "./fixture";
+import { CANARY_API_URL, FIXTURE_ABS, FIXTURE_ID, HTML_CHART, PLOTLY, PNG_CHART } from "./fixture";
 
 const OUT = path.join(__dirname, "..", "out");
 
@@ -32,10 +32,10 @@ test("out/analysis/ holds exactly the listed ids, one .html and one .txt each", 
   expect(readdirSync(path.join(OUT, "analysis")).sort()).toEqual([`${FIXTURE_ID}.html`, `${FIXTURE_ID}.txt`]);
 });
 
-test("out/demo/charts/ holds exactly the listed chart files, byte for byte", () => {
+test("out/demo/charts/ holds exactly the listed chart files and plotly.min.js, byte for byte", () => {
   const charts = path.join(OUT, "demo", "charts");
-  expect(readdirSync(charts).sort()).toEqual([HTML_CHART, PNG_CHART].sort());
-  for (const name of [PNG_CHART, HTML_CHART]) {
+  expect(readdirSync(charts).sort()).toEqual([HTML_CHART, PNG_CHART, PLOTLY].sort());
+  for (const name of [PNG_CHART, HTML_CHART, PLOTLY]) {
     expect(readFileSync(path.join(charts, name)).equals(readFileSync(path.join(FIXTURE_ABS, "charts", name))), name).toBe(true);
   }
 });

@@ -8,10 +8,8 @@
     "summary": {
       "rows_before": 12,
       "rows_after": 11,
-      "rows_removed": 1,
       "columns_before": 3,
-      "columns_after": 3,
-      "columns_removed": 0
+      "columns_after": 3
     }
   },
   "cleaning_decisions": [

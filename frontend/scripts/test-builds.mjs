@@ -1,4 +1,5 @@
-// Representative failing public builds (spec M2b.1 3e): `npm run build:public`
+// Representative failing public builds (spec M2b.1 3e; missing-plotly added in
+// M2b.3a): `npm run build:public`
 // on each broken fixture under e2e/fixtures/snapshot-broken/ must exit
 // non-zero with that fixture's own message, never with Next's misleading
 // "missing generateStaticParams()". Every failure class itself is unit-tested
@@ -25,12 +26,17 @@ const CASES = [
   {
     name: "forbidden-key",
     allowFixture: true,
-    expected: `analyses/${ID}.json: forbidden key "sessionId" at executive_summary.bullets[0].sessionId`,
+    expected: `analyses/${ID}.json: forbidden key "sessionId" at analysis_report.correlation_matrix.matrix.sessionId`,
   },
   {
     name: "chart-mismatch",
     allowFixture: true,
     expected: `chart "${ID}_scatter_fixture_x_fixture_y.html" listed by ${ID} has no file in charts/`,
+  },
+  {
+    name: "missing-plotly",
+    allowFixture: true,
+    expected: "charts/plotly.min.js is required when an analysis lists an HTML chart",
   },
   {
     name: "fixture-guard",

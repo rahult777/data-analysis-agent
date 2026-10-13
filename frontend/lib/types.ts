@@ -92,12 +92,11 @@ export type AnalysisView = Pick<
 
 // One analysis in the public snapshot build: exactly the fields the results
 // view reads, plus cleaning_report.summary (for M2b.3's header). Enforced at
-// build time by lib/snapshot-rules.mjs, which rejects any other key at the top
-// level and inside cleaning_report, analysis_report, insight_report and
-// executive_summary.
+// build time by lib/snapshot-rules.mjs, whose PUBLISHED key set these types
+// mirror (keep them in step): any other key fails, at every level it defines.
 // Type aliases, not interfaces: an interface is not assignable to
-// AnalysisResponse's Record<string, unknown> fields. Inside the free-form
-// agent content every field is optional, as in InsightReport.tsx.
+// AnalysisResponse's Record<string, unknown> fields. Inside the agent content
+// every field is optional, as in InsightReport.tsx.
 export type SnapshotAnalysis = {
   id: string;
   filename: string;
@@ -112,13 +111,14 @@ export type SnapshotAnalysis = {
   chart_paths: string[];
 };
 
+// The four counts the header reads (owner ruling D1); the before-counts equal
+// row_count and column_count. No derived "removed" counts: cleaning can add a
+// column, which made columns_removed -1 in the demo run.
 export type SnapshotCleaningSummary = {
   rows_before: number;
   rows_after: number;
-  rows_removed: number;
   columns_before: number;
   columns_after: number;
-  columns_removed: number;
 };
 
 export type SnapshotCorrelationMatrix = {

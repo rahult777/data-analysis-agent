@@ -17,6 +17,9 @@ export const FIXTURE_ID = "00000000-0000-4000-a000-000000000001";
 export const UNLISTED_ID = "00000000-0000-4000-a000-000000000002";
 export const PNG_CHART = `${FIXTURE_ID}_histogram_fixture_value.png`;
 export const HTML_CHART = `${FIXTURE_ID}_scatter_fixture_x_fixture_y.html`;
+// The fixture's stand-in for plotly's bundle: the snapshot rules require
+// plotly.min.js beside an HTML chart (M2b.3a).
+export const PLOTLY = "plotly.min.js";
 
 export const FIXTURE_ABS = path.join(__dirname, "..", FIXTURE_DIR);
 export const FIXTURE = JSON.parse(

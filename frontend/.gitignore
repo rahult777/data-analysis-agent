@@ -13,6 +13,10 @@
 /.next/
 /out/
 
+# the snapshot export's temporary folder (scripts/export-snapshot.mjs); the
+# exported frontend/snapshot/ itself is committed
+/.snapshot-export/
+
 # production
 /build
 

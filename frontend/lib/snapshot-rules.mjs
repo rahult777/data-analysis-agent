@@ -10,9 +10,10 @@
 // Layout of a snapshot directory:
 //   manifest.json          {"analyses":[{"id":"<lowercase canonical uuid>"}]};
 //                          a test fixture also carries "fixture": true
-//   analyses/<id>.json     one SnapshotAnalysis (lib/types.ts) per id
+//   analyses/<id>.json     one SnapshotAnalysis (lib/types.ts) per id: exactly
+//                          the keys PUBLISHED defines, at every level
 //   charts/<file>          exactly the files the analyses' chart_paths list,
-//                          plus plotly.min.js when an HTML chart needs it
+//                          plus plotly.min.js, required beside an HTML chart
 // The default is frontend/snapshot/. Never put snapshot files in public/:
 // Next copies public/ into every build and serves it in dev.
 
@@ -24,6 +25,15 @@ import path from "node:path";
 /** @typedef {"file" | "dir" | "other"} EntryKind */
 /** @typedef {{ name: string, kind: EntryKind }} Entry */
 /** @typedef {{ name: string, id: string }} ListedChart */
+/**
+ * A node of the published key set: `true` (a leaf, published whole and
+ * type-checked by the rules below), an object of keys, or a one-item array
+ * whose item describes every element.
+ * @typedef {true | PublishedObject | PublishedArray} PublishedNode
+ * @typedef {{ readonly [key: string]: PublishedNode }} PublishedObject
+ * @typedef {readonly [PublishedObject]} PublishedArray
+ */
+/** @typedef {{ path: string, value: unknown }} UnpublishedEntry */
 
 export class SnapshotError extends Error {
   /** @param {string} message */
@@ -59,23 +69,43 @@ const FORBIDDEN_KEYS = new Set(
   ].map(normalizeKey),
 );
 
-const TOP_LEVEL_KEYS = [
-  "id",
-  "filename",
-  "row_count",
-  "column_count",
-  "data_quality_score",
-  "cleaning_report",
-  "cleaning_decisions",
-  "analysis_report",
-  "insight_report",
-  "executive_summary",
-  "chart_paths",
-];
-
-const SUMMARY_KEYS = ["rows_before", "rows_after", "rows_removed", "columns_before", "columns_after", "columns_removed"];
-
-const INSIGHT_KEYS = ["analyst_layer", "open_questions", "technical_layer", "user_question_addressed"];
+/**
+ * The published key set (owner ruling D3, M2b.3a): every key the public page
+ * renders, at every level, in render order, plus cleaning_report.summary's
+ * four counts for the results header (M2b.3b; owner ruling D1: no derived
+ * "removed" counts). One definition for both the export's projection
+ * (projectPublished, scripts/export-snapshot.mjs) and the build's validation
+ * (findUnpublishedKeys, in checkAnalysis), so the two cannot drift. Changing
+ * it is a publication decision.
+ * @type {PublishedObject}
+ */
+export const PUBLISHED = deepFreeze(
+  /** @type {PublishedObject} */ ({
+    id: true,
+    filename: true,
+    row_count: true,
+    column_count: true,
+    data_quality_score: true,
+    cleaning_report: { summary: { rows_before: true, rows_after: true, columns_before: true, columns_after: true } },
+    cleaning_decisions: [{ column_name: true, issue: true, action: true, reason: true }],
+    analysis_report: { correlation_matrix: { matrix: true, strong_pairs: [{ col1: true, col2: true }] } },
+    insight_report: {
+      analyst_layer: { narrative: true, chart_references: true },
+      open_questions: [{ question: true, why_unanswerable: true, what_data_would_answer: true }],
+      technical_layer: {
+        statistical_methodology: true,
+        code_blocks: true,
+        limitations: true,
+        sophistication_suggestions: true,
+        self_evaluation_notes: true,
+        lead_override_note: true,
+      },
+      user_question_addressed: true,
+    },
+    executive_summary: { bullets: [{ finding: true, context: true, recommended_action: true }] },
+    chart_paths: true,
+  }),
+);
 
 // Folders SNAPSHOT_DIR may not point into: Next copies public/ into every
 // export and serves it in dev, the export deletes out/ first, .next/ is the
@@ -180,24 +210,121 @@ export function checkManifest(value) {
 }
 
 // ---------------------------------------------------------------------------
+// The published key set: projection and unknown keys
+// ---------------------------------------------------------------------------
+
+/**
+ * The published part of an analysis: only the keys PUBLISHED defines, at
+ * every level, in its order; leaves are kept whole. A value whose shape
+ * differs from the definition (not an object, not an array) is kept as it
+ * is, for checkAnalysis to report. The export writes exactly this.
+ * @param {unknown} value
+ * @returns {unknown}
+ */
+export function projectPublished(value) {
+  return project(value, PUBLISHED);
+}
+
+/**
+ * Every key of value that PUBLISHED does not define, with its path (the
+ * rules' format, e.g. `insight_report.open_questions[0].priority`) and value:
+ * what projectPublished leaves out. Keys inside a leaf are not listed.
+ * @param {unknown} value
+ * @returns {UnpublishedEntry[]}
+ */
+export function unpublishedEntries(value) {
+  /** @type {UnpublishedEntry[]} */
+  const entries = [];
+  collectUnpublished(value, PUBLISHED, "", entries);
+  return entries;
+}
+
+/**
+ * An unknown-key problem for every key PUBLISHED does not define, at every
+ * level it defines.
+ * @param {unknown} value
+ * @returns {string[]}
+ */
+export function findUnpublishedKeys(value) {
+  return unpublishedEntries(value).map((entry) => `unknown key ${JSON.stringify(entry.path)}`);
+}
+
+/**
+ * @param {unknown} value
+ * @param {PublishedNode} node
+ * @returns {unknown}
+ */
+function project(value, node) {
+  if (node === true) return value;
+  if (isArrayNode(node)) {
+    const item = node[0];
+    return Array.isArray(value) ? value.map((entry) => project(entry, item)) : value;
+  }
+  if (!isPlainObject(value)) return value;
+  /** @type {Record<string, unknown>} */
+  const out = {};
+  for (const key of Object.keys(node)) {
+    if (hasOwn(value, key)) out[key] = project(value[key], node[key]);
+  }
+  return out;
+}
+
+/**
+ * @param {unknown} value
+ * @param {PublishedNode} node
+ * @param {string} where
+ * @param {UnpublishedEntry[]} entries
+ */
+function collectUnpublished(value, node, where, entries) {
+  if (node === true) return;
+  if (isArrayNode(node)) {
+    const item = node[0];
+    if (Array.isArray(value)) value.forEach((entry, i) => collectUnpublished(entry, item, `${where}[${i}]`, entries));
+    return;
+  }
+  if (!isPlainObject(value)) return;
+  for (const key of Object.keys(value)) {
+    const at = where === "" ? key : `${where}.${key}`;
+    if (hasOwn(node, key)) collectUnpublished(value[key], node[key], at, entries);
+    else entries.push({ path: at, value: value[key] });
+  }
+}
+
+/**
+ * @param {PublishedNode} node
+ * @returns {node is PublishedArray}
+ */
+function isArrayNode(node) {
+  return Array.isArray(node);
+}
+
+/**
+ * The keys an object node defines (none for a leaf or an array node).
+ * @param {PublishedNode} node
+ * @returns {string[]}
+ */
+function keysOf(node) {
+  return node === true || isArrayNode(node) ? [] : Object.keys(node);
+}
+
+// ---------------------------------------------------------------------------
 // The SnapshotAnalysis contract
 // ---------------------------------------------------------------------------
 
 /**
  * Problems with one analysis against SnapshotAnalysis (lib/types.ts): exactly
- * the fields the results view reads, plus cleaning_report.summary. Unknown
- * keys fail at the top level and inside cleaning_report, analysis_report,
- * insight_report and executive_summary. Free-form agent content (the layers,
- * the bullets, the cleaning decisions, the open questions, the matrix) is
- * checked only for the fields the UI reads; forbidden keys and foreign UUIDs
- * are separate rules.
+ * the keys PUBLISHED defines (the fields the results view reads, plus
+ * cleaning_report.summary); an unknown key fails at every level it defines.
+ * Inside, the fields the UI reads are type-checked; the summary's
+ * before-counts must equal row_count and column_count. Forbidden keys and
+ * foreign UUIDs are separate rules.
  * @param {unknown} value
  * @param {string} id the manifest id
  * @returns {string[]}
  */
 export function checkAnalysis(value, id) {
   if (!isPlainObject(value)) return ["must be a JSON object"];
-  const problems = exactKeys(value, TOP_LEVEL_KEYS, "");
+  const problems = [...findUnpublishedKeys(value), ...missingKeys(value, keysOf(PUBLISHED), "")];
   if ("id" in value && value.id !== id) problems.push(`id ${JSON.stringify(value.id)} differs from the manifest id ${id}`);
   if ("filename" in value && !(typeof value.filename === "string" && value.filename !== "")) {
     problems.push("filename must be a non-empty string");
@@ -209,7 +336,7 @@ export function checkAnalysis(value, id) {
   if ("data_quality_score" in value && !(typeof score === "number" && score >= 0 && score <= 1)) {
     problems.push("data_quality_score must be a number from 0 to 1");
   }
-  if ("cleaning_report" in value) problems.push(...checkCleaningReport(value.cleaning_report));
+  if ("cleaning_report" in value) problems.push(...checkCleaningReport(value.cleaning_report), ...checkSummaryCounts(value));
   if ("cleaning_decisions" in value) problems.push(...checkCleaningDecisions(value.cleaning_decisions));
   if ("analysis_report" in value) problems.push(...checkAnalysisReport(value.analysis_report));
   if ("insight_report" in value) problems.push(...checkInsightReport(value.insight_report));
@@ -221,13 +348,35 @@ export function checkAnalysis(value, id) {
 /** @param {unknown} report */
 function checkCleaningReport(report) {
   if (!isPlainObject(report)) return ["cleaning_report must be an object"];
-  const problems = exactKeys(report, ["summary"], "cleaning_report");
+  const node = PUBLISHED.cleaning_report;
+  const problems = missingKeys(report, keysOf(node), "cleaning_report");
   if (!("summary" in report)) return problems;
   const summary = report.summary;
   if (!isPlainObject(summary)) return [...problems, "cleaning_report.summary must be an object"];
-  problems.push(...exactKeys(summary, SUMMARY_KEYS, "cleaning_report.summary"));
-  for (const key of SUMMARY_KEYS) {
+  const summaryKeys = node === true || isArrayNode(node) ? [] : keysOf(node.summary);
+  problems.push(...missingKeys(summary, summaryKeys, "cleaning_report.summary"));
+  for (const key of summaryKeys) {
     if (key in summary && !isCount(summary[key])) problems.push(`cleaning_report.summary.${key} must be a non-negative integer`);
+  }
+  return problems;
+}
+
+/**
+ * The summary's before-counts describe the upload, as row_count and
+ * column_count do (owner ruling D1): both pairs must agree. A count that is
+ * itself invalid is reported by its own check, not compared.
+ * @param {Record<string, unknown>} analysis
+ */
+function checkSummaryCounts(analysis) {
+  const report = analysis.cleaning_report;
+  const summary = isPlainObject(report) ? report.summary : undefined;
+  if (!isPlainObject(summary)) return [];
+  /** @type {string[]} */
+  const problems = [];
+  for (const [before, count] of [["rows_before", "row_count"], ["columns_before", "column_count"]]) {
+    const a = summary[before];
+    const b = analysis[count];
+    if (isCount(a) && isCount(b) && a !== b) problems.push(`cleaning_report.summary.${before} (${a}) must equal ${count} (${b})`);
   }
   return problems;
 }
@@ -254,7 +403,7 @@ function checkCleaningDecisions(decisions) {
 /** @param {unknown} report */
 function checkAnalysisReport(report) {
   if (!isPlainObject(report)) return ["analysis_report must be an object"];
-  const problems = exactKeys(report, ["correlation_matrix"], "analysis_report");
+  const problems = missingKeys(report, keysOf(PUBLISHED.analysis_report), "analysis_report");
   if (!("correlation_matrix" in report)) return problems;
   const where = "analysis_report.correlation_matrix";
   const cm = report.correlation_matrix;
@@ -282,7 +431,7 @@ function checkAnalysisReport(report) {
 /** @param {unknown} report */
 function checkInsightReport(report) {
   if (!isPlainObject(report)) return ["insight_report must be an object"];
-  const problems = exactKeys(report, INSIGHT_KEYS, "insight_report");
+  const problems = missingKeys(report, keysOf(PUBLISHED.insight_report), "insight_report");
   if ("analyst_layer" in report) {
     const where = "insight_report.analyst_layer";
     const layer = report.analyst_layer;
@@ -331,7 +480,7 @@ function checkInsightReport(report) {
 /** @param {unknown} summary */
 function checkExecutiveSummary(summary) {
   if (!isPlainObject(summary)) return ["executive_summary must be an object"];
-  const problems = exactKeys(summary, ["bullets"], "executive_summary");
+  const problems = missingKeys(summary, keysOf(PUBLISHED.executive_summary), "executive_summary");
   if (!("bullets" in summary)) return problems;
   const bullets = summary.bullets;
   if (!Array.isArray(bullets)) return [...problems, "executive_summary.bullets must be an array"];
@@ -472,6 +621,11 @@ export function checkFileAccounting(listing, expected) {
     if (entry.name !== PLOTLY) problems.push(`unaccounted entry ${JSON.stringify(`charts/${entry.name}`)}`);
     else if (!htmlChart) problems.push(`charts/${PLOTLY} is allowed only when an analysis lists an HTML chart`);
     else if (entry.kind !== "file") problems.push(`charts/${PLOTLY} must be a regular file`);
+  }
+  // Every HTML chart loads the shared bundle from its own folder (M2b.2):
+  // without it the chart renders blank (M2b.2 Code Review #2).
+  if (htmlChart && !charts.some((entry) => entry.name === PLOTLY)) {
+    problems.push(`charts/${PLOTLY} is required when an analysis lists an HTML chart`);
   }
   return problems;
 }
@@ -657,17 +811,42 @@ function unknownKeys(object, allowed, where) {
 }
 
 /**
- * Unknown keys, then missing ones.
+ * Required keys that are missing. (Unknown keys are reported once, at every
+ * level, by findUnpublishedKeys.)
  * @param {Record<string, unknown>} object
  * @param {string[]} keys
  * @param {string} where
  * @returns {string[]}
  */
-function exactKeys(object, keys, where) {
-  const missing = keys
+function missingKeys(object, keys, where) {
+  return keys
     .filter((key) => !(key in object))
     .map((key) => `missing key ${JSON.stringify(where === "" ? key : `${where}.${key}`)}`);
-  return [...unknownKeys(object, keys, where), ...missing];
+}
+
+/**
+ * An own key, never an inherited one (a JSON key named "constructor" or
+ * "__proto__" is data, not the prototype's).
+ * @param {object} object
+ * @param {string} key
+ * @returns {boolean}
+ */
+function hasOwn(object, key) {
+  return Object.prototype.hasOwnProperty.call(object, key);
+}
+
+/**
+ * Freezes a value and everything inside it.
+ * @template T
+ * @param {T} value
+ * @returns {T}
+ */
+function deepFreeze(value) {
+  if (typeof value === "object" && value !== null) {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
 }
 
 /**

@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Synthetic fixture chart</title>
+</head>
+<body>
+<p id="fixture-chart" data-rendered="no">Synthetic fixture chart: its inline script has not run.</p>
+<script>
+  var chart = document.getElementById("fixture-chart");
+  chart.textContent = "Synthetic fixture chart: drawn by its inline script.";
+  chart.setAttribute("data-rendered", "yes");
+</script>
+</body>
+</html>

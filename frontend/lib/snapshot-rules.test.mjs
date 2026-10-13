@@ -24,6 +24,9 @@ import {
   readSnapshot,
   resolveSnapshotDir,
 } from "./snapshot-rules.mjs";
+// The published key set's API (M2b.3a), read at call time so that a missing
+// export fails its own tests rather than the whole file.
+import * as rules from "./snapshot-rules.mjs";
 
 const FRONTEND = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ID = "00000000-0000-4000-a000-000000000001";
@@ -31,16 +34,17 @@ const OTHER_ID = "00000000-0000-4000-a000-000000000002";
 const PNG = `${ID}_histogram_fixture_value.png`;
 const HTML = `${ID}_scatter_fixture_x_fixture_y.html`;
 const PLOTLY_HEADER = "/**\n* plotly.js v2.30.0\n* Copyright 2012-2024, Plotly, Inc.\n* All rights reserved.\n* Licensed under the MIT license\n*/\n";
+const PLOTLY_STANDIN = `${PLOTLY_HEADER}!function(){}`;
 
 function validAnalysis(id = ID) {
   return {
     id,
     filename: "synthetic_fixture.csv",
-    row_count: 3,
+    row_count: 4,
     column_count: 2,
     data_quality_score: 0.5,
     cleaning_report: {
-      summary: { rows_before: 4, rows_after: 3, rows_removed: 1, columns_before: 2, columns_after: 2, columns_removed: 0 },
+      summary: { rows_before: 4, rows_after: 3, columns_before: 2, columns_after: 2 },
     },
     cleaning_decisions: [
       { column_name: "fixture_x", issue: "Synthetic issue.", action: "Synthetic action.", reason: "Synthetic reason." },
@@ -49,7 +53,7 @@ function validAnalysis(id = ID) {
     analysis_report: {
       correlation_matrix: {
         matrix: { fixture_x: { fixture_x: 1, fixture_y: 0.5 }, fixture_y: { fixture_x: 0.5, fixture_y: null } },
-        strong_pairs: [{ col1: "fixture_x", col2: "fixture_y", r: 0.5 }],
+        strong_pairs: [{ col1: "fixture_x", col2: "fixture_y" }],
       },
     },
     insight_report: {
@@ -85,6 +89,7 @@ function validFiles(id = ID) {
     [`analyses/${id}.json`]: validAnalysis(id),
     [`charts/${id}_histogram_fixture_value.png`]: "\x89PNG synthetic bytes",
     [`charts/${id}_scatter_fixture_x_fixture_y.html`]: "<!doctype html><p>synthetic chart</p>",
+    "charts/plotly.min.js": PLOTLY_STANDIN,
   };
 }
 
@@ -259,18 +264,41 @@ describe("checkAnalysis (the SnapshotAnalysis contract)", () => {
     assert.deepEqual(checkAnalysis(analysisWith((a) => (a.data_quality_score = "0.5")), ID), ["data_quality_score must be a number from 0 to 1"]);
   });
 
-  it("allows only summary, with exactly its six integers, in cleaning_report", () => {
+  it("allows only summary, with exactly its four counts, in cleaning_report", () => {
     assert.deepEqual(checkAnalysis(analysisWith((a) => (a.cleaning_report.operations = [])), ID), ['unknown key "cleaning_report.operations"']);
     assert.deepEqual(checkAnalysis(analysisWith((a) => (a.cleaning_report = null)), ID), ["cleaning_report must be an object"]);
     assert.deepEqual(checkAnalysis(analysisWith((a) => delete a.cleaning_report.summary), ID), ['missing key "cleaning_report.summary"']);
-    assert.deepEqual(checkAnalysis(analysisWith((a) => delete a.cleaning_report.summary.rows_removed), ID), [
-      'missing key "cleaning_report.summary.rows_removed"',
+    for (const key of ["rows_before", "rows_after", "columns_before", "columns_after"]) {
+      assert.deepEqual(checkAnalysis(analysisWith((a) => delete a.cleaning_report.summary[key]), ID), [
+        `missing key "cleaning_report.summary.${key}"`,
+      ]);
+    }
+    // The derived counts are not published (owner ruling D1): columns_removed is -1 when cleaning adds a column.
+    assert.deepEqual(checkAnalysis(analysisWith((a) => (a.cleaning_report.summary.rows_removed = 1)), ID), [
+      'unknown key "cleaning_report.summary.rows_removed"',
+    ]);
+    assert.deepEqual(checkAnalysis(analysisWith((a) => (a.cleaning_report.summary.columns_removed = -1)), ID), [
+      'unknown key "cleaning_report.summary.columns_removed"',
     ]);
     assert.deepEqual(checkAnalysis(analysisWith((a) => (a.cleaning_report.summary.notes = "x")), ID), [
       'unknown key "cleaning_report.summary.notes"',
     ]);
     assert.deepEqual(checkAnalysis(analysisWith((a) => (a.cleaning_report.summary.rows_after = -1)), ID), [
       "cleaning_report.summary.rows_after must be a non-negative integer",
+    ]);
+  });
+
+  it("requires the summary's before-counts to equal row_count and column_count (the upload's shape)", () => {
+    assert.deepEqual(checkAnalysis(analysisWith((a) => (a.cleaning_report.summary.rows_before = 5)), ID), [
+      "cleaning_report.summary.rows_before (5) must equal row_count (4)",
+    ]);
+    assert.deepEqual(checkAnalysis(analysisWith((a) => (a.column_count = 9)), ID), [
+      "cleaning_report.summary.columns_before (2) must equal column_count (9)",
+    ]);
+    // A count that is itself invalid is reported once, without a comparison.
+    assert.deepEqual(checkAnalysis(analysisWith((a) => (a.row_count = null)), ID), ["row_count must be a non-negative integer"]);
+    assert.deepEqual(checkAnalysis(analysisWith((a) => (a.cleaning_report.summary.columns_before = "2")), ID), [
+      "cleaning_report.summary.columns_before must be a non-negative integer",
     ]);
   });
 
@@ -288,8 +316,19 @@ describe("checkAnalysis (the SnapshotAnalysis contract)", () => {
     assert.deepEqual(checkAnalysis(analysisWith((a) => (a.analysis_report.correlation_matrix.strong_pairs[0].col2 = 3)), ID), [
       "analysis_report.correlation_matrix.strong_pairs[0].col2 must be a string",
     ]);
-    // Free-form: other keys inside the matrix object are not restricted.
-    assert.deepEqual(checkAnalysis(analysisWith((a) => (a.analysis_report.correlation_matrix.method = "pearson")), ID), []);
+    // Only what the page reads (owner ruling D3): matrix and strong_pairs, and col1/col2 in each pair.
+    assert.deepEqual(checkAnalysis(analysisWith((a) => (a.analysis_report.correlation_matrix.method = "pearson")), ID), [
+      'unknown key "analysis_report.correlation_matrix.method"',
+    ]);
+    assert.deepEqual(
+      checkAnalysis(analysisWith((a) => Object.assign(a.analysis_report.correlation_matrix, { highest_pair: ["fixture_x", "fixture_y"], highest_value: 0.5 })), ID),
+      ['unknown key "analysis_report.correlation_matrix.highest_pair"', 'unknown key "analysis_report.correlation_matrix.highest_value"'],
+    );
+    assert.deepEqual(checkAnalysis(analysisWith((a) => (a.analysis_report.correlation_matrix.strong_pairs[0].r = 0.5)), ID), [
+      'unknown key "analysis_report.correlation_matrix.strong_pairs[0].r"',
+    ]);
+    // The matrix itself is a leaf: its keys are column names.
+    assert.deepEqual(checkAnalysis(analysisWith((a) => (a.analysis_report.correlation_matrix.matrix.fixture_x.any_column = 0.1)), ID), []);
   });
 
   it("allows only the four insight_report keys and checks what the layers' views read", () => {
@@ -314,14 +353,24 @@ describe("checkAnalysis (the SnapshotAnalysis contract)", () => {
     assert.deepEqual(checkAnalysis(analysisWith((a) => (a.insight_report.user_question_addressed = 1)), ID), [
       "insight_report.user_question_addressed must be a string or null",
     ]);
-    // Free-form: other keys inside a layer are not restricted.
-    assert.deepEqual(checkAnalysis(analysisWith((a) => (a.insight_report.analyst_layer.confidence = "High")), ID), []);
+    // Only what the page reads (owner ruling D3), inside every layer and every open question.
+    assert.deepEqual(checkAnalysis(analysisWith((a) => (a.insight_report.analyst_layer.confidence = "High")), ID), [
+      'unknown key "insight_report.analyst_layer.confidence"',
+    ]);
+    assert.deepEqual(checkAnalysis(analysisWith((a) => (a.insight_report.technical_layer.cleaning_methodology = "x")), ID), [
+      'unknown key "insight_report.technical_layer.cleaning_methodology"',
+    ]);
+    assert.deepEqual(checkAnalysis(analysisWith((a) => (a.insight_report.open_questions[0].priority = "high")), ID), [
+      'unknown key "insight_report.open_questions[0].priority"',
+    ]);
   });
 
-  it("allows only bullets in executive_summary; each bullet stays free-form", () => {
+  it("allows only bullets in executive_summary, and in each bullet only the three keys the page reads", () => {
     assert.deepEqual(checkAnalysis(analysisWith((a) => (a.executive_summary.headline = "x")), ID), ['unknown key "executive_summary.headline"']);
     assert.deepEqual(checkAnalysis(analysisWith((a) => (a.executive_summary = {})), ID), ['missing key "executive_summary.bullets"']);
-    assert.deepEqual(checkAnalysis(analysisWith((a) => (a.executive_summary.bullets[0].confidence = "High")), ID), []);
+    assert.deepEqual(checkAnalysis(analysisWith((a) => (a.executive_summary.bullets[0].confidence = "High")), ID), [
+      'unknown key "executive_summary.bullets[0].confidence"',
+    ]);
   });
 
   it("checks what the executive summary and the cleaning decisions views read", () => {
@@ -334,6 +383,9 @@ describe("checkAnalysis (the SnapshotAnalysis contract)", () => {
       "cleaning_decisions[0].column_name must be a string or null",
     ]);
     assert.deepEqual(checkAnalysis(analysisWith((a) => delete a.cleaning_decisions[1].reason), ID), ["cleaning_decisions[1].reason must be a string"]);
+    assert.deepEqual(checkAnalysis(analysisWith((a) => (a.cleaning_decisions[0].operation = "fill_missing")), ID), [
+      'unknown key "cleaning_decisions[0].operation"',
+    ]);
   });
 
   it("checks chart_paths: an array of distinct plain .png or .html file names", () => {
@@ -353,6 +405,186 @@ describe("checkAnalysis (the SnapshotAnalysis contract)", () => {
       assert.deepEqual(checkAnalysis(analysisWith((a) => (a.chart_paths = [name])), ID), [
         `chart_paths[0] ${JSON.stringify(name)} is not a chart file name (a plain name ending in .png or .html, with no other dot)`,
       ]);
+    }
+  });
+});
+
+describe("the published key set (PUBLISHED; owner ruling D3: publish only what the page renders)", () => {
+  // What GET /api/analysis/{id} returns for a finished run, keys shuffled,
+  // with keys the page never reads at every level.
+  function richAnalysis() {
+    const a = validAnalysis();
+    return {
+      status: "complete",
+      chart_paths: a.chart_paths,
+      executive_summary: {
+        bullets: a.executive_summary.bullets.map((b) => ({ context: b.context, recommended_action: b.recommended_action, finding: b.finding, confidence: "High" })),
+      },
+      created_at: "2026-10-03T08:00:00+00:00",
+      insight_report: {
+        user_question_addressed: null,
+        technical_layer: { ...a.insight_report.technical_layer, cleaning_methodology: "Synthetic methodology." },
+        executive_layer: { bullets: [] },
+        open_questions: a.insight_report.open_questions.map((q) => ({ ...q, priority: "high" })),
+        analyst_layer: { chart_references: a.insight_report.analyst_layer.chart_references, narrative: a.insight_report.analyst_layer.narrative },
+        data_quality_score: 0.5,
+      },
+      analysis_report: {
+        descriptive_stats: {},
+        correlation_matrix: {
+          highest_value: 0.5,
+          strong_pairs: [{ r: 0.5, col2: "fixture_y", col1: "fixture_x", n: 3 }],
+          highest_pair: ["fixture_x", "fixture_y"],
+          matrix: a.analysis_report.correlation_matrix.matrix,
+        },
+        chart_paths: a.chart_paths,
+      },
+      cleaning_decisions: a.cleaning_decisions.map((d) => ({ reason: d.reason, action: d.action, issue: d.issue, column_name: d.column_name })),
+      cleaning_report: { summary: { ...a.cleaning_report.summary, rows_removed: 1, columns_removed: 0 }, decisions: a.cleaning_decisions },
+      profile_report: { domain_hypothesis: "Synthetic" },
+      data_quality_score: a.data_quality_score,
+      column_count: a.column_count,
+      row_count: a.row_count,
+      filename: a.filename,
+      id: a.id,
+    };
+  }
+
+  // Every key the rich analysis has and the page does not read, in walk order.
+  const DROPPED = [
+    "status",
+    "executive_summary.bullets[0].confidence",
+    "created_at",
+    "insight_report.technical_layer.cleaning_methodology",
+    "insight_report.executive_layer",
+    "insight_report.open_questions[0].priority",
+    "insight_report.data_quality_score",
+    "analysis_report.descriptive_stats",
+    "analysis_report.correlation_matrix.highest_value",
+    "analysis_report.correlation_matrix.strong_pairs[0].r",
+    "analysis_report.correlation_matrix.strong_pairs[0].n",
+    "analysis_report.correlation_matrix.highest_pair",
+    "analysis_report.chart_paths",
+    "cleaning_report.summary.rows_removed",
+    "cleaning_report.summary.columns_removed",
+    "cleaning_report.decisions",
+    "profile_report",
+  ];
+
+  // Every key path of a value, array items as [i].
+  function keyPaths(value, where = "") {
+    if (Array.isArray(value)) return value.flatMap((item, i) => keyPaths(item, `${where}[${i}]`));
+    if (typeof value !== "object" || value === null) return [];
+    return Object.entries(value).flatMap(([key, child]) => {
+      const at = where === "" ? key : `${where}.${key}`;
+      return [at, ...keyPaths(child, at)];
+    });
+  }
+
+  // Every path the definition names, array items as [].
+  function definitionPaths(node, where = "") {
+    return Object.entries(node).flatMap(([key, child]) => {
+      const at = where === "" ? key : `${where}.${key}`;
+      if (child === true) return [at];
+      return Array.isArray(child) ? [at, ...definitionPaths(child[0], `${at}[]`)] : [at, ...definitionPaths(child, at)];
+    });
+  }
+
+  it("projectPublished keeps exactly the keys the page reads, at every level, in the definition's order", () => {
+    assert.equal(JSON.stringify(rules.projectPublished(richAnalysis())), JSON.stringify(validAnalysis()));
+  });
+
+  it("unpublishedEntries lists every other key by path, with its value; findUnpublishedKeys reports them as unknown keys", () => {
+    const rich = richAnalysis();
+    assert.deepEqual(rules.unpublishedEntries(rich).map((entry) => entry.path), DROPPED);
+    assert.deepEqual(rules.unpublishedEntries(rich).find((entry) => entry.path === "profile_report")?.value, { domain_hypothesis: "Synthetic" });
+    assert.deepEqual(rules.findUnpublishedKeys(rich), DROPPED.map((at) => `unknown key ${JSON.stringify(at)}`));
+    assert.deepEqual(rules.unpublishedEntries(validAnalysis()), []);
+  });
+
+  it("the projection and the unpublished entries account for every key of the input, each exactly once", () => {
+    const rich = richAnalysis();
+    const kept = new Set(keyPaths(rules.projectPublished(rich)));
+    const dropped = rules.unpublishedEntries(rich).map((entry) => entry.path);
+    for (const at of keyPaths(rich)) {
+      const underDropped = dropped.some((d) => at === d || at.startsWith(`${d}.`) || at.startsWith(`${d}[`));
+      assert.equal(kept.has(at) !== underDropped, true, at);
+    }
+  });
+
+  it("leaves a value of the wrong shape as it is, for the rules to report", () => {
+    const odd = analysisWith((a) => ((a.insight_report.technical_layer = "x"), (a.cleaning_decisions = {})));
+    const projected = rules.projectPublished(odd);
+    assert.equal(projected.insight_report.technical_layer, "x");
+    assert.deepEqual(projected.cleaning_decisions, {});
+    assert.deepEqual(checkAnalysis(projected, ID), ["cleaning_decisions must be an array", "insight_report.technical_layer must be an object"]);
+  });
+
+  it("is idempotent, never adds a key, returns a new object, and treats inherited names as unknown keys", () => {
+    const rich = richAnalysis();
+    const once = rules.projectPublished(rich);
+    assert.deepEqual(rules.projectPublished(once), once);
+    assert.notEqual(once, rich);
+    const partial = { id: ID, insight_report: { analyst_layer: {} } };
+    assert.deepEqual(rules.projectPublished(partial), partial);
+    const inherited = JSON.parse(`{"id":"${ID}","constructor":1,"__proto__":{"x":1},"insight_report":{"toString":"x"}}`);
+    assert.deepEqual(rules.findUnpublishedKeys(inherited), ['unknown key "constructor"', 'unknown key "__proto__"', 'unknown key "insight_report.toString"']);
+    assert.deepEqual(keyPaths(rules.projectPublished(inherited)), ["id", "insight_report"]);
+  });
+
+  it("its projection of a full GET response passes the contract", () => {
+    assert.deepEqual(checkAnalysis(rules.projectPublished(richAnalysis()), ID), []);
+  });
+
+  it("defines exactly these paths, frozen (a change here is a publication decision)", () => {
+    assert.deepEqual(definitionPaths(rules.PUBLISHED), [
+      "id",
+      "filename",
+      "row_count",
+      "column_count",
+      "data_quality_score",
+      "cleaning_report",
+      "cleaning_report.summary",
+      "cleaning_report.summary.rows_before",
+      "cleaning_report.summary.rows_after",
+      "cleaning_report.summary.columns_before",
+      "cleaning_report.summary.columns_after",
+      "cleaning_decisions",
+      "cleaning_decisions[].column_name",
+      "cleaning_decisions[].issue",
+      "cleaning_decisions[].action",
+      "cleaning_decisions[].reason",
+      "analysis_report",
+      "analysis_report.correlation_matrix",
+      "analysis_report.correlation_matrix.matrix",
+      "analysis_report.correlation_matrix.strong_pairs",
+      "analysis_report.correlation_matrix.strong_pairs[].col1",
+      "analysis_report.correlation_matrix.strong_pairs[].col2",
+      "insight_report",
+      "insight_report.analyst_layer",
+      "insight_report.analyst_layer.narrative",
+      "insight_report.analyst_layer.chart_references",
+      "insight_report.open_questions",
+      "insight_report.open_questions[].question",
+      "insight_report.open_questions[].why_unanswerable",
+      "insight_report.open_questions[].what_data_would_answer",
+      "insight_report.technical_layer",
+      "insight_report.technical_layer.statistical_methodology",
+      "insight_report.technical_layer.code_blocks",
+      "insight_report.technical_layer.limitations",
+      "insight_report.technical_layer.sophistication_suggestions",
+      "insight_report.technical_layer.self_evaluation_notes",
+      "insight_report.technical_layer.lead_override_note",
+      "insight_report.user_question_addressed",
+      "executive_summary",
+      "executive_summary.bullets",
+      "executive_summary.bullets[].finding",
+      "executive_summary.bullets[].context",
+      "executive_summary.bullets[].recommended_action",
+      "chart_paths",
+    ]);
+    for (const node of [rules.PUBLISHED, rules.PUBLISHED.insight_report.technical_layer, rules.PUBLISHED.cleaning_decisions, rules.PUBLISHED.cleaning_decisions[0]]) {
+      assert.equal(Object.isFrozen(node), true);
     }
   });
 });
@@ -412,7 +644,7 @@ describe("checkFileAccounting", () => {
   const valid = () => ({
     top: [file("manifest.json"), dir("analyses"), dir("charts")],
     analyses: [file(`${ID}.json`)],
-    charts: [file(PNG), file(HTML)],
+    charts: [file(PNG), file(HTML), file("plotly.min.js")],
   });
 
   it("accepts exactly the manifest's files", () => {
@@ -449,27 +681,33 @@ describe("checkFileAccounting", () => {
   });
 
   it("rejects a listed chart with no file, and a file no analysis lists", () => {
-    assert.deepEqual(checkFileAccounting({ ...valid(), charts: [file(PNG), file("other.png")] }, { ids: [ID], charts }), [
+    assert.deepEqual(checkFileAccounting({ ...valid(), charts: [file(PNG), file("other.png"), file("plotly.min.js")] }, { ids: [ID], charts }), [
       `chart "${HTML}" listed by ${ID} has no file in charts/`,
       'unaccounted entry "charts/other.png"',
     ]);
   });
 
   it("allows plotly.min.js only when an analysis lists an HTML chart", () => {
-    const listing = valid();
-    listing.charts.push(file("plotly.min.js"));
-    assert.deepEqual(checkFileAccounting(listing, { ids: [ID], charts }), []);
+    assert.deepEqual(checkFileAccounting(valid(), { ids: [ID], charts }), []);
     assert.deepEqual(
-      checkFileAccounting({ ...listing, charts: [file(PNG), file("plotly.min.js")] }, { ids: [ID], charts: [{ name: PNG, id: ID }] }),
+      checkFileAccounting({ ...valid(), charts: [file(PNG), file("plotly.min.js")] }, { ids: [ID], charts: [{ name: PNG, id: ID }] }),
       ["charts/plotly.min.js is allowed only when an analysis lists an HTML chart"],
     );
+  });
+
+  it("requires plotly.min.js when an analysis lists an HTML chart: the chart loads it (M2b.2 Code Review #2)", () => {
+    assert.deepEqual(checkFileAccounting({ ...valid(), charts: [file(PNG), file(HTML)] }, { ids: [ID], charts }), [
+      "charts/plotly.min.js is required when an analysis lists an HTML chart",
+    ]);
+    // A PNG-only snapshot needs none.
+    assert.deepEqual(checkFileAccounting({ ...valid(), charts: [file(PNG)] }, { ids: [ID], charts: [{ name: PNG, id: ID }] }), []);
   });
 
   it("rejects entries of the wrong kind (a symlink, or a directory where a file belongs)", () => {
     const listing = valid();
     listing.top[0] = { name: "manifest.json", kind: "other" };
     listing.analyses = [{ name: `${ID}.json`, kind: "other" }];
-    listing.charts = [{ name: PNG, kind: "other" }, dir(HTML)];
+    listing.charts = [{ name: PNG, kind: "other" }, dir(HTML), file("plotly.min.js")];
     assert.deepEqual(checkFileAccounting(listing, { ids: [ID], charts }), [
       "manifest.json must be a regular file",
       `analyses/${ID}.json must be a regular file`,
@@ -498,7 +736,16 @@ describe("readSnapshot (temporary snapshot directories)", () => {
     assert.equal(snapshot.fixture, false);
     assert.deepEqual(snapshot.analyses, [validAnalysis()]);
     assert.deepEqual(snapshot.charts, [PNG, HTML]);
-    assert.equal(snapshot.plotly, false);
+    assert.equal(snapshot.plotly, true);
+  });
+
+  it("fails on an HTML chart without plotly.min.js beside it", () => {
+    const files = validFiles();
+    delete files["charts/plotly.min.js"];
+    assert.throws(
+      () => readSnapshot(tempFrontend(files), {}),
+      snapshotError("Snapshot: 1 problem in snapshot:\n  - charts/plotly.min.js is required when an analysis lists an HTML chart"),
+    );
   });
 
   it("works with no charts at all (no charts/ directory)", () => {
@@ -545,10 +792,19 @@ describe("readSnapshot (temporary snapshot directories)", () => {
   });
 
   it("fails on a forbidden key anywhere in an analysis", () => {
+    // Inside a defined object it is also an unknown key (owner ruling D3); both rules report it.
     const files = { ...validFiles(), [`analyses/${ID}.json`]: analysisWith((a) => (a.executive_summary.bullets[0].sessionId = "s")) };
     assert.throws(
       () => readSnapshot(tempFrontend(files), {}),
-      snapshotError(`Snapshot: 1 problem in snapshot:\n  - analyses/${ID}.json: forbidden key "sessionId" at executive_summary.bullets[0].sessionId`),
+      snapshotError(
+        `Snapshot: 2 problems in snapshot:\n  - analyses/${ID}.json: unknown key "executive_summary.bullets[0].sessionId"\n  - analyses/${ID}.json: forbidden key "sessionId" at executive_summary.bullets[0].sessionId`,
+      ),
+    );
+    // Inside a leaf (the matrix's keys are column names) only the forbidden-key rule can catch it.
+    const leaf = { ...validFiles(), [`analyses/${ID}.json`]: analysisWith((a) => (a.analysis_report.correlation_matrix.matrix.session_id = { fixture_x: 0.1 })) };
+    assert.throws(
+      () => readSnapshot(tempFrontend(leaf), {}),
+      snapshotError(`Snapshot: 1 problem in snapshot:\n  - analyses/${ID}.json: forbidden key "session_id" at analysis_report.correlation_matrix.matrix.session_id`),
     );
   });
 
@@ -626,7 +882,7 @@ describe("the committed fixtures (e2e/fixtures/)", () => {
     assert.deepEqual(snapshot.ids, [ID]);
     assert.equal(snapshot.fixture, true);
     assert.deepEqual(snapshot.charts, [PNG, HTML]);
-    assert.equal(snapshot.plotly, false);
+    assert.equal(snapshot.plotly, true);
   });
 
   it("e2e/fixtures/snapshot is refused without SNAPSHOT_ALLOW_FIXTURE=1", () => {
@@ -641,10 +897,20 @@ describe("the committed fixtures (e2e/fixtures/)", () => {
   });
 
   it("snapshot-broken/forbidden-key fails on its forbidden key only", () => {
+    // The key sits in the correlation matrix, a leaf: in a defined object it would also be an unknown key.
     assert.throws(
       () => read("e2e/fixtures/snapshot-broken/forbidden-key", { SNAPSHOT_ALLOW_FIXTURE: "1" }),
       snapshotError(
-        `Snapshot: 1 problem in e2e/fixtures/snapshot-broken/forbidden-key:\n  - analyses/${ID}.json: forbidden key "sessionId" at executive_summary.bullets[0].sessionId`,
+        `Snapshot: 1 problem in e2e/fixtures/snapshot-broken/forbidden-key:\n  - analyses/${ID}.json: forbidden key "sessionId" at analysis_report.correlation_matrix.matrix.sessionId`,
+      ),
+    );
+  });
+
+  it("snapshot-broken/missing-plotly fails on its missing plotly.min.js only", () => {
+    assert.throws(
+      () => read("e2e/fixtures/snapshot-broken/missing-plotly", { SNAPSHOT_ALLOW_FIXTURE: "1" }),
+      snapshotError(
+        "Snapshot: 1 problem in e2e/fixtures/snapshot-broken/missing-plotly:\n  - charts/plotly.min.js is required when an analysis lists an HTML chart",
       ),
     );
   });
@@ -761,14 +1027,14 @@ describe("scripts/copy-snapshot-charts.mjs (the second half of build:public)", (
     assert.deepEqual(copyHalf(processFirst, { SNAPSHOT_DIR: "snapshots/a" }), refused);
   });
 
-  it("copies exactly the listed chart files into out/demo/charts/, byte for byte", () => {
+  it("copies exactly the listed chart files and plotly.min.js into out/demo/charts/, byte for byte", () => {
     const root = copyLayout();
     const run = runCopy(root, FIXTURE_ENV);
     assert.equal(run.status, 0, run.stderr);
-    assert.match(run.stdout, /^copied 2 chart file\(s\) from e2e\/fixtures\/snapshot\/charts\/ into out\/demo\/charts\//);
+    assert.match(run.stdout, /^copied 3 chart file\(s\) from e2e\/fixtures\/snapshot\/charts\/ into out\/demo\/charts\//);
     const target = path.join(root, "out/demo/charts");
-    assert.deepEqual(fs.readdirSync(target).sort(), [HTML, PNG].sort());
-    for (const name of [PNG, HTML]) {
+    assert.deepEqual(fs.readdirSync(target).sort(), [HTML, PNG, "plotly.min.js"].sort());
+    for (const name of [PNG, HTML, "plotly.min.js"]) {
       assert.ok(fs.readFileSync(path.join(target, name)).equals(fs.readFileSync(path.join(FRONTEND, "e2e/fixtures/snapshot/charts", name))), name);
     }
   });
