@@ -1,7 +1,8 @@
 {
   "analyses": [
     {
-      "id": "77faa166-668b-4001-92e0-94e037de7e3b"
+      "id": "77faa166-668b-4001-92e0-94e037de7e3b",
+      "note": "One saved run on a small synthetic sales dataset. Nothing the agents wrote has been corrected, so several known errors are left in rather than hidden. The interactive scatter plot shows almost no relationship (r=0.08): it demonstrates the chart, not a finding. One cleaning decision says imputing the median “fabricates $31,738” per transaction; the model invented that number, and the median actually used was $25,536."
     }
   ]
 }
