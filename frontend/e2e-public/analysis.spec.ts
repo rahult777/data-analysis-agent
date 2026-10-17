@@ -5,8 +5,10 @@
 
 import { expect, test } from "@playwright/test";
 
-import { FIXTURE, FIXTURE_ID, UNLISTED_ID } from "./fixture";
+import { FIXTURE, FIXTURE_ID, FIXTURE_NOTE, UNLISTED_ID } from "./fixture";
 import {
+  comesBefore,
+  effectiveOpacity,
   expectNoHorizontalOverflow,
   expectSameOriginOnly,
   localStorageCalls,
@@ -76,6 +78,20 @@ test("no question UI: one line of read-only copy in its place, and no upload wor
   expect(await page.evaluate(() => document.body.innerText)).not.toMatch(/upload/i);
 });
 
+test("shows the manifest's note under 'About this example', between the page's h1 and the results header", async ({ page }, info) => {
+  await page.goto(PAGE);
+  const section = page.getByRole("region", { name: "About this example", exact: true });
+  await expect(section.getByRole("heading", { level: 2, name: "About this example", exact: true })).toBeVisible();
+  await expect(section.locator("p")).toHaveCount(1);
+  expect(await section.locator("p").textContent()).toBe(FIXTURE_NOTE);
+  const h1 = page.getByRole("heading", { level: 1, name: "Analysis" });
+  const header = page.getByRole("heading", { name: "Analysis complete" });
+  expect(await comesBefore(h1, section), "the page's h1 comes first").toBe(true);
+  expect(await comesBefore(section, header), "then the note, then the results header").toBe(true);
+  await expectNoHorizontalOverflow(page);
+  await shot(page, info, "fixture-note");
+});
+
 test.describe("the prerendered HTML (JavaScript off)", () => {
   test.use({ javaScriptEnabled: false });
 
@@ -86,6 +102,17 @@ test.describe("the prerendered HTML (JavaScript off)", () => {
     await expect(page.getByLabel("Loading results")).toHaveCount(0);
     await expect(page.locator("input, textarea, form")).toHaveCount(0);
     await expect(page.getByText(READ_ONLY_COPY, { exact: true })).toBeVisible();
+  });
+
+  test("holds the note, with nothing hiding it", async ({ page }) => {
+    await page.goto(PAGE);
+    const section = page.getByRole("region", { name: "About this example", exact: true });
+    await expect(section).toBeVisible();
+    expect(await section.locator("p").textContent()).toBe(FIXTURE_NOTE);
+    // toBeVisible() counts opacity 0 as visible: check the opacity each part is drawn with.
+    for (const part of [section, section.getByRole("heading", { level: 2 }), section.locator("p")]) {
+      expect(await effectiveOpacity(part)).toBe(1);
+    }
   });
 });
 

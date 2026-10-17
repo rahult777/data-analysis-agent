@@ -32,6 +32,11 @@ test("out/analysis/ holds exactly the listed ids, one .html and one .txt each", 
   expect(readdirSync(path.join(OUT, "analysis")).sort()).toEqual([`${FIXTURE_ID}.html`, `${FIXTURE_ID}.txt`]);
 });
 
+test("the third-party notice in public/ ships as out/third-party-notices.txt, byte for byte", () => {
+  const notice = "third-party-notices.txt";
+  expect(readFileSync(path.join(OUT, notice)).equals(readFileSync(path.join(__dirname, "..", "public", notice)))).toBe(true);
+});
+
 test("out/demo/charts/ holds exactly the listed chart files and plotly.min.js, byte for byte", () => {
   const charts = path.join(OUT, "demo", "charts");
   expect(readdirSync(charts).sort()).toEqual([HTML_CHART, PNG_CHART, PLOTLY].sort());

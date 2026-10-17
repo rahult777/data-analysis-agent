@@ -35,6 +35,12 @@ const PNG = `${ID}_histogram_fixture_value.png`;
 const HTML = `${ID}_scatter_fixture_x_fixture_y.html`;
 const PLOTLY_HEADER = "/**\n* plotly.js v2.30.0\n* Copyright 2012-2024, Plotly, Inc.\n* All rights reserved.\n* Licensed under the MIT license\n*/\n";
 const PLOTLY_STANDIN = `${PLOTLY_HEADER}!function(){}`;
+// The note every fixture manifest carries (e2e-public/fixture.ts holds the same text).
+const FIXTURE_NOTE = "Synthetic note for the public e2e fixture. It describes no real data.";
+// The note the owner ruled for the demo analysis (2026-10-14), as a sample of
+// a valid note: curly quotes, dollar amounts and "r=0.08" pass the rule.
+const DEMO_NOTE =
+  "One saved run on a small synthetic sales dataset. Nothing the agents wrote has been corrected, so several known errors are left in rather than hidden. The interactive scatter plot shows almost no relationship (r=0.08): it demonstrates the chart, not a finding. One cleaning decision says imputing the median \u201cfabricates $31,738\u201d per transaction; the model invented that number, and the median actually used was $25,536.";
 
 function validAnalysis(id = ID) {
   return {
@@ -85,12 +91,18 @@ function analysisWith(edit, id = ID) {
 
 function validFiles(id = ID) {
   return {
-    "manifest.json": { analyses: [{ id }] },
+    "manifest.json": { analyses: [{ id, note: FIXTURE_NOTE }] },
     [`analyses/${id}.json`]: validAnalysis(id),
     [`charts/${id}_histogram_fixture_value.png`]: "\x89PNG synthetic bytes",
     [`charts/${id}_scatter_fixture_x_fixture_y.html`]: "<!doctype html><p>synthetic chart</p>",
     "charts/plotly.min.js": PLOTLY_STANDIN,
   };
+}
+
+// The notes record checkManifest and readSnapshot return: it has no prototype,
+// so no key is inherited (M2b.3b.1 Code Review #2).
+function notesRecord(entries) {
+  return Object.assign(Object.create(null), entries);
 }
 
 const tempRoots = [];
@@ -99,7 +111,7 @@ after(() => {
 });
 
 // A temporary frontend directory whose snapshot/ holds `files` (relative
-// path → content; objects are written as JSON). No files: no snapshot/.
+// path -> content; objects are written as JSON). No files: no snapshot/.
 function tempFrontend(files = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "snapshot-rules-"));
   tempRoots.push(root);
@@ -187,18 +199,24 @@ describe("checkFixtureGuard", () => {
 });
 
 describe("checkManifest", () => {
-  it("accepts a manifest and returns its ids", () => {
-    assert.deepEqual(checkManifest({ analyses: [{ id: ID }, { id: OTHER_ID }] }), {
+  it("accepts a manifest and returns its ids and notes", () => {
+    assert.deepEqual(checkManifest({ analyses: [{ id: ID, note: FIXTURE_NOTE }, { id: OTHER_ID, note: "Another synthetic note." }] }), {
       ids: [ID, OTHER_ID],
+      notes: notesRecord({ [ID]: FIXTURE_NOTE, [OTHER_ID]: "Another synthetic note." }),
       fixture: false,
       problems: [],
     });
-    assert.deepEqual(checkManifest({ fixture: true, analyses: [{ id: ID }] }), { ids: [ID], fixture: true, problems: [] });
+    assert.deepEqual(checkManifest({ fixture: true, analyses: [{ id: ID, note: FIXTURE_NOTE }] }), {
+      ids: [ID],
+      notes: notesRecord({ [ID]: FIXTURE_NOTE }),
+      fixture: true,
+      problems: [],
+    });
   });
 
   it("rejects a manifest that is not an object", () => {
     for (const value of [null, [], "x", 3]) {
-      assert.deepEqual(checkManifest(value).problems, ["must be a JSON object"]);
+      assert.deepEqual(checkManifest(value), { ids: [], notes: notesRecord({}), fixture: false, problems: ["must be a JSON object"] });
     }
   });
 
@@ -209,31 +227,110 @@ describe("checkManifest", () => {
   });
 
   it("rejects unknown keys at the top and in each entry", () => {
-    assert.deepEqual(checkManifest({ analyses: [{ id: ID }], title: "x" }).problems, ['unknown key "title"']);
-    assert.deepEqual(checkManifest({ analyses: [{ id: ID, name: "x" }] }).problems, ['unknown key "analyses[0].name"']);
+    assert.deepEqual(checkManifest({ analyses: [{ id: ID, note: FIXTURE_NOTE }], title: "x" }).problems, ['unknown key "title"']);
+    assert.deepEqual(checkManifest({ analyses: [{ id: ID, note: FIXTURE_NOTE, name: "x" }] }).problems, ['unknown key "analyses[0].name"']);
   });
 
   it('accepts "fixture" only as true', () => {
     for (const fixture of [false, "true", 1, null]) {
-      assert.deepEqual(checkManifest({ fixture, analyses: [{ id: ID }] }).problems, ['"fixture" must be true when present']);
+      assert.deepEqual(checkManifest({ fixture, analyses: [{ id: ID, note: FIXTURE_NOTE }] }).problems, ['"fixture" must be true when present']);
     }
   });
 
-  it("rejects an entry that is not an object or has no id", () => {
+  it("rejects an entry that is not an object, and lists every missing key of an entry: the id, then the note", () => {
     assert.deepEqual(checkManifest({ analyses: [ID] }).problems, ["analyses[0] must be an object"]);
-    assert.deepEqual(checkManifest({ analyses: [{}] }).problems, ['missing key "analyses[0].id"']);
+    assert.deepEqual(checkManifest({ analyses: [{}] }).problems, ['missing key "analyses[0].id"', 'missing key "analyses[0].note"']);
   });
 
   it("rejects an id that is not a lowercase canonical UUID", () => {
     for (const id of [ID.toUpperCase(), `{${ID}}`, ID.replace(/-/g, ""), ID.slice(1), `${ID} `, "not-a-uuid", 7]) {
-      assert.deepEqual(checkManifest({ analyses: [{ id }] }).problems, [
+      assert.deepEqual(checkManifest({ analyses: [{ id, note: FIXTURE_NOTE }] }).problems, [
         `analyses[0].id ${JSON.stringify(id)} is not a lowercase canonical UUID`,
       ]);
     }
   });
 
   it("rejects a duplicate id", () => {
-    assert.deepEqual(checkManifest({ analyses: [{ id: ID }, { id: ID }] }).problems, [`analyses[1].id duplicates ${ID}`]);
+    assert.deepEqual(checkManifest({ analyses: [{ id: ID, note: FIXTURE_NOTE }, { id: ID, note: FIXTURE_NOTE }] }).problems, [
+      `analyses[1].id duplicates ${ID}`,
+    ]);
+  });
+});
+
+describe("the manifest note (checkNote, applied by checkManifest)", () => {
+  const entryProblems = (note) => checkManifest({ analyses: [{ id: ID, note }] }).problems;
+
+  it("requires a note on every entry, and returns notes only for valid entries", () => {
+    assert.deepEqual(checkManifest({ analyses: [{ id: ID }] }).problems, ['missing key "analyses[0].note"']);
+    const result = checkManifest({ analyses: [{ id: ID, note: FIXTURE_NOTE }, { id: OTHER_ID }, { id: "x", note: FIXTURE_NOTE }, { id: ID, note: "Again." }] });
+    assert.deepEqual(result.problems, [
+      'missing key "analyses[1].note"',
+      'analyses[2].id "x" is not a lowercase canonical UUID',
+      `analyses[3].id duplicates ${ID}`,
+    ]);
+    assert.deepEqual(result.notes, notesRecord({ [ID]: FIXTURE_NOTE }));
+    assert.deepEqual(checkManifest({ analyses: [{ id: OTHER_ID, note: " x" }] }).notes, notesRecord({}));
+  });
+
+  it("refuses a note that is not a string", () => {
+    for (const note of [7, null, ["x"]]) assert.deepEqual(entryProblems(note), ["analyses[0].note must be a string"], JSON.stringify(note));
+  });
+
+  it("refuses an empty note", () => {
+    for (const note of ["", "   "]) assert.deepEqual(entryProblems(note), ["analyses[0].note must not be empty"], JSON.stringify(note));
+  });
+
+  it("refuses a note that starts or ends with whitespace", () => {
+    for (const note of [" x", "x "]) {
+      assert.deepEqual(entryProblems(note), ["analyses[0].note must not start or end with whitespace"], JSON.stringify(note));
+    }
+  });
+
+  it("counts code points, not UTF-16 units: 600 are accepted, 601 refused", () => {
+    assert.equal(rules.NOTE_MAX, 600);
+    const at600 = "\u{1F600}".repeat(300) + "a".repeat(300);
+    assert.equal(at600.length, 900, "900 UTF-16 units");
+    assert.deepEqual(entryProblems(at600), []);
+    assert.deepEqual(entryProblems(`${at600}a`), ["analyses[0].note has 601 characters; at most 600 (code points)"]);
+  });
+
+  it("refuses a line break or any other control character", () => {
+    for (const c of ["\n", "\r", "\t", "\u0085", "\u2028", "\u2029"]) {
+      assert.deepEqual(entryProblems(`one${c}two`), ["analyses[0].note must be one line, with no control characters"], JSON.stringify(c));
+    }
+  });
+
+  it("refuses invisible format characters (Unicode Cf): a byte order mark inside the text, a bidi override, a zero-width space", () => {
+    for (const c of ["\uFEFF", "\u202E", "\u200B"]) {
+      assert.deepEqual(entryProblems(`one${c}two`), ["analyses[0].note must not contain invisible format characters (Unicode category Cf)"], JSON.stringify(c));
+    }
+  });
+
+  it("refuses a UUID in either case, even the analysis's own id", () => {
+    for (const uuid of [OTHER_ID, OTHER_ID.toUpperCase(), ID]) {
+      assert.deepEqual(entryProblems(`See ${uuid}.`), ["analyses[0].note contains a UUID"], uuid);
+    }
+  });
+
+  it("refuses any hit of the exact scan, naming the pattern and the match", () => {
+    assert.deepEqual(entryProblems("Ask owner@example.com."), ['analyses[0].note: email "owner@example.com"']);
+    assert.deepEqual(entryProblems("See https://example.com."), ['analyses[0].note: URL "https://"']);
+    assert.deepEqual(entryProblems("Read /Users/someone/data.csv"), ['analyses[0].note: absolute path "/Users/someone/data.csv"']);
+  });
+
+  it("lists every problem of a note, in order", () => {
+    assert.deepEqual(rules.checkNote(` See ${OTHER_ID}\tor\u200B owner@example.com`, "the note"), [
+      "the note must not start or end with whitespace",
+      "the note must be one line, with no control characters",
+      "the note must not contain invisible format characters (Unicode category Cf)",
+      "the note contains a UUID",
+      'the note: email "owner@example.com"',
+    ]);
+  });
+
+  it("accepts the demo's note and the fixtures' note", () => {
+    assert.deepEqual(entryProblems(DEMO_NOTE), []);
+    assert.deepEqual(rules.checkNote(FIXTURE_NOTE, "the note"), []);
   });
 });
 
@@ -397,7 +494,7 @@ describe("checkAnalysis (the SnapshotAnalysis contract)", () => {
     }
     assert.deepEqual(checkAnalysis(analysisWith((a) => a.chart_paths.push(a.chart_paths[0])), ID), [`chart_paths[2] duplicates "${PNG}"`]);
     // _safe_name keeps Unicode word characters.
-    assert.deepEqual(checkAnalysis(analysisWith((a) => (a.chart_paths = [`${ID}_histogram_größe.png`])), ID), []);
+    assert.deepEqual(checkAnalysis(analysisWith((a) => (a.chart_paths = [`${ID}_histogram_gr\u00f6\u00dfe.png`])), ID), []);
   });
 
   it("rejects a chart name with an inner dot: x.png.html would become x.png once chartUrl drops .html", () => {
@@ -634,6 +731,77 @@ describe("isPlotlyBundle", () => {
   });
 });
 
+describe("scanText (the exact scan patterns)", () => {
+  it("finds each kind of leak", () => {
+    const cases = {
+      "/Users/someone/data/synthetic.csv": "absolute path",
+      "see /var/folders/x/y": "absolute path",
+      "~/Backups/data": "home path",
+      "C:\\data\\x.csv": "Windows path",
+      "https://example.com/x": "URL",
+      "s3://bucket/key": "URL",
+      "mailto:someone": "mailto, javascript or file URI",
+      "javascript:alert(1)": "mailto, javascript or file URI",
+      "file:/etc/x": "mailto, javascript or file URI",
+      "data:text/html;base64,AAAA": "data URI",
+      "owner@example.com": "email",
+      "sk-ant-api03-abc": "key-like string",
+      "sb_secret_abc": "key-like string",
+      "lsv2_pt_abc": "key-like string",
+      "ghp_abc": "key-like string",
+      // AWS's full access key ID format, built at runtime: a contiguous one in
+      // the source would trip secret scanning on push.
+      ["AKIA" + "ABCDEFGHIJKLMNOP"]: "key-like string",
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0": "key-like string",
+      "-----BEGIN PRIVATE KEY-----": "key-like string",
+      "abcdefghijklmnopqrst.supabase.co": "service host",
+      "mcp.supabase.com": "service host",
+      "project_ref": "service host",
+      "api.anthropic.com": "service host",
+      "smith.langchain.com": "service host",
+      "localhost": "local host",
+      "127.0.0.1": "local host",
+      "[::1]": "local host",
+      "10.0.0.5": "IPv4 address",
+    };
+    for (const [text, pattern] of Object.entries(cases)) {
+      assert.ok(
+        rules.scanText(`before ${text} after`).some((hit) => hit.pattern === pattern),
+        `${JSON.stringify(text)} should hit ${pattern}; got ${JSON.stringify(rules.scanText(text))}`,
+      );
+    }
+  });
+
+  it("ignores ordinary analysis text", () => {
+    for (const text of [
+      "available data: the Cleaner",
+      "units_sold/discount_pct and/or Y/N, N/A, 1/2, 50/50, mg/dL",
+      "$2,059\u2013$750,000 (r = 0.08), skewness -0.169, 2026-10-03",
+      "messy_data.csv",
+      "Matplotlib version3.8.0",
+      "e.g., 'median (4.7 mg/dL)'",
+      "notes: 'Needs review' 11 (10.9%)",
+    ]) {
+      assert.deepEqual(rules.scanText(text), [], text);
+    }
+  });
+
+  it("keeps no lastIndex state between calls: a shared pattern's lastIndex neither changes nor shifts the scan", () => {
+    const text = "Ask owner@example.com.";
+    const email = rules.SCAN_PATTERNS.email;
+    const before = email.lastIndex;
+    email.lastIndex = text.length + 5; // as a stray .exec() elsewhere would leave it
+    try {
+      for (let i = 0; i < 2; i += 1) {
+        assert.deepEqual(rules.scanText(text), [{ pattern: "email", match: "owner@example.com", index: 4 }]);
+      }
+      assert.equal(email.lastIndex, text.length + 5);
+    } finally {
+      email.lastIndex = before;
+    }
+  });
+});
+
 describe("checkFileAccounting", () => {
   const file = (name) => ({ name, kind: "file" });
   const dir = (name) => ({ name, kind: "dir" });
@@ -733,10 +901,17 @@ describe("readSnapshot (temporary snapshot directories)", () => {
     const snapshot = readSnapshot(root, {});
     assert.equal(snapshot.dir, path.join(root, "snapshot"));
     assert.deepEqual(snapshot.ids, [ID]);
+    assert.deepEqual(snapshot.notes, notesRecord({ [ID]: FIXTURE_NOTE }));
     assert.equal(snapshot.fixture, false);
     assert.deepEqual(snapshot.analyses, [validAnalysis()]);
     assert.deepEqual(snapshot.charts, [PNG, HTML]);
     assert.equal(snapshot.plotly, true);
+  });
+
+  it('returns the notes as a record with no inherited keys: no "constructor" or "__proto__" entry (Code Review #2)', () => {
+    const notes = readSnapshot(tempFrontend(validFiles()), {}).notes;
+    for (const key of ["constructor", "__proto__", "toString", "hasOwnProperty"]) assert.equal(notes[key], undefined, key);
+    assert.equal(Object.getPrototypeOf(notes), null);
   });
 
   it("fails on an HTML chart without plotly.min.js beside it", () => {
@@ -749,7 +924,7 @@ describe("readSnapshot (temporary snapshot directories)", () => {
   });
 
   it("works with no charts at all (no charts/ directory)", () => {
-    const files = { "manifest.json": { analyses: [{ id: ID }] }, [`analyses/${ID}.json`]: analysisWith((a) => (a.chart_paths = [])) };
+    const files = { "manifest.json": { analyses: [{ id: ID, note: FIXTURE_NOTE }] }, [`analyses/${ID}.json`]: analysisWith((a) => (a.chart_paths = [])) };
     assert.deepEqual(readSnapshot(tempFrontend(files), {}).charts, []);
   });
 
@@ -771,8 +946,17 @@ describe("readSnapshot (temporary snapshot directories)", () => {
     );
   });
 
+  it("fails on a manifest entry without a note, before the fixture guard", () => {
+    for (const manifest of [{ analyses: [{ id: ID }] }, { fixture: true, analyses: [{ id: ID }] }]) {
+      assert.throws(
+        () => readSnapshot(tempFrontend({ ...validFiles(), "manifest.json": manifest }), {}),
+        snapshotError('Snapshot: 1 problem in snapshot/manifest.json:\n  - missing key "analyses[0].note"'),
+      );
+    }
+  });
+
   it("applies the fixture guard", () => {
-    const files = { ...validFiles(), "manifest.json": { fixture: true, analyses: [{ id: ID }] } };
+    const files = { ...validFiles(), "manifest.json": { fixture: true, analyses: [{ id: ID, note: FIXTURE_NOTE }] } };
     assert.throws(() => readSnapshot(tempFrontend(files), {}), snapshotError(/is a test fixture/));
     assert.equal(readSnapshot(tempFrontend(files), { SNAPSHOT_ALLOW_FIXTURE: "1" }).fixture, true);
   });
@@ -866,10 +1050,11 @@ describe("readSnapshot (temporary snapshot directories)", () => {
     const files = {
       ...validFiles(ID),
       ...validFiles(OTHER_ID),
-      "manifest.json": { analyses: [{ id: ID }, { id: OTHER_ID }] },
+      "manifest.json": { analyses: [{ id: ID, note: FIXTURE_NOTE }, { id: OTHER_ID, note: "Another synthetic note." }] },
     };
     const snapshot = readSnapshot(tempFrontend(files), {});
     assert.deepEqual(snapshot.ids, [ID, OTHER_ID]);
+    assert.deepEqual(snapshot.notes, notesRecord({ [ID]: FIXTURE_NOTE, [OTHER_ID]: "Another synthetic note." }));
     assert.deepEqual(snapshot.charts, [PNG, HTML, `${OTHER_ID}_histogram_fixture_value.png`, `${OTHER_ID}_scatter_fixture_x_fixture_y.html`]);
   });
 });
@@ -880,6 +1065,7 @@ describe("the committed fixtures (e2e/fixtures/)", () => {
   it("e2e/fixtures/snapshot is valid and marked as a fixture", () => {
     const snapshot = read("e2e/fixtures/snapshot", { SNAPSHOT_ALLOW_FIXTURE: "1" });
     assert.deepEqual(snapshot.ids, [ID]);
+    assert.deepEqual(snapshot.notes, notesRecord({ [ID]: FIXTURE_NOTE }));
     assert.equal(snapshot.fixture, true);
     assert.deepEqual(snapshot.charts, [PNG, HTML]);
     assert.equal(snapshot.plotly, true);

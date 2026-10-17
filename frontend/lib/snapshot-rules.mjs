@@ -8,8 +8,10 @@
 // with no TypeScript step and the TS loader still gets its types.
 //
 // Layout of a snapshot directory:
-//   manifest.json          {"analyses":[{"id":"<lowercase canonical uuid>"}]};
-//                          a test fixture also carries "fixture": true
+//   manifest.json          {"analyses":[{"id":"<lowercase canonical uuid>","note":"<the About-this-example text>"}]};
+//                          a test fixture also carries "fixture": true. A note is one line of at
+//                          most 600 code points, with no control or invisible format (Cf)
+//                          character, UUID or scan hit.
 //   analyses/<id>.json     one SnapshotAnalysis (lib/types.ts) per id: exactly
 //                          the keys PUBLISHED defines, at every level
 //   charts/<file>          exactly the files the analyses' chart_paths list,
@@ -53,6 +55,15 @@ const UUID_SHAPED = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 const CHART_NAME = new RegExp(String.raw`^[\p{L}\p{N}_][\p{L}\p{N}_-]*\.(?:png|html)$`, "u");
 const PLOTLY = "plotly.min.js";
 const PLOTLY_HEADER = /^\/\*+[\s*]*plotly\.js v\d/;
+// A manifest note's length limit, in code points.
+export const NOTE_MAX = 600;
+// Control characters (line breaks and tabs included) and the two Unicode line
+// separators: a note is one line. (A RegExp call, as CHART_NAME is; not
+// global, so .test keeps no state.)
+const CONTROL = new RegExp("[\\p{Cc}\\u2028\\u2029]", "u");
+// Invisible format characters (Unicode category Cf): a byte order mark, the
+// bidi controls, zero-width characters (owner ruling, 2026-10-17).
+const FORMAT = new RegExp("\\p{Cf}", "u");
 // macOS Finder metadata; gitignored, so it can never reach the repo.
 const IGNORED = new Set([".DS_Store"]);
 
@@ -172,12 +183,17 @@ export function checkFixtureGuard(isFixture, env, manifestLabel) {
 
 /**
  * @param {unknown} value the parsed manifest.json
- * @returns {{ ids: string[], fixture: boolean, problems: string[] }}
+ * @returns {{ ids: string[], notes: Record<string, string>, fixture: boolean, problems: string[] }}
+ *   notes: each valid entry's note, by id
  */
 export function checkManifest(value) {
   /** @type {string[]} */
   const ids = [];
-  if (!isPlainObject(value)) return { ids, fixture: false, problems: ["must be a JSON object"] };
+  // No prototype, so no key is inherited: a lookup of an id that is not in the
+  // manifest (such as "constructor" or "__proto__") finds nothing.
+  /** @type {Record<string, string>} */
+  const notes = Object.create(null);
+  if (!isPlainObject(value)) return { ids, notes, fixture: false, problems: ["must be a JSON object"] };
   const problems = unknownKeys(value, ["analyses", "fixture"], "");
   if ("fixture" in value && value.fixture !== true) problems.push('"fixture" must be true when present');
   const analyses = value.analyses;
@@ -191,22 +207,57 @@ export function checkManifest(value) {
         problems.push(`${where} must be an object`);
         return;
       }
-      problems.push(...unknownKeys(entry, ["id"], where));
+      problems.push(...unknownKeys(entry, ["id", "note"], where));
+      /** @type {string | null} */
+      let accepted = null;
       if (!("id" in entry)) {
         problems.push(`missing key "${where}.id"`);
+      } else {
+        const id = entry.id;
+        if (typeof id !== "string" || !CANONICAL_UUID.test(id)) {
+          problems.push(`${where}.id ${JSON.stringify(id)} is not a lowercase canonical UUID`);
+        } else if (ids.includes(id)) {
+          problems.push(`${where}.id duplicates ${id}`);
+        } else {
+          ids.push(id);
+          accepted = id;
+        }
+      }
+      if (!("note" in entry)) {
+        problems.push(`missing key "${where}.note"`);
         return;
       }
-      const id = entry.id;
-      if (typeof id !== "string" || !CANONICAL_UUID.test(id)) {
-        problems.push(`${where}.id ${JSON.stringify(id)} is not a lowercase canonical UUID`);
-      } else if (ids.includes(id)) {
-        problems.push(`${where}.id duplicates ${id}`);
-      } else {
-        ids.push(id);
-      }
+      const noteProblems = checkNote(entry.note, `${where}.note`);
+      problems.push(...noteProblems);
+      if (accepted !== null && noteProblems.length === 0) notes[accepted] = /** @type {string} */ (entry.note);
     });
   }
-  return { ids, fixture: value.fixture === true, problems };
+  return { ids, notes, fixture: value.fixture === true, problems };
+}
+
+/**
+ * Problems with an "About this example" note, the owner's text the analysis
+ * page shows above the results: one line of at most NOTE_MAX code points, with
+ * no surrounding whitespace, no control character, no invisible format
+ * character (Unicode Cf), no UUID and no hit of the exact scan.
+ * @param {unknown} value
+ * @param {string} where what the messages call the note
+ * @returns {string[]}
+ */
+export function checkNote(value, where) {
+  if (typeof value !== "string") return [`${where} must be a string`];
+  if (value.trim() === "") return [`${where} must not be empty`];
+  /** @type {string[]} */
+  const problems = [];
+  if (value !== value.trim()) problems.push(`${where} must not start or end with whitespace`);
+  // Code points, not UTF-16 units (spreading a string fails tsc's ES5 check).
+  const length = Array.from(value).length;
+  if (length > NOTE_MAX) problems.push(`${where} has ${length} characters; at most ${NOTE_MAX} (code points)`);
+  if (CONTROL.test(value)) problems.push(`${where} must be one line, with no control characters`);
+  if (FORMAT.test(value)) problems.push(`${where} must not contain invisible format characters (Unicode category Cf)`);
+  if (findForeignUuids(value, null).length > 0) problems.push(`${where} contains a UUID`);
+  for (const hit of scanText(value)) problems.push(`${where}: ${hit.pattern} ${JSON.stringify(hit.match)}`);
+  return problems;
 }
 
 // ---------------------------------------------------------------------------
@@ -568,6 +619,40 @@ export function isPlotlyBundle(text) {
 }
 
 // ---------------------------------------------------------------------------
+// The exact scan
+// ---------------------------------------------------------------------------
+
+// The exact scan, applied to every key and string of the export's published
+// projection and to each manifest note. Each pattern is tested both ways in
+// lib/snapshot-rules.test.mjs. The regexes are global and shared, so never
+// call .test() or .exec() on them (lastIndex state). Use scanText, which uses
+// matchAll on a fresh copy of each.
+export const SCAN_PATTERNS = Object.freeze({
+  "absolute path": /(?<![\w.:/~-])\/(?:[\w.-]+\/)+[\w.-]*/g,
+  "home path": /(?<![\w.-])~\/[\w.-]/g,
+  "Windows path": /\b[A-Za-z]:\\[\w.-]/g,
+  URL: /\b[a-z][a-z0-9+.-]*:\/\//gi,
+  "mailto, javascript or file URI": /\b(?:mailto:|javascript:|file:\/)/gi,
+  "data URI": /\bdata:[a-z]+\/[a-z0-9.+-]+[;,]/gi,
+  email: /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g,
+  "key-like string": /(?:\b(?:sk-ant-|sk-proj-|sb_secret_|sb_publishable_|lsv2_|ghp_|gho_|ghs_|github_pat_)|\bxox[abprs]-|\bAKIA[0-9A-Z]{16}\b|\beyJ[\w-]{10,}\.[\w-]{10,}|-----BEGIN [A-Z ]+-----)/g,
+  "service host": /\b[a-z0-9-]+\.supabase\.(?:co|com|in)\b|\bproject_ref\b|\bsmith\.langchain\.com\b|\bapi\.anthropic\.com\b/gi,
+  "local host": /\blocalhost\b|\b127\.0\.0\.1\b|\b0\.0\.0\.0\b|\[::1\]/gi,
+  "IPv4 address": /\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b/g,
+});
+
+/**
+ * Every hit of the exact scan patterns in a text.
+ * @param {string} text
+ * @returns {{ pattern: string, match: string, index: number }[]}
+ */
+export function scanText(text) {
+  return Object.entries(SCAN_PATTERNS).flatMap(([pattern, re]) =>
+    Array.from(text.matchAll(new RegExp(re.source, re.flags)), (m) => ({ pattern, match: m[0], index: m.index ?? 0 })),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // File accounting
 // ---------------------------------------------------------------------------
 
@@ -639,6 +724,7 @@ export function checkFileAccounting(listing, expected) {
  * @property {string} dir absolute path of the snapshot directory
  * @property {string} label the directory relative to frontend/, for messages
  * @property {string[]} ids the manifest ids, in order
+ * @property {Record<string, string>} notes the manifest notes, by id
  * @property {boolean} fixture the manifest is a test fixture
  * @property {SnapshotAnalysis[]} analyses validated, in manifest order
  * @property {string[]} charts every listed chart file once, in manifest order
@@ -728,6 +814,7 @@ export function readSnapshot(frontendDir, env) {
     dir,
     label,
     ids: manifest.ids,
+    notes: manifest.notes,
     fixture: manifest.fixture,
     analyses,
     charts: Array.from(new Set((listedCharts ?? []).map((c) => c.name))),

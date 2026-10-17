@@ -30,6 +30,9 @@ const HTML_TEXT = `<!doctype html><html><head><meta charset="utf-8" /></head><bo
 const PLOTLY_TEXT = "/**\n* plotly.js v0.0.0 stand-in for the export tests: not plotly\n*/\n";
 const sha256 = (data) => crypto.createHash("sha256").update(data).digest("hex");
 const PLOTLY = { plotlySha256: sha256(PLOTLY_TEXT), plotlySize: Buffer.byteLength(PLOTLY_TEXT) };
+// The About-this-example note the tests export (one line; the rules accept it).
+const NOTE_TEXT = "Synthetic note for the export tests.";
+const USAGE_PATTERN = /Usage: node scripts\/export-snapshot\.mjs <analysis id> <base url> --note-file <path> \[--hide <chart file name>\]\.\.\./;
 
 // What GET /api/analysis/{id} returns for a finished run: published keys plus
 // keys the page never reads, a derived summary count of -1 (cleaning added a
@@ -65,7 +68,7 @@ function rawAnalysis() {
       technical_layer: {
         statistical_methodology: "Synthetic methodology; available data: the Cleaner's table.",
         code_blocks: ["print('synthetic')"],
-        limitations: "Synthetic limitations ($2,059–$750,000).",
+        limitations: "Synthetic limitations ($2,059\u2013$750,000).",
         sophistication_suggestions: "Synthetic suggestions.",
         self_evaluation_notes: "Synthetic notes.",
         lead_override_note: null,
@@ -151,6 +154,7 @@ function runExport(backend, options = {}) {
     baseUrl: backend.base,
     hide: [HIDDEN],
     frontendDir: options.frontendDir ?? tempFrontend(),
+    note: NOTE_TEXT,
     timeoutMs: 2000,
     log: () => {},
     ...PLOTLY,
@@ -185,18 +189,19 @@ async function expectRefused(backend, pattern, options = {}) {
 describe("parseArgs", () => {
   const BASE = "http://127.0.0.1:8000";
 
-  it("reads the id, the base URL and every --hide", () => {
-    const args = exporter.parseArgs([ID, BASE, "--hide", HIDDEN, "--hide", PNG]);
+  it("reads the id, the base URL, the note file and every --hide", () => {
+    const args = exporter.parseArgs([ID, BASE, "--note-file", "note.txt", "--hide", HIDDEN, "--hide", PNG]);
     assert.equal(args.id, ID);
     assert.equal(args.baseUrl.href, `${BASE}/`);
+    assert.equal(args.noteFile, "note.txt");
     assert.deepEqual(args.hide, [HIDDEN, PNG]);
-    assert.deepEqual(exporter.parseArgs([ID, "http://localhost:8000"]).hide, []);
-    assert.equal(exporter.parseArgs([ID, "http://[::1]:8000"]).baseUrl.hostname, "[::1]");
+    assert.deepEqual(exporter.parseArgs([ID, "http://localhost:8000", "--note-file", "x"]).hide, []);
+    assert.equal(exporter.parseArgs(["--note-file", "x", ID, "http://[::1]:8000"]).baseUrl.hostname, "[::1]");
   });
 
   it("refuses an id that is not a lowercase canonical UUID", () => {
     for (const id of [ID.toUpperCase(), `{${ID}}`, ID.replace(/-/g, ""), ID.slice(1), "x"]) {
-      assert.throws(() => exporter.parseArgs([id, BASE]), { name: "UsageError", message: /lowercase canonical UUID/ });
+      assert.throws(() => exporter.parseArgs([id, BASE, "--note-file", "x"]), { name: "UsageError", message: /lowercase canonical UUID/ });
     }
   });
 
@@ -212,7 +217,7 @@ describe("parseArgs", () => {
       "http://127.0.0.1:8000/#x",
       "127.0.0.1:8000",
     ]) {
-      assert.throws(() => exporter.parseArgs([ID, base]), { name: "UsageError" }, base);
+      assert.throws(() => exporter.parseArgs([ID, base, "--note-file", "x"]), { name: "UsageError" }, base);
     }
   });
 
@@ -228,64 +233,94 @@ describe("parseArgs", () => {
       [ID, BASE, "--replace"],
       [ID, BASE, `--hide=${HIDDEN}`],
     ]) {
-      assert.throws(() => exporter.parseArgs(argv), { name: "UsageError" }, JSON.stringify(argv));
+      assert.throws(() => exporter.parseArgs([...argv, "--note-file", "x"]), { name: "UsageError" }, JSON.stringify(argv));
+    }
+  });
+
+  it("requires --note-file exactly once, with a path (and no --note-file=\u2026)", () => {
+    for (const [argv, message] of [
+      [[ID, BASE], "--note-file <path> is required (the About-this-example note for the manifest)"],
+      [[ID, BASE, "--note-file"], "--note-file needs a path"],
+      [[ID, BASE, "--note-file", "a", "--note-file", "b"], "--note-file is given twice"],
+      // An option is not a path (Code Review #4).
+      [[ID, BASE, "--note-file", "--hide", HIDDEN], '--note-file needs a path; got "--hide"'],
+      [[ID, BASE, "--note-file", "-"], '--note-file needs a path; got "-"'],
+      [[ID, BASE, "--note-file=x"], 'unknown option "--note-file=x"'],
+    ]) {
+      assert.throws(() => exporter.parseArgs(argv), { name: "UsageError", message }, JSON.stringify(argv));
     }
   });
 });
 
-describe("scanText (the exact scan patterns)", () => {
-  it("finds each kind of leak", () => {
-    const cases = {
-      "/Users/someone/data/synthetic.csv": "absolute path",
-      "see /var/folders/x/y": "absolute path",
-      "~/Backups/data": "home path",
-      "C:\\data\\x.csv": "Windows path",
-      "https://example.com/x": "URL",
-      "s3://bucket/key": "URL",
-      "mailto:someone": "mailto, javascript or file URI",
-      "javascript:alert(1)": "mailto, javascript or file URI",
-      "file:/etc/x": "mailto, javascript or file URI",
-      "data:text/html;base64,AAAA": "data URI",
-      "owner@example.com": "email",
-      "sk-ant-api03-abc": "key-like string",
-      "sb_secret_abc": "key-like string",
-      "lsv2_pt_abc": "key-like string",
-      "ghp_abc": "key-like string",
-      // AWS's full access key ID format, built at runtime: a contiguous one in
-      // the source would trip secret scanning on push.
-      ["AKIA" + "ABCDEFGHIJKLMNOP"]: "key-like string",
-      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0": "key-like string",
-      "-----BEGIN PRIVATE KEY-----": "key-like string",
-      "abcdefghijklmnopqrst.supabase.co": "service host",
-      "mcp.supabase.com": "service host",
-      "project_ref": "service host",
-      "api.anthropic.com": "service host",
-      "smith.langchain.com": "service host",
-      "localhost": "local host",
-      "127.0.0.1": "local host",
-      "[::1]": "local host",
-      "10.0.0.5": "IPv4 address",
-    };
-    for (const [text, pattern] of Object.entries(cases)) {
-      assert.ok(
-        exporter.scanText(`before ${text} after`).some((hit) => hit.pattern === pattern),
-        `${JSON.stringify(text)} should hit ${pattern}; got ${JSON.stringify(exporter.scanText(text))}`,
-      );
+describe("readNoteFile (the note for the manifest)", () => {
+  function noteFile(content) {
+    const file = path.join(tempFrontend(), "note.txt");
+    fs.writeFileSync(file, content);
+    return file;
+  }
+
+  it("returns the note, without one trailing newline (LF or CRLF)", () => {
+    for (const ending of ["", "\n", "\r\n"]) {
+      assert.equal(exporter.readNoteFile(noteFile(`${NOTE_TEXT}${ending}`)), NOTE_TEXT, JSON.stringify(ending));
     }
   });
 
-  it("ignores ordinary analysis text", () => {
-    for (const text of [
-      "available data: the Cleaner",
-      "units_sold/discount_pct and/or Y/N, N/A, 1/2, 50/50, mg/dL",
-      "$2,059–$750,000 (r = 0.08), skewness -0.169, 2026-10-03",
-      "messy_data.csv",
-      "Matplotlib version3.8.0",
-      "e.g., 'median (4.7 mg/dL)'",
-      "notes: 'Needs review' 11 (10.9%)",
+  it("drops a leading byte order mark", () => {
+    assert.equal(exporter.readNoteFile(noteFile(Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(`${NOTE_TEXT}\n`)]))), NOTE_TEXT);
+  });
+
+  it("refuses a byte order mark anywhere else: only the leading one is dropped", () => {
+    const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+    const file = noteFile(Buffer.concat([bom, Buffer.from("one"), bom, Buffer.from("two\n")]));
+    assert.throws(() => exporter.readNoteFile(file), {
+      name: "UsageError",
+      message: `--note-file ${file}:\n  - the note must not contain invisible format characters (Unicode category Cf)`,
+    });
+  });
+
+  it("strips only one newline: what is left must still pass the rule", () => {
+    const file = noteFile("x\n\n");
+    assert.throws(() => exporter.readNoteFile(file), {
+      name: "UsageError",
+      message: `--note-file ${file}:\n  - the note must not start or end with whitespace\n  - the note must be one line, with no control characters`,
+    });
+  });
+
+  it("refuses bytes that are not UTF-8, and a file it cannot read", () => {
+    const bad = noteFile(Buffer.from([0xff]));
+    assert.throws(() => exporter.readNoteFile(bad), { name: "UsageError", message: `--note-file ${bad}: not valid UTF-8` });
+    const missing = path.join(tempFrontend(), "missing.txt");
+    assert.throws(() => exporter.readNoteFile(missing), { name: "UsageError", message: `--note-file ${missing}: cannot be read (ENOENT)` });
+  });
+
+  it("refuses a note that breaks the rule: a UUID, an email", () => {
+    for (const [content, problem] of [
+      [`See ${OTHER_ID}.\n`, "the note contains a UUID"],
+      ["Ask owner@example.com.\n", 'the note: email "owner@example.com"'],
     ]) {
-      assert.deepEqual(exporter.scanText(text), [], text);
+      const file = noteFile(content);
+      assert.throws(() => exporter.readNoteFile(file), { name: "UsageError", message: `--note-file ${file}:\n  - ${problem}` });
     }
+  });
+});
+
+describe("manifestJson (the one manifest serializer)", () => {
+  it("writes each entry's id and note, indented by two spaces, with a final newline", () => {
+    assert.equal(
+      exporter.manifestJson([{ id: ID, note: NOTE_TEXT }]),
+      `{\n  "analyses": [\n    {\n      "id": "${ID}",\n      "note": "${NOTE_TEXT}"\n    }\n  ]\n}\n`,
+    );
+  });
+
+  it("keeps only the id and the note, in that order", () => {
+    assert.equal(
+      exporter.manifestJson([{ note: "n", extra: 1, id: ID }]),
+      `{\n  "analyses": [\n    {\n      "id": "${ID}",\n      "note": "n"\n    }\n  ]\n}\n`,
+    );
+  });
+
+  it("without a note it writes M2b.3a's form", () => {
+    assert.equal(exporter.manifestJson([{ id: ID }]), `{\n  "analyses": [\n    {\n      "id": "${ID}"\n    }\n  ]\n}\n`);
   });
 });
 
@@ -293,20 +328,27 @@ describe("exportSnapshot", () => {
   it("writes exactly the published projection, the kept charts and plotly.min.js, then moves the folder into place", async () => {
     const backend = await fakeBackend();
     const frontendDir = tempFrontend();
-    const report = await runExport(backend, { frontendDir });
+    const lines = [];
+    const report = await runExport(backend, { frontendDir, log: (line) => lines.push(line) });
     const snapshotDir = path.join(frontendDir, "snapshot");
     assert.deepEqual(filesUnder(snapshotDir), ["analyses/" + `${ID}.json`, `charts/${HTML}`, `charts/${PNG}`, "charts/plotly.min.js", "manifest.json"].sort());
     assert.equal(fs.existsSync(path.join(frontendDir, ".snapshot-export")), false);
 
     const expected = projectPublished({ ...rawAnalysis(), chart_paths: [PNG, HTML] });
     assert.equal(fs.readFileSync(path.join(snapshotDir, "analyses", `${ID}.json`), "utf8"), `${JSON.stringify(expected, null, 2)}\n`);
-    assert.equal(fs.readFileSync(path.join(snapshotDir, "manifest.json"), "utf8"), `${JSON.stringify({ analyses: [{ id: ID }] }, null, 2)}\n`);
+    // The manifest's exact bytes, written out by hand (not through manifestJson).
+    assert.equal(
+      fs.readFileSync(path.join(snapshotDir, "manifest.json"), "utf8"),
+      `{\n  "analyses": [\n    {\n      "id": "${ID}",\n      "note": "${NOTE_TEXT}"\n    }\n  ]\n}\n`,
+    );
     assert.ok(fs.readFileSync(path.join(snapshotDir, "charts", PNG)).equals(PNG_BYTES));
     assert.equal(fs.readFileSync(path.join(snapshotDir, "charts", HTML), "utf8"), HTML_TEXT);
     assert.equal(fs.readFileSync(path.join(snapshotDir, "charts", "plotly.min.js"), "utf8"), PLOTLY_TEXT);
 
     const snapshot = readSnapshot(frontendDir, {});
     assert.deepEqual([snapshot.ids, snapshot.charts, snapshot.plotly], [[ID], [PNG, HTML], true]);
+    assert.deepEqual(snapshot.notes, Object.assign(Object.create(null), { [ID]: NOTE_TEXT }));
+    assert.ok(lines.includes(`note: ${JSON.stringify(NOTE_TEXT)}`), "the report prints the note it wrote");
 
     // The hidden chart is never fetched, and only GET routes are used.
     assert.equal(backend.requests.includes(`/charts/${HIDDEN}`), false);
@@ -367,6 +409,20 @@ describe("exportSnapshot", () => {
     assert.deepEqual(filesUnder(path.join(b, "snapshot")), files);
     for (const rel of files) {
       assert.ok(fs.readFileSync(path.join(a, "snapshot", rel)).equals(fs.readFileSync(path.join(b, "snapshot", rel))), rel);
+    }
+  });
+
+  it("refuses an invalid note before any request, and writes nothing", async () => {
+    for (const note of [undefined, "", "two\nlines", `See ${OTHER_ID}.`]) {
+      const backend = await fakeBackend();
+      const frontendDir = tempFrontend();
+      await assert.rejects(runExport(backend, { frontendDir, note }), (error) => {
+        assert.equal(error.name, "UsageError", String(error));
+        assert.match(error.message, /^the note must be a valid About-this-example note:\n {2}- the note /);
+        return true;
+      });
+      assert.deepEqual(backend.requests, [], JSON.stringify(note));
+      nothingWritten(frontendDir);
     }
   });
 
@@ -519,32 +575,60 @@ describe("the command line", () => {
     });
   }
 
-  it("exits 2 with the usage on a bad argument, before any request or file access", () => {
-    const result = spawnSync(process.execPath, [SCRIPT, ID.toUpperCase(), "http://127.0.0.1:1"], { env: { PATH: process.env.PATH ?? "" }, encoding: "utf8" });
-    assert.equal(result.status, 2);
-    assert.match(result.stderr, /lowercase canonical UUID/);
-    assert.match(result.stderr, /Usage: node scripts\/export-snapshot\.mjs <analysis id> <base url> \[--hide <chart file name>\]\.\.\./);
-  });
-
-  it("exports into the frontend/ it sits in, and exits 1 with its message on a failure", async () => {
-    // A temporary frontend/ holding copies of the script and the rules module;
-    // PNG-only charts, since the command line always pins plotly's real bundle.
+  // A temporary frontend/ holding copies of the script and the rules module.
+  function scriptLayout() {
     const root = tempFrontend();
     for (const rel of ["scripts/export-snapshot.mjs", "lib/snapshot-rules.mjs"]) {
       fs.mkdirSync(path.join(root, path.dirname(rel)), { recursive: true });
       fs.copyFileSync(path.join(FRONTEND, rel), path.join(root, rel));
     }
+    return root;
+  }
+
+  it("exits 2 with the usage on a bad argument, before any request or file access", () => {
+    const result = spawnSync(process.execPath, [SCRIPT, ID.toUpperCase(), "http://127.0.0.1:1"], { env: { PATH: process.env.PATH ?? "" }, encoding: "utf8" });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /lowercase canonical UUID/);
+    assert.match(result.stderr, USAGE_PATTERN);
+  });
+
+  it("exits 2 with the usage when the note file is missing or breaks the rule, before any request or write", async () => {
+    const root = scriptLayout();
+    const backend = await fakeBackend();
+    const script = path.join(root, "scripts", "export-snapshot.mjs");
+    const twoLines = path.join(root, "two-lines.txt");
+    fs.writeFileSync(twoLines, "two\nlines\n");
+    for (const [args, pattern] of [
+      [[ID, backend.base.origin], /--note-file <path> is required/],
+      [[ID, backend.base.origin, "--note-file", twoLines], /two-lines\.txt:\n {2}- the note must be one line, with no control characters/],
+    ]) {
+      const result = await run(script, args, root);
+      assert.equal(result.status, 2, result.stderr);
+      assert.match(result.stderr, pattern);
+      assert.match(result.stderr, USAGE_PATTERN);
+    }
+    assert.deepEqual(backend.requests, []);
+    assert.equal(fs.existsSync(path.join(root, "snapshot")), false);
+    assert.equal(fs.existsSync(path.join(root, ".snapshot-export")), false);
+  });
+
+  it("exports into the frontend/ it sits in, and exits 1 with its message on a failure", async () => {
+    // PNG-only charts, since the command line always pins plotly's real bundle.
+    const root = scriptLayout();
+    const noteFile = path.join(root, "note.txt");
+    fs.writeFileSync(noteFile, `${NOTE_TEXT}\n`);
     const raw = { ...rawAnalysis(), chart_paths: [PNG, HIDDEN] };
     raw.insight_report.analyst_layer.chart_references = [PNG];
     const backend = await fakeBackend({ raw });
     const script = path.join(root, "scripts", "export-snapshot.mjs");
-    const ok = await run(script, [ID, backend.base.origin, "--hide", HIDDEN], root);
+    const ok = await run(script, [ID, backend.base.origin, "--note-file", noteFile, "--hide", HIDDEN], root);
     assert.equal(ok.status, 0, ok.stderr);
     assert.match(ok.stdout, /hidden charts \(1\): .*barchart_customer_id\.png/);
     assert.match(ok.stdout, /written into snapshot\/:/);
     assert.deepEqual(filesUnder(path.join(root, "snapshot")), [`analyses/${ID}.json`, `charts/${PNG}`, "manifest.json"]);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(root, "snapshot", "manifest.json"), "utf8")).analyses[0].note, NOTE_TEXT);
 
-    const again = await run(script, [ID, backend.base.origin, "--hide", HIDDEN], root);
+    const again = await run(script, [ID, backend.base.origin, "--note-file", noteFile, "--hide", HIDDEN], root);
     assert.equal(again.status, 1);
     assert.match(again.stderr, /^export-snapshot: snapshot\/ already exists/);
   });

@@ -7,8 +7,12 @@
 // against, and the charts named with --hide are left out.
 //
 // Usage, in frontend/:
-//   node scripts/export-snapshot.mjs <analysis id> <base url> [--hide <chart file name>]...
-// e.g. node scripts/export-snapshot.mjs 77faa166-… http://127.0.0.1:8000 --hide <id>_barchart_customer_id.png
+//   node scripts/export-snapshot.mjs <analysis id> <base url> --note-file <path> [--hide <chart file name>]...
+// e.g. node scripts/export-snapshot.mjs 77faa166-… http://127.0.0.1:8000 --note-file <note.txt> --hide <id>_barchart_customer_id.png
+// The note file holds the analysis's "About this example" note for the
+// manifest: one line of UTF-8 (one trailing newline is dropped) that passes the
+// rules' checkNote. Usage errors, the note file's included, exit 2 before any
+// request or write.
 //
 // Fail-closed: every response and file is checked before anything is
 // written; the projection must pass the build's own rules and an exact scan
@@ -28,15 +32,17 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   checkAnalysis,
+  checkNote,
   findForbiddenKeys,
   findForeignUuids,
   isPlotlyBundle,
   projectPublished,
   readSnapshot,
+  scanText,
   unpublishedEntries,
 } from "../lib/snapshot-rules.mjs";
 
-export const USAGE = "Usage: node scripts/export-snapshot.mjs <analysis id> <base url> [--hide <chart file name>]...";
+export const USAGE = "Usage: node scripts/export-snapshot.mjs <analysis id> <base url> --note-file <path> [--hide <chart file name>]...";
 
 // The shared plotly bundle the HTML charts load: plotly.js 2.30.0, as plotly
 // 5.20.0 writes it (decisions.md 2026-10-12). After a plotly upgrade the
@@ -65,23 +71,6 @@ const CAP = {
   plotly: 4 * KiB * KiB,
 };
 
-// The exact scan applied to every key and string of the published projection
-// (any hit fails) and of the dropped fields (reported). Each pattern is tested
-// both ways in export-snapshot.test.mjs.
-export const SCAN_PATTERNS = Object.freeze({
-  "absolute path": /(?<![\w.:/~-])\/(?:[\w.-]+\/)+[\w.-]*/g,
-  "home path": /(?<![\w.-])~\/[\w.-]/g,
-  "Windows path": /\b[A-Za-z]:\\[\w.-]/g,
-  URL: /\b[a-z][a-z0-9+.-]*:\/\//gi,
-  "mailto, javascript or file URI": /\b(?:mailto:|javascript:|file:\/)/gi,
-  "data URI": /\bdata:[a-z]+\/[a-z0-9.+-]+[;,]/gi,
-  email: /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g,
-  "key-like string": /(?:\b(?:sk-ant-|sk-proj-|sb_secret_|sb_publishable_|lsv2_|ghp_|gho_|ghs_|github_pat_)|\bxox[abprs]-|\bAKIA[0-9A-Z]{16}\b|\beyJ[\w-]{10,}\.[\w-]{10,}|-----BEGIN [A-Z ]+-----)/g,
-  "service host": /\b[a-z0-9-]+\.supabase\.(?:co|com|in)\b|\bproject_ref\b|\bsmith\.langchain\.com\b|\bapi\.anthropic\.com\b/gi,
-  "local host": /\blocalhost\b|\b127\.0\.0\.1\b|\b0\.0\.0\.0\b|\[::1\]/gi,
-  "IPv4 address": /\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b/g,
-});
-
 export class UsageError extends Error {
   /** @param {string} message */
   constructor(message) {
@@ -104,13 +93,15 @@ export class ExportError extends Error {
 
 /**
  * @param {string[]} argv the arguments after the script name
- * @returns {{ id: string, baseUrl: URL, hide: string[] }}
+ * @returns {{ id: string, baseUrl: URL, hide: string[], noteFile: string }}
  */
 export function parseArgs(argv) {
   /** @type {string[]} */
   const positional = [];
   /** @type {string[]} */
   const hide = [];
+  /** @type {string | undefined} */
+  let noteFile;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--hide") {
@@ -119,6 +110,13 @@ export function parseArgs(argv) {
       if (!CHART_NAME.test(name)) throw new UsageError(`--hide ${JSON.stringify(name)} is not a chart file name (a plain .png or .html name)`);
       if (hide.includes(name)) throw new UsageError(`--hide ${name} is given twice`);
       hide.push(name);
+      i += 1;
+    } else if (arg === "--note-file") {
+      const file = argv[i + 1];
+      if (file === undefined) throw new UsageError("--note-file needs a path");
+      if (file.startsWith("-")) throw new UsageError(`--note-file needs a path; got ${JSON.stringify(file)}`);
+      if (noteFile !== undefined) throw new UsageError("--note-file is given twice");
+      noteFile = file;
       i += 1;
     } else if (arg.startsWith("-")) {
       throw new UsageError(`unknown option ${JSON.stringify(arg)}`);
@@ -129,7 +127,47 @@ export function parseArgs(argv) {
   if (positional.length !== 2) throw new UsageError(`expected an analysis id and a base URL; got ${positional.length} argument(s)`);
   const [id, base] = positional;
   if (!CANONICAL_UUID.test(id)) throw new UsageError(`the analysis id must be a lowercase canonical UUID; got ${JSON.stringify(id)}`);
-  return { id, baseUrl: loopbackUrl(base), hide };
+  const baseUrl = loopbackUrl(base);
+  if (noteFile === undefined) throw new UsageError("--note-file <path> is required (the About-this-example note for the manifest)");
+  return { id, baseUrl, hide, noteFile };
+}
+
+/**
+ * The analysis's "About this example" note, read from a UTF-8 file: exactly
+ * one trailing newline (LF or CRLF) is dropped, and the rest must pass the
+ * rules' checkNote.
+ * @param {string} file
+ * @returns {string}
+ */
+export function readNoteFile(file) {
+  let bytes;
+  try {
+    bytes = fs.readFileSync(file);
+  } catch (error) {
+    throw new UsageError(`--note-file ${file}: cannot be read (${/** @type {NodeJS.ErrnoException} */ (error).code ?? "error"})`);
+  }
+  let text;
+  try {
+    // Strict UTF-8; a leading byte order mark is dropped (ignoreBOM defaults to false).
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new UsageError(`--note-file ${file}: not valid UTF-8`);
+  }
+  const note = text.endsWith("\r\n") ? text.slice(0, -2) : text.endsWith("\n") ? text.slice(0, -1) : text;
+  const problems = checkNote(note, "the note");
+  if (problems.length > 0) throw new UsageError(`--note-file ${file}:\n  - ${problems.join("\n  - ")}`);
+  return note;
+}
+
+/**
+ * manifest.json's bytes: each entry's id and note, as two-space JSON with a
+ * final newline. The one serializer: the export writes the manifest with it,
+ * and so was the committed manifest, so a re-export reproduces it.
+ * @param {{ id: string, note?: string }[]} entries
+ * @returns {string}
+ */
+export function manifestJson(entries) {
+  return `${JSON.stringify({ analyses: entries.map(({ id, note }) => ({ id, note })) }, null, 2)}\n`;
 }
 
 /**
@@ -154,19 +192,8 @@ function loopbackUrl(value) {
 }
 
 // ---------------------------------------------------------------------------
-// The scan
+// The scan (the patterns and scanText live in lib/snapshot-rules.mjs)
 // ---------------------------------------------------------------------------
-
-/**
- * Every hit of the exact scan patterns in a text.
- * @param {string} text
- * @returns {{ pattern: string, match: string, index: number }[]}
- */
-export function scanText(text) {
-  return Object.entries(SCAN_PATTERNS).flatMap(([pattern, re]) =>
-    Array.from(text.matchAll(re), (m) => ({ pattern, match: m[0], index: m.index ?? 0 })),
-  );
-}
 
 /**
  * The scan over every key and string of a value; a key's hits are reported
@@ -296,6 +323,7 @@ async function getJson(baseUrl, route, cap, timeoutMs) {
  * @param {string} options.id the analysis id (lowercase canonical UUID)
  * @param {URL | string} options.baseUrl the local backend (plain http on a loopback host)
  * @param {string[]} [options.hide] chart file names to leave out
+ * @param {string} options.note the analysis's "About this example" note for the manifest (checked by checkNote)
  * @param {string} options.frontendDir the frontend/ folder to write snapshot/ into
  * @param {string} [options.plotlySha256] the pinned bundle (tests only)
  * @param {number} [options.plotlySize] the pinned bundle's size (tests only)
@@ -307,6 +335,7 @@ export async function exportSnapshot({
   id,
   baseUrl,
   hide = [],
+  note,
   frontendDir,
   plotlySha256 = PLOTLY_SHA256,
   plotlySize = PLOTLY_SIZE,
@@ -315,6 +344,8 @@ export async function exportSnapshot({
 }) {
   if (!CANONICAL_UUID.test(id)) throw new UsageError(`the analysis id must be a lowercase canonical UUID; got ${JSON.stringify(id)}`);
   const base = loopbackUrl(baseUrl);
+  const noteProblems = checkNote(note, "the note");
+  if (noteProblems.length > 0) throw new UsageError(`the note must be a valid About-this-example note:\n  - ${noteProblems.join("\n  - ")}`);
   const snapshotDir = path.join(frontendDir, SNAPSHOT_DIR);
   const tempDir = path.join(frontendDir, TEMP_DIR);
   for (const [dir, label] of [[snapshotDir, SNAPSHOT_DIR], [tempDir, TEMP_DIR]]) {
@@ -406,7 +437,7 @@ export async function exportSnapshot({
   fs.mkdirSync(path.join(tempDir, "charts"));
   /** @type {[string, string | Buffer][]} */
   const files = [
-    ["manifest.json", `${JSON.stringify({ analyses: [{ id }] }, null, 2)}\n`],
+    ["manifest.json", manifestJson([{ id, note }])],
     [`analyses/${id}.json`, analysisJson],
     ...charts.map(([name, bytes]) => /** @type {[string, Buffer]} */ ([`charts/${name}`, bytes])),
   ];
@@ -418,9 +449,16 @@ export async function exportSnapshot({
     throw new ExportError(`the written snapshot fails the build's rules; it stays in ${TEMP_DIR}/ for inspection (remove it before the next run): ${error instanceof Error ? error.message : String(error)}`);
   }
   const expectPlotly = kept.some((name) => name.endsWith(".html"));
-  if (JSON.stringify(snapshot.ids) !== JSON.stringify([id]) || JSON.stringify(snapshot.charts) !== JSON.stringify(kept) || snapshot.plotly !== expectPlotly) {
+  if (
+    JSON.stringify(snapshot.ids) !== JSON.stringify([id]) ||
+    JSON.stringify(Object.keys(snapshot.notes)) !== JSON.stringify([id]) ||
+    snapshot.notes[id] !== note ||
+    JSON.stringify(snapshot.charts) !== JSON.stringify(kept) ||
+    snapshot.plotly !== expectPlotly
+  ) {
     throw new ExportError(`the written snapshot in ${TEMP_DIR}/ does not read back as written; it stays there for inspection`);
   }
+  log(`note: ${JSON.stringify(note)}`);
   if (fs.existsSync(snapshotDir)) throw new ExportError(`${SNAPSHOT_DIR}/ appeared during the export; the new one stays in ${TEMP_DIR}/`);
   fs.renameSync(tempDir, snapshotDir);
 
@@ -525,18 +563,22 @@ const FRONTEND = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 /** @param {string[]} argv */
 async function main(argv) {
   let args;
+  let note;
   try {
     args = parseArgs(argv);
+    note = readNoteFile(args.noteFile);
   } catch (error) {
     if (!(error instanceof UsageError)) throw error;
     console.error(`export-snapshot: ${error.message}\n${USAGE}`);
     process.exit(2);
   }
   try {
-    await exportSnapshot({ ...args, frontendDir: FRONTEND, log: (line) => console.log(line) });
+    await exportSnapshot({ ...args, note, frontendDir: FRONTEND, log: (line) => console.log(line) });
   } catch (error) {
-    console.error(`export-snapshot: ${error instanceof Error ? error.message : String(error)}`);
-    process.exit(1);
+    // exportSnapshot's own usage errors come before any request or write.
+    const usage = error instanceof UsageError;
+    console.error(`export-snapshot: ${error instanceof Error ? error.message : String(error)}${usage ? `\n${USAGE}` : ""}`);
+    process.exit(usage ? 2 : 1);
   }
 }
 

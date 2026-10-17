@@ -10,7 +10,9 @@ import { expect, test } from "@playwright/test";
 
 import { CANARY_API_URL, FIXTURE_ID } from "../e2e-public/fixture";
 import { findForeignUuids } from "../lib/snapshot-rules.mjs";
-import { ANALYSIS, HIDDEN_STEMS, KEPT_CHARTS, MANIFEST, PLOTLY, REAL_ID, SNAPSHOT_ABS } from "./snapshot";
+import { ANALYSIS, HIDDEN_STEMS, KEPT_CHARTS, MANIFEST, NOTE, PLOTLY, REAL_ID, SNAPSHOT_ABS } from "./snapshot";
+
+const NOTICE = "third-party-notices.txt";
 
 const OUT = path.join(__dirname, "..", "out");
 const PAGE_FILES = [`analysis/${REAL_ID}.html`, `analysis/${REAL_ID}.txt`, "index.html", "index.txt"];
@@ -49,12 +51,31 @@ function hasJsonKey(text: string, key: string): boolean {
 }
 
 test("the committed snapshot is the real export: one analysis, its 14 kept charts and plotly.min.js", () => {
-  expect(MANIFEST).toEqual({ analyses: [{ id: REAL_ID }] });
+  expect(MANIFEST).toEqual({ analyses: [{ id: REAL_ID, note: NOTE }] });
   expect(ANALYSIS.id).toBe(REAL_ID);
   expect(KEPT_CHARTS).toHaveLength(14);
   expect(filesUnder(SNAPSHOT_ABS)).toEqual(
     ["manifest.json", `analyses/${REAL_ID}.json`, ...KEPT_CHARTS.map((name) => `charts/${name}`), `charts/${PLOTLY}`].sort(),
   );
+});
+
+test("the notice ships with the site and names the bundle's own header", () => {
+  const notice = readFileSync(path.join(OUT, NOTICE));
+  expect(notice.equals(readFileSync(path.join(__dirname, "..", "public", NOTICE))), "out/ equals public/, byte for byte").toBe(true);
+  const text = notice.toString("utf8");
+  // The bundle's own header comment ("/**\n* plotly.js v2.30.0\n* Copyright ...\n...*/"),
+  // so a regenerated bundle cannot leave the notice behind (tasks.md, M2c).
+  const header = /^\/\*\*([\s\S]*?)\*\//.exec(readFileSync(path.join(SNAPSHOT_ABS, "charts", PLOTLY), "latin1"))?.[1] ?? "";
+  const lines = header.split("\n").map((line) => line.replace(/^\s*\*\s?/, "").trim());
+  const version = lines.find((line) => /^plotly\.js v\d/.test(line));
+  const copyright = lines.find((line) => line.startsWith("Copyright"));
+  expect(version, "the header's version line").toBeDefined();
+  expect(copyright, "the header's copyright line").toBeDefined();
+  expect(text).toContain(String(version));
+  expect(text).toContain(String(copyright));
+  // plotly.js's own LICENSE and the bundled components' notices.
+  expect(text).toContain("Copyright (c) 2021 Plotly, Inc");
+  expect(text).toContain("/*! ieee754. BSD-3-Clause License. Feross Aboukhadijeh <https://feross.org/opensource> */");
 });
 
 test("out/analysis/ holds exactly the real id, one .html and one .txt", () => {

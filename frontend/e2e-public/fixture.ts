@@ -13,6 +13,10 @@ export const FIXTURE_DIR = "e2e/fixtures/snapshot";
 export const CANARY_API_URL = "http://api-canary.invalid";
 
 export const FIXTURE_ID = "00000000-0000-4000-a000-000000000001";
+// The "About this example" note every fixture manifest carries: an independent
+// literal, never read from the manifest. No "upload": the public analysis page
+// carries no upload wording (analysis.spec.ts).
+export const FIXTURE_NOTE = "Synthetic note for the public e2e fixture. It describes no real data.";
 // A canonical id that is not in the fixture's manifest.
 export const UNLISTED_ID = "00000000-0000-4000-a000-000000000002";
 export const PNG_CHART = `${FIXTURE_ID}_histogram_fixture_value.png`;

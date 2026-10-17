@@ -3,7 +3,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { expect, type Page, type TestInfo } from "@playwright/test";
+import { expect, type Locator, type Page, type TestInfo } from "@playwright/test";
 
 export interface LoggedRequest {
   method: string;
@@ -65,6 +65,25 @@ export function saveRequestLog(log: LoggedRequest[], info: TestInfo, name: strin
   if (!dir) return;
   mkdirSync(dir, { recursive: true });
   writeFileSync(path.join(dir, `${name}-${info.project.name}.txt`), `${text}\n`);
+}
+
+// The opacity an element is drawn with: its own computed opacity times every
+// ancestor's (computed opacity is not inherited). toBeVisible() counts opacity
+// 0 as visible, so content kept hidden until JavaScript runs needs this check.
+export async function effectiveOpacity(locator: Locator): Promise<number> {
+  return locator.evaluate((element) => {
+    let opacity = 1;
+    for (let node: Element | null = element; node; node = node.parentElement) opacity *= Number(getComputedStyle(node).opacity);
+    return opacity;
+  });
+}
+
+// True when `a` comes before `b` in document order.
+export async function comesBefore(a: Locator, b: Locator): Promise<boolean> {
+  return a.evaluate(
+    (element, other) => Boolean(other && element.compareDocumentPosition(other) & Node.DOCUMENT_POSITION_FOLLOWING),
+    await b.elementHandle(),
+  );
 }
 
 export async function expectNoHorizontalOverflow(page: Page): Promise<void> {

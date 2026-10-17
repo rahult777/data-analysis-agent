@@ -1,6 +1,6 @@
 import { AnalysisResults } from "@/components/AnalysisResults";
 import { isSnapshot } from "@/lib/mode";
-import { snapshotAnalyses, snapshotAnalysis } from "@/lib/snapshot";
+import { snapshotAnalyses, snapshotAnalysis, snapshotNote } from "@/lib/snapshot";
 
 import AnalysisPageClient from "./AnalysisPageClient";
 
@@ -23,6 +23,7 @@ export default function AnalysisPage({ params }: { params: { id: string } }) {
   if (!isSnapshot) return <AnalysisPageClient />;
 
   const analysis = snapshotAnalysis(params.id);
+  const note = snapshotNote(params.id);
   return (
     <main className="min-h-screen w-full px-6 py-8 sm:py-12 md:py-16">
       <div className="mx-auto flex w-full max-w-4xl flex-col gap-12">
@@ -34,6 +35,13 @@ export default function AnalysisPage({ params }: { params: { id: string } }) {
             Analysis
           </h1>
         </header>
+        {/* The manifest's note, plain text with no motion, so it reads without JavaScript. */}
+        <section aria-labelledby="about-this-example" className="flex flex-col gap-2 rounded-md border border-border/60 bg-card/40 p-5">
+          <h2 id="about-this-example" className="text-xl italic leading-tight" style={{ fontFamily: "var(--font-display)" }}>
+            About this example
+          </h2>
+          <p className="text-sm leading-relaxed text-muted-foreground [overflow-wrap:anywhere]">{note}</p>
+        </section>
         <AnalysisResults analysisId={analysis.id} sessionId={null} initialData={analysis} />
       </div>
     </main>

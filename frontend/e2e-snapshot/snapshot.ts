@@ -9,6 +9,11 @@ import type { SnapshotAnalysis } from "../lib/types";
 
 export const SNAPSHOT_ABS = path.join(__dirname, "..", "snapshot");
 export const REAL_ID = "77faa166-668b-4001-92e0-94e037de7e3b";
+// The owner's "About this example" note for the demo (ruled 2026-10-14): an
+// independent literal, never read from the manifest. Its two curly quotation
+// marks are written as escapes (\u201c, \u201d).
+export const NOTE =
+  "One saved run on a small synthetic sales dataset. Nothing the agents wrote has been corrected, so several known errors are left in rather than hidden. The interactive scatter plot shows almost no relationship (r=0.08): it demonstrates the chart, not a finding. One cleaning decision says imputing the median \u201cfabricates $31,738\u201d per transaction; the model invented that number, and the median actually used was $25,536.";
 
 export const MANIFEST: unknown = JSON.parse(readFileSync(path.join(SNAPSHOT_ABS, "manifest.json"), "utf8"));
 export const ANALYSIS = JSON.parse(

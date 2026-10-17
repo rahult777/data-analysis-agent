@@ -29,3 +29,11 @@ export function snapshotAnalysis(id: string): SnapshotAnalysis {
   if (!analysis) throw new Error(`Snapshot: no analysis ${id} in the manifest.`);
   return analysis;
 }
+
+// The analysis's "About this example" note: the owner's text in the manifest,
+// checked by the rules (checkNote) before any page renders.
+export function snapshotNote(id: string): string {
+  const note = load().notes[id];
+  if (note === undefined) throw new Error(`Snapshot: no note for ${id} in the manifest.`);
+  return note;
+}

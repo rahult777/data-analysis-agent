@@ -1,4 +1,9 @@
 {
   "fixture": true,
-  "analyses": [{ "id": "00000000-0000-4000-a000-000000000001" }]
+  "analyses": [
+    {
+      "id": "00000000-0000-4000-a000-000000000001",
+      "note": "Synthetic note for the public e2e fixture. It describes no real data."
+    }
+  ]
 }
