@@ -83,6 +83,7 @@ export type AnalysisView = Pick<
   | "row_count"
   | "column_count"
   | "data_quality_score"
+  | "cleaning_report"
   | "cleaning_decisions"
   | "analysis_report"
   | "insight_report"
@@ -91,9 +92,10 @@ export type AnalysisView = Pick<
 >;
 
 // One analysis in the public snapshot build: exactly the fields the results
-// view reads, plus cleaning_report.summary (for M2b.3's header). Enforced at
-// build time by lib/snapshot-rules.mjs, whose PUBLISHED key set these types
-// mirror (keep them in step): any other key fails, at every level it defines.
+// view reads (of cleaning_report, only the summary the header reads).
+// Enforced at build time by lib/snapshot-rules.mjs, whose PUBLISHED key set
+// these types mirror (keep them in step): any other key fails, at every level
+// it defines.
 // Type aliases, not interfaces: an interface is not assignable to
 // AnalysisResponse's Record<string, unknown> fields. Inside the agent content
 // every field is optional, as in InsightReport.tsx.

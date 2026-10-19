@@ -33,6 +33,30 @@ export const SCATTER_POINTS = 185;
 export const HIDDEN_CHARTS = [`${REAL_ID}_barchart_customer_id.png`, `${REAL_ID}_barchart_product_code.png`];
 export const HIDDEN_STEMS = ["barchart_customer_id", "barchart_product_code"];
 
+// The ten chart file names the narrative mentions, in order, each with the
+// label the page shows instead (M2b.3b.2): independent literals, the labels as
+// the chart cards show them.
+export const NARRATIVE_LABELS: ReadonlyArray<readonly [string, string]> = [
+  [`${REAL_ID}_histogram_revenue.png`, "Distribution \u2014 revenue"],
+  [`${REAL_ID}_boxplot_revenue.png`, "Box plot \u2014 revenue"],
+  [`${REAL_ID}_histogram_revenue_outlier_flag.png`, "Distribution \u2014 revenue outlier flag"],
+  [`${REAL_ID}_barchart_return_flag.png`, "Top values \u2014 return flag"],
+  [`${REAL_ID}_barchart_region.png`, "Top values \u2014 region"],
+  [`${REAL_ID}_histogram_discount_pct.png`, "Distribution \u2014 discount pct"],
+  [`${REAL_ID}_scatter_units_sold_discount_pct.html`, "Scatter \u2014 units sold discount pct"],
+  [`${REAL_ID}_barchart_sales_rep.png`, "Top values \u2014 sales rep"],
+  [`${REAL_ID}_barchart_notes.png`, "Top values \u2014 notes"],
+  [`${REAL_ID}_correlation_heatmap.png`, "Correlation heatmap"],
+];
+
+// The results header (M2b.3b.2): the cleaned counts, then the original file's
+// on a second line, as shown and as a screen reader reads it.
+export const HEADER = {
+  dd: ["185", "10", "70%"],
+  visible: "after cleaning \u00b7 200 \u00d7 9 in the original file",
+  spoken: "After cleaning. The original file had 200 rows and 9 columns.",
+};
+
 // The site's URL for a chart, as lib/api.ts chartUrl builds it in snapshot
 // mode (an HTML chart's URL has no .html, as on Vercel).
 export function chartUrl(name: string): string {

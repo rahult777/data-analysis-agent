@@ -7,6 +7,7 @@ import { AlertTriangle } from "lucide-react";
 
 import { getAnalysis } from "@/lib/api";
 import { isSnapshot } from "@/lib/mode";
+import { formatCount, headerLine, readHeaderShape } from "@/lib/results";
 import type { AnalysisView } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import {
@@ -71,6 +72,7 @@ export function AnalysisResults({
         rowCount={data.row_count}
         columnCount={data.column_count}
         dataQualityScore={data.data_quality_score}
+        cleaningReport={data.cleaning_report}
       />
 
       <InsightReportExecutive executiveSummary={data.executive_summary} />
@@ -103,6 +105,7 @@ interface AnalysisHeaderProps {
   rowCount: number | null;
   columnCount: number | null;
   dataQualityScore: number | null;
+  cleaningReport: Record<string, unknown> | null;
 }
 
 function AnalysisHeader({
@@ -110,7 +113,13 @@ function AnalysisHeader({
   rowCount,
   columnCount,
   dataQualityScore,
+  cleaningReport,
 }: AnalysisHeaderProps) {
+  // Rows and Columns count the cleaned data when the cleaning summary checks
+  // out, with the original file's counts on the line below; otherwise the
+  // stored counts, labelled as the original file's (lib/results.ts).
+  const shape = readHeaderShape(cleaningReport, rowCount, columnCount);
+  const line = headerLine(shape);
   return (
     <motion.header
       initial={{ opacity: 0, y: 8 }}
@@ -131,8 +140,8 @@ function AnalysisHeader({
         </h2>
       </div>
       <dl className="flex flex-wrap gap-x-10 gap-y-4">
-        <Stat label="Rows" value={rowCount !== null ? rowCount.toLocaleString() : "—"} />
-        <Stat label="Columns" value={columnCount !== null ? String(columnCount) : "—"} />
+        <Stat label="Rows" value={shape.rows !== null ? formatCount(shape.rows) : "—"} />
+        <Stat label="Columns" value={shape.columns !== null ? formatCount(shape.columns) : "—"} />
         <Stat
           label="Data quality"
           value={
@@ -142,6 +151,18 @@ function AnalysisHeader({
           }
         />
       </dl>
+      {line && (
+        <p className="text-sm text-muted-foreground">
+          {line.spoken === null ? (
+            line.visible
+          ) : (
+            <>
+              <span aria-hidden="true">{line.visible}</span>
+              <span className="sr-only">{line.spoken}</span>
+            </>
+          )}
+        </p>
+      )}
     </motion.header>
   );
 }

@@ -8,7 +8,7 @@ import path from "node:path";
 
 import type { Page, Request, Route } from "@playwright/test";
 
-import type { AnalysisResponse, AnalysisStatus, StatusResponse } from "../lib/types";
+import type { AnalysisResponse, AnalysisStatus, QuestionResponse, StatusResponse } from "../lib/types";
 
 // Deliberately unreachable by default (port 9, "discard"): not a service URL.
 // The app is started with it (playwright.config.ts) so an unmocked call can
@@ -16,6 +16,8 @@ import type { AnalysisResponse, AnalysisStatus, StatusResponse } from "../lib/ty
 export const MOCK_API_URL = process.env.E2E_MOCK_API_URL || "http://127.0.0.1:9";
 export const ANALYSIS_ID = "11111111-1111-4111-8111-111111111111";
 export const SESSION_ID = "22222222-2222-4222-8222-222222222222";
+// The id POST /question gives the one custom question a test asks.
+export const QUESTION_ID = "33333333-3333-4333-8333-333333333333";
 
 // The app's own response type, so the mock cannot drift from it.
 export type StatusBody = StatusResponse;
@@ -67,6 +69,9 @@ export interface ResumeCall {
   sessionHeader: string | null;
 }
 
+// A POST /question as the mock received it (the same shape as a resume call).
+export type QuestionCall = ResumeCall;
+
 export type ResumeReply =
   | { status: number; body: unknown }
   | { abort: true }
@@ -103,6 +108,9 @@ export class MockApi {
   });
   // Chart files served at GET /charts/{name} (ChartGrid's image and iframe sources).
   private readonly charts = new Map<string, { body: Buffer; contentType: string }>();
+  readonly questionCalls: QuestionCall[] = [];
+  private question = "";
+  private questionAnswer: Pick<QuestionResponse, "answer" | "pandas_code"> | null = null;
 
   constructor(private readonly page: Page) {}
 
@@ -129,6 +137,12 @@ export class MockApi {
 
   setChart(name: string, body: Buffer, contentType: string): void {
     this.charts.set(name, { body, contentType });
+  }
+
+  // POST /question answers "pending" with QUESTION_ID; the poll of that id
+  // (GET /question/{QUESTION_ID}) then returns this answer as complete.
+  setQuestionAnswer(answer: Pick<QuestionResponse, "answer" | "pandas_code">): void {
+    this.questionAnswer = answer;
   }
 
   // Resolves when the next status request has been answered — right after an
@@ -216,6 +230,17 @@ export class MockApi {
       this.resumeReplies += 1;
       return;
     }
+    if (request.method() === "POST" && url.pathname === `/api/analysis/${ANALYSIS_ID}/question` && this.questionAnswer !== null) {
+      const body = (request.postDataJSON() ?? {}) as { question?: unknown };
+      this.questionCalls.push({ body, sessionHeader: (await request.allHeaders())["session-id"] ?? null });
+      this.question = typeof body.question === "string" ? body.question : "";
+      await this.json(route, 200, this.questionBody(null, "pending"));
+      return;
+    }
+    if (request.method() === "GET" && url.pathname === `/api/analysis/${ANALYSIS_ID}/question/${QUESTION_ID}` && this.questionAnswer !== null) {
+      await this.json(route, 200, this.questionBody(this.questionAnswer, "complete"));
+      return;
+    }
     if (request.method() === "POST" && url.pathname === "/api/upload") {
       const reply = await this.uploadHandler();
       if ("hang" in reply) return;
@@ -239,6 +264,21 @@ export class MockApi {
     }
     this.unmocked.push(`${request.method()} ${url.pathname}`);
     await route.abort("failed");
+  }
+
+  // The app's own response type, so the mock cannot drift from it.
+  private questionBody(
+    answer: Pick<QuestionResponse, "answer" | "pandas_code"> | null,
+    status: QuestionResponse["status"],
+  ): QuestionResponse {
+    return {
+      question_id: QUESTION_ID,
+      analysis_id: ANALYSIS_ID,
+      question: this.question,
+      answer: answer?.answer ?? null,
+      pandas_code: answer?.pandas_code ?? null,
+      status,
+    };
   }
 
   private async json(route: Route, status: number, body: unknown): Promise<void> {

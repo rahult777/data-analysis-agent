@@ -3,6 +3,7 @@
 import { motion } from "framer-motion";
 import { ArrowRight, HelpCircle } from "lucide-react";
 
+import { splitChartNames } from "@/lib/results";
 import type { CleaningDecision } from "@/lib/types";
 import {
   Accordion,
@@ -86,8 +87,8 @@ function readBullets(executiveSummary: Record<string, unknown> | null): Executiv
 // included, values number | null; strong_pairs: [{col1, col2, ...}] }. Not
 // .correlation, which is the LLM-authored qualitative object. JSONB does not
 // preserve DataFrame column order, so columns are sorted alphabetically
-// (decisions.md 2026-09-21). Never assumes a 1.0 diagonal — constant columns
-// store null there.
+// (decisions.md 2026-09-21), in English whatever the visitor's locale. Never
+// assumes a 1.0 diagonal — constant columns store null there.
 function asFiniteNumber(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
@@ -99,7 +100,7 @@ function readCorrelationMatrix(
   const matrix = asRecord(cm?.matrix);
   if (!matrix) return undefined;
 
-  const columns = Object.keys(matrix).sort((a, b) => a.localeCompare(b));
+  const columns = Object.keys(matrix).sort((a, b) => a.localeCompare(b, "en"));
   if (columns.length < 2) return undefined;
 
   const lookup = (a: string, b: string): number | null =>
@@ -175,12 +176,12 @@ export function InsightReportExecutive({
               className="flex flex-col gap-3 rounded-md border border-border/60 bg-card/40 p-5"
             >
               {bullet.finding && (
-                <p className="text-base font-medium leading-snug text-foreground">
+                <p className="text-base font-medium leading-snug text-foreground [overflow-wrap:anywhere]">
                   {bullet.finding}
                 </p>
               )}
               {bullet.context && (
-                <p className="text-sm leading-relaxed text-muted-foreground">
+                <p className="text-sm leading-relaxed text-muted-foreground [overflow-wrap:anywhere]">
                   {bullet.context}
                 </p>
               )}
@@ -190,7 +191,7 @@ export function InsightReportExecutive({
                     className="mt-0.5 size-4 shrink-0 text-primary"
                     aria-hidden
                   />
-                  <p className="text-sm font-medium leading-relaxed text-foreground">
+                  <p className="text-sm font-medium leading-relaxed text-foreground [overflow-wrap:anywhere]">
                     {bullet.recommended_action}
                   </p>
                 </div>
@@ -321,8 +322,17 @@ function AnalystPanel({
         <Callout title="Your question, addressed">{userQuestionAddressed}</Callout>
       )}
       {paragraphs.map((p, i) => (
-        <p key={i} className="text-sm leading-relaxed text-foreground/90">
-          {p}
+        <p key={i} className="text-sm leading-relaxed text-foreground/90 [overflow-wrap:anywhere]">
+          {/* A chart file name becomes a link to its card, labelled as the card is. */}
+          {splitChartNames(p, availableCharts).map((part, j) =>
+            typeof part === "string" ? (
+              part
+            ) : (
+              <a key={j} href={`#${chartAnchorId(part.name)}`}>
+                {parseChartFilename(part.name).label}
+              </a>
+            ),
+          )}
         </p>
       ))}
       {correlationMatrix && (
@@ -377,17 +387,17 @@ function OpenQuestionsPanel({ questions }: { questions: OpenQuestion[] }) {
               className="mt-0.5 size-4 shrink-0 text-primary"
               aria-hidden
             />
-            <p className="text-sm font-medium leading-snug text-foreground">
+            <p className="text-sm font-medium leading-snug text-foreground [overflow-wrap:anywhere]">
               {q.question ?? "Open question"}
             </p>
           </div>
           {q.why_unanswerable && (
-            <p className="pl-6 text-sm leading-relaxed text-muted-foreground">
+            <p className="pl-6 text-sm leading-relaxed text-muted-foreground [overflow-wrap:anywhere]">
               {q.why_unanswerable}
             </p>
           )}
           {q.what_data_would_answer && (
-            <p className="pl-6 text-sm leading-relaxed text-foreground/80">
+            <p className="pl-6 text-sm leading-relaxed text-foreground/80 [overflow-wrap:anywhere]">
               <span className="text-muted-foreground">What would resolve it: </span>
               {q.what_data_would_answer}
             </p>
@@ -442,19 +452,19 @@ function TechnicalPanel({
               >
                 <div className="flex flex-wrap items-center gap-2">
                   {d.column_name && (
-                    <span className="rounded bg-secondary px-1.5 py-0.5 font-mono text-sm text-secondary-foreground">
+                    <span className="rounded bg-secondary px-1.5 py-0.5 font-mono text-sm text-secondary-foreground [overflow-wrap:anywhere]">
                       {d.column_name}
                     </span>
                   )}
-                  <span className="text-sm font-medium text-foreground">
+                  <span className="text-sm font-medium text-foreground [overflow-wrap:anywhere]">
                     {d.action}
                   </span>
                 </div>
                 {d.issue && (
-                  <p className="text-sm text-muted-foreground">Issue: {d.issue}</p>
+                  <p className="text-sm text-muted-foreground [overflow-wrap:anywhere]">Issue: {d.issue}</p>
                 )}
                 {d.reason && (
-                  <p className="text-sm leading-relaxed text-foreground/80">
+                  <p className="text-sm leading-relaxed text-foreground/80 [overflow-wrap:anywhere]">
                     {d.reason}
                   </p>
                 )}
@@ -469,7 +479,7 @@ function TechnicalPanel({
           <p className="text-sm uppercase tracking-wider text-muted-foreground">
             Statistical methodology
           </p>
-          <p className="whitespace-pre-line text-sm leading-relaxed text-foreground/90">
+          <p className="whitespace-pre-line text-sm leading-relaxed text-foreground/90 [overflow-wrap:anywhere]">
             {statistical}
           </p>
         </div>
@@ -479,6 +489,11 @@ function TechnicalPanel({
         <div className="flex flex-col gap-2">
           <p className="text-sm uppercase tracking-wider text-muted-foreground">
             Code
+          </p>
+          {/* The blocks are the Explainer model's reconstructions, not the code
+              the pipeline ran (errors.md 2026-10-14). */}
+          <p className="text-sm text-muted-foreground">
+            Written by the Explainer agent to illustrate each step. It is not the code that ran.
           </p>
           <div className="flex flex-col gap-3">
             {codeBlocks.map((code, i) => (
@@ -546,7 +561,7 @@ function Callout({ title, children }: { title: string; children: string }) {
       <p className="mb-1 text-sm uppercase tracking-wider text-muted-foreground">
         {title}
       </p>
-      <p className="whitespace-pre-line text-sm leading-relaxed text-foreground/90">
+      <p className="whitespace-pre-line text-sm leading-relaxed text-foreground/90 [overflow-wrap:anywhere]">
         {children}
       </p>
     </div>

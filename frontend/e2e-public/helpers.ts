@@ -93,6 +93,42 @@ export async function expectNoHorizontalOverflow(page: Page): Promise<void> {
   expect(overflow, "no horizontal page overflow").toBe(0);
 }
 
+// The clipping rule (M2b.3b.2): nothing under <main> may hide content
+// sideways. Fails on any element whose computed overflow-x is hidden or clip
+// and whose content is wider than its box (scrollWidth > clientWidth), naming
+// each one. It decides by overflow-x alone: CSS computes a visible overflow-y
+// to auto beside a hidden overflow-x, and such an element is still checked.
+// Skipped: elements that are not displayed; horizontal scroll containers
+// (overflow-x auto or scroll: the code blocks, the correlation matrix) and
+// their subtrees; visually hidden elements (clip rect(0px, 0px, 0px, 0px), as
+// sr-only sets it); and a chart card's title, which an ellipsis truncates by
+// design (card-title wrapping is an M2b.4 task). Open every panel first.
+export async function expectNoClipping(page: Page): Promise<void> {
+  await page.evaluate(() => document.fonts.ready.then(() => undefined));
+  const clipped = await page.evaluate(() => {
+    const found: string[] = [];
+    const scrolls = (value: string) => value === "auto" || value === "scroll";
+    const visit = (element: Element): void => {
+      const style = getComputedStyle(element);
+      if (style.display === "none") return;
+      if (scrolls(style.overflowX)) return;
+      if (style.clip === "rect(0px, 0px, 0px, 0px)") return;
+      const cardTitle = style.textOverflow === "ellipsis" && element.closest('[id^="chart-"]') !== null;
+      const hides = style.overflowX === "hidden" || style.overflowX === "clip";
+      if (hides && !cardTitle && element.scrollWidth > element.clientWidth) {
+        const text = (element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 80);
+        found.push(`<${element.tagName.toLowerCase()} class="${element.getAttribute("class") ?? ""}"> ${element.scrollWidth}/${element.clientWidth}: ${text}`);
+      }
+      for (const child of Array.from(element.children)) visit(child);
+    };
+    const main = document.querySelector("main");
+    if (main === null) return ["no <main> on the page"];
+    visit(main);
+    return found;
+  });
+  expect(clipped, "no element clips its content sideways").toEqual([]);
+}
+
 // Records every localStorage call the page makes (the local client page reads
 // session_id_<id>; the snapshot page must make none).
 export async function spyOnLocalStorage(page: Page): Promise<void> {

@@ -2,20 +2,27 @@
 // committed snapshot. The domain hypothesis is stated; each finding in the
 // narrative carries its confidence label; the narrative leads with its finding
 // and builds to the synthesis and the open questions (progressive revelation);
-// and the executive, analyst and technical layers are all on the page. The
-// header, the chart labels in the narrative and the note are M2b.3b. Every
-// test runs at 320 px and at 1280 px.
+// and the executive, analyst and technical layers are all on the page. Since
+// M2b.3b.2 the narrative's chart file names render as links labelled like
+// their cards, so the expected paragraphs come from the literal pairs in
+// snapshot.ts, never from the component's own matcher. Every test runs at
+// 320 px and at 1280 px.
 
 import { expect, test } from "@playwright/test";
 
 import { expectNoHorizontalOverflow, shot } from "../e2e-public/helpers";
-import { ANALYSIS, REAL_ID } from "./snapshot";
+import { ANALYSIS, chartCardId, NARRATIVE_LABELS, REAL_ID } from "./snapshot";
 
 const PAGE = `/analysis/${REAL_ID}`;
 const INSIGHT = ANALYSIS.insight_report;
 const TECHNICAL = INSIGHT.technical_layer;
 // InsightReport.tsx splits the narrative into paragraphs the same way.
 const PARAGRAPHS = (INSIGHT.analyst_layer.narrative ?? "").split(/\n\n+/).filter(Boolean);
+// The paragraphs as the page renders them: each chart file name replaced by
+// its card's label.
+const RENDERED = PARAGRAPHS.map((paragraph) =>
+  NARRATIVE_LABELS.reduce((text, [name, label]) => text.split(name).join(label), paragraph),
+);
 
 function confidenceLabels(text: string): string[] {
   return Array.from(text.matchAll(/Confidence: (High|Moderate|Low)\b/g), (match) => match[1]);
@@ -35,13 +42,26 @@ test("the intelligence layers render from the real data: domain hypothesis, conf
     }
   }
 
-  // Analyst layer: every paragraph of the narrative, in order.
+  // Analyst layer: every paragraph of the narrative, in order, each chart file
+  // name in it shown as a link to that chart's card.
   await page.getByRole("button", { name: /Analyst Report/ }).click();
   const analyst = page.getByRole("region", { name: /Analyst Report/ });
-  await expect(analyst.getByText(PARAGRAPHS[0], { exact: true })).toBeVisible();
-  const paragraphs = (await analyst.locator("p").allTextContents()).filter((text) => PARAGRAPHS.includes(text));
+  await expect(analyst.getByText(RENDERED[0], { exact: true })).toBeVisible();
+  // No name contains another, so the order of the replacements cannot matter,
+  // and the narrative names each one once.
+  for (const [name] of NARRATIVE_LABELS) {
+    expect(NARRATIVE_LABELS.filter(([other]) => other !== name && other.includes(name)), name).toEqual([]);
+    expect(PARAGRAPHS.join("\n\n").split(name).length - 1, name).toBe(1);
+  }
+  const paragraphs = (await analyst.locator("p").allTextContents()).filter((text) => RENDERED.includes(text));
   expect(paragraphs).toHaveLength(16);
-  expect(paragraphs).toEqual(PARAGRAPHS);
+  expect(paragraphs).toEqual(RENDERED);
+  const links = analyst.locator("p a[href^='#chart-']");
+  await expect(links).toHaveText(NARRATIVE_LABELS.map(([, label]) => label));
+  expect(await links.evaluateAll((elements) => elements.map((a) => a.getAttribute("href")))).toEqual(
+    NARRATIVE_LABELS.map(([name]) => `#${chartCardId(name)}`),
+  );
+  for (const [name] of NARRATIVE_LABELS) await expect(page.locator(`#${chartCardId(name)}`), name).toHaveCount(1);
 
   // Lead first: the narrative opens with the executive lead's finding (the
   // 37.8% of revenue values filled in), then builds to the synthesis and

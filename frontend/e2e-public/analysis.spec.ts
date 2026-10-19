@@ -33,10 +33,17 @@ test("renders the finished results from the snapshot, with no progress view, sta
   await expect(page.getByRole("heading", { level: 1, name: "Analysis" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Analysis complete" })).toBeVisible();
   await expect(page.getByText(FIXTURE.filename, { exact: true })).toBeVisible();
+  // The header (M2b.3b.2): the cleaned counts from the summary, then the
+  // original file's on a second line (one visible text; one sentence for
+  // screen readers, which is all they read).
   const stats = page.locator("dl");
-  for (const text of ["Rows", String(FIXTURE.row_count), "Columns", String(FIXTURE.column_count), "Data quality", "90%"]) {
-    await expect(stats).toContainText(text);
-  }
+  await expect.soft(stats.locator("dt")).toHaveText(["Rows", "Columns", "Data quality"]);
+  await expect.soft(stats.locator("dd")).toHaveText(["11", "3", "90%"]);
+  const line = page.locator("dl + p");
+  await expect(line, "the second line, after the stats").toHaveCount(1);
+  await expect.soft(line.locator('[aria-hidden="true"]')).toHaveText("after cleaning \u00b7 12 \u00d7 3 in the original file");
+  await expect.soft(line.locator(".sr-only")).toHaveText("After cleaning. The original file had 12 rows and 3 columns.");
+  await expect.soft(line).toMatchAriaSnapshot("- paragraph: After cleaning. The original file had 12 rows and 3 columns.");
   for (const bullet of FIXTURE.executive_summary.bullets) {
     await expect(page.getByText(bullet.finding ?? "", { exact: true })).toBeVisible();
   }
