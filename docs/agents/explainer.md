@@ -107,7 +107,7 @@ Every analysis produces all three layers simultaneously. The Explainer does not 
 **What this layer contains:**
 - Every cleaning decision made, with the full reasoning for each decision
 - Every statistical test applied, with the explanation of why that specific test was chosen for this specific data
-- All pandas code used in the analysis — complete, not summarized
+- All pandas code used in the analysis — complete, not summarized (2026-10-18: not yet true for the Technical layer: the model writes these blocks, and they are not taken from the code that ran, errors.md 2026-10-14; since M2b.3b.2 the page labels them as the Explainer's illustration, not the code that ran)
 - Identified methodological limitations — what assumptions were made, what could be done differently
 - Suggestions for more sophisticated analysis that could be applied to this specific dataset
 - Notes on what the self-evaluation loop found and any criteria that were not fully met
