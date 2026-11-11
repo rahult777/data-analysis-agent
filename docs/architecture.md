@@ -152,7 +152,7 @@ Next.js 14 App Router with TypeScript strict mode, built in one of two modes, fi
 
 Polls `/api/analysis/{id}/status` every 3 seconds while pipeline is running. Displays agent progress in real time. Serves charts from the backend's `/charts/{filename}`.
 
-**Public snapshot** (`npm run build:public`). A static export of saved analyses read at build time from `frontend/snapshot/`; lib/snapshot-rules.mjs validates the snapshot and fails the build closed. It makes no API request: `/` links to each analysis, `/analysis/<id>` shows its finished results, with an "About this example" note from the manifest and no progress view or question box, and the charts are copied into `out/demo/charts/`. No backend, database or key is online.
+**Public snapshot** (`npm run build:public`). A static export of saved analyses read at build time from `frontend/snapshot/`; lib/snapshot-rules.mjs validates the snapshot and fails the build closed. It makes no API request: `/` links to each analysis, `/analysis/<id>` shows its finished results, with an "About this example" note from the manifest and no progress view or question box, and the charts are copied into `out/demo/charts/`. The build also needs two settings, which next.config.mjs validates: `NEXT_PUBLIC_SITE_URL`, the site's address, and `NEXT_PUBLIC_GITHUB_URL`, its GitHub repository. The pages carry the site's head metadata (titles, descriptions, canonical links and the committed link-preview card), and the export includes robots.txt and sitemap.xml at the site's address (decisions.md 2026-11-11). No backend, database or key is online.
 
 Both modes sandbox chart iframes (`allow-scripts` only) and lazy-load charts. Full UI specification in `docs/ui-and-frontend.md`.
 
