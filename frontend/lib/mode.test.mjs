@@ -1,5 +1,8 @@
-// Unit tests for the build-time data source (NEXT_PUBLIC_DATA_SOURCE):
-// next.config.mjs, its only validator, and the values lib/mode.ts computes.
+// Unit tests for the build-time data source (NEXT_PUBLIC_DATA_SOURCE) and the
+// public build's two site settings (NEXT_PUBLIC_SITE_URL,
+// NEXT_PUBLIC_GITHUB_URL): next.config.mjs, their only validator, and the
+// values lib/mode.ts and lib/site.ts compute. The settings' rules have their
+// own tests (lib/site-settings.test.mjs).
 // Run with `npm run test:unit` (Node's built-in test runner; no dependency).
 // Never put this file under e2e/ or e2e-public/: Playwright's default test
 // pattern matches *.test.mjs.
@@ -21,18 +24,31 @@ import nextConfig from "../next.config.mjs";
 const FRONTEND = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const FLAG = "NEXT_PUBLIC_DATA_SOURCE";
+const SITE = "NEXT_PUBLIC_SITE_URL";
+const GITHUB = "NEXT_PUBLIC_GITHUB_URL";
+// Valid site settings: the public e2e's values (e2e-public/fixture.ts).
+const SETTINGS = { [SITE]: "https://omnalynt.example", [GITHUB]: "https://github.com/e2e-owner/e2e-repo" };
 
-// Calls the config function with the flag set to `value` (undefined = unset),
-// restoring the environment afterwards.
-function configWith(value, phase) {
-  const saved = process.env[FLAG];
-  if (value === undefined) delete process.env[FLAG];
-  else process.env[FLAG] = value;
+// Sets each variable (undefined = unset) and returns the previous values.
+function setEnv(values) {
+  const previous = {};
+  for (const [name, value] of Object.entries(values)) {
+    previous[name] = process.env[name];
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+  return previous;
+}
+
+// Calls the config function with the flag set to `value` and the two site
+// settings as given (undefined = unset; valid by default), restoring the
+// environment afterwards.
+function configWith(value, phase, settings = SETTINGS) {
+  const previous = setEnv({ [FLAG]: value, [SITE]: settings[SITE], [GITHUB]: settings[GITHUB] });
   try {
     return nextConfig(phase);
   } finally {
-    if (saved === undefined) delete process.env[FLAG];
-    else process.env[FLAG] = saved;
+    setEnv(previous);
   }
 }
 
@@ -101,6 +117,60 @@ describe("next.config.mjs validates NEXT_PUBLIC_DATA_SOURCE", () => {
   });
 });
 
+describe("next.config.mjs requires both site settings in the public build", () => {
+  const HEADER = "The public build (npm run build:public) needs both site settings, set inline or in frontend/.env.local:";
+  const SITE_MISSING = `  - ${SITE} is not set: give the site's address, https://<host> with no path and no trailing slash`;
+  const GITHUB_MISSING = `  - ${GITHUB} is not set: give the repository's address, https://github.com/<owner>/<repo> with nothing after it`;
+
+  it("fails closed without the site's address, naming it", () => {
+    assert.throws(() => configWith("snapshot", PHASE_PRODUCTION_BUILD, { [GITHUB]: SETTINGS[GITHUB] }), {
+      message: `${HEADER}\n${SITE_MISSING}`,
+    });
+  });
+
+  it("fails closed without the GitHub repository, naming it", () => {
+    assert.throws(() => configWith("snapshot", PHASE_PRODUCTION_BUILD, { [SITE]: SETTINGS[SITE] }), {
+      message: `${HEADER}\n${GITHUB_MISSING}`,
+    });
+  });
+
+  it("lists both, the site's address first, when both are unset or empty", () => {
+    for (const settings of [{}, { [SITE]: "", [GITHUB]: "" }]) {
+      assert.throws(() => configWith("snapshot", PHASE_PRODUCTION_BUILD, settings), {
+        message: `${HEADER}\n${SITE_MISSING}\n${GITHUB_MISSING}`,
+      });
+    }
+  });
+
+  it("fails closed on an invalid value, with that value's problem", () => {
+    assert.throws(() => configWith("snapshot", PHASE_PRODUCTION_BUILD, { ...SETTINGS, [SITE]: "https://omnalynt.example/" }), {
+      message:
+        `${HEADER}\n  - ${SITE} must be the site's origin alone: https://<host> in lower case, with no path, trailing slash, ` +
+        'query, fragment, user name or default port; got "https://omnalynt.example/"',
+    });
+    assert.throws(() => configWith("snapshot", PHASE_PRODUCTION_BUILD, { ...SETTINGS, [GITHUB]: "https://github.com/o/r/tree/main" }), {
+      message:
+        `${HEADER}\n  - ${GITHUB} must be https://github.com/<owner>/<repo> with nothing after it ` +
+        '(no trailing slash, path, query or fragment); got "https://github.com/o/r/tree/main"',
+    });
+  });
+
+  it("local mode ignores both settings, valid, invalid or missing, in every phase", () => {
+    const variants = [{}, { [SITE]: "not a url", [GITHUB]: "not a url" }, SETTINGS];
+    for (const flag of [undefined, ""]) {
+      for (const phase of [PHASE_DEVELOPMENT_SERVER, PHASE_PRODUCTION_BUILD, PHASE_PRODUCTION_SERVER]) {
+        for (const settings of variants) assert.equal(configWith(flag, phase, settings).output, undefined);
+      }
+    }
+  });
+
+  it("refuses snapshot mode under next dev before it reads the settings", () => {
+    assert.throws(() => configWith("snapshot", PHASE_DEVELOPMENT_SERVER, {}), {
+      message: "snapshot mode is build-only; use npm run build:public",
+    });
+  });
+});
+
 describe("lib/mode.ts", () => {
   const read = "return { isSnapshot: m.isSnapshot, API_URL: m.API_URL };";
 
@@ -134,6 +204,22 @@ describe("lib/mode.ts", () => {
       isSnapshot: false,
       API_URL: "http://localhost:8000",
     });
+  });
+
+  it("lib/site.ts gives both site settings as set in the public build", () => {
+    assert.deepEqual(
+      runModule("lib/site.ts", { [FLAG]: "snapshot", ...SETTINGS }, "return { site: m.SITE_URL ?? null, github: m.GITHUB_URL ?? null };"),
+      { site: SETTINGS[SITE], github: SETTINGS[GITHUB] },
+    );
+  });
+
+  it("lib/site.ts ignores both site settings in local mode, even when they are set", () => {
+    for (const env of [{ ...SETTINGS }, { [FLAG]: "", ...SETTINGS }]) {
+      assert.deepEqual(
+        runModule("lib/site.ts", env, "return { site: m.SITE_URL ?? null, github: m.GITHUB_URL ?? null };"),
+        { site: null, github: null },
+      );
+    }
   });
 
   it("lib/api.ts re-exports the same API_URL", () => {

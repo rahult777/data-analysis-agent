@@ -8,6 +8,9 @@
 // Run with `npm run test:builds` (or name cases: `npm run test:builds --
 // fixture-guard`). Each case is a full build. Builds share .next and out/
 // with every other build and both e2e suites, so run nothing else alongside.
+// Each case sets valid site settings (M2b.4a), so it fails on its fixture,
+// not on next.config.mjs's settings check; a value set in the process also
+// beats frontend/.env.local.
 
 import { spawnSync } from "node:child_process";
 import path from "node:path";
@@ -16,6 +19,9 @@ import { fileURLToPath } from "node:url";
 const FRONTEND = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ID = "00000000-0000-4000-a000-000000000001";
 const BROKEN = "e2e/fixtures/snapshot-broken";
+// The public e2e's site settings (e2e-public/fixture.ts).
+const SITE_URL = "https://omnalynt.example";
+const GITHUB_URL = "https://github.com/e2e-owner/e2e-repo";
 
 const CASES = [
   {
@@ -61,6 +67,8 @@ for (const testCase of CASES.filter((c) => only.length === 0 || only.includes(c.
   delete env.SNAPSHOT_ALLOW_FIXTURE;
   delete env.VERCEL;
   if (testCase.allowFixture) env.SNAPSHOT_ALLOW_FIXTURE = "1";
+  env.NEXT_PUBLIC_SITE_URL = SITE_URL;
+  env.NEXT_PUBLIC_GITHUB_URL = GITHUB_URL;
 
   console.log(`\n=== ${testCase.name}: SNAPSHOT_DIR=${env.SNAPSHOT_DIR}${testCase.allowFixture ? " SNAPSHOT_ALLOW_FIXTURE=1" : ""} npm run build:public`);
   const run = spawnSync("npm", ["run", "build:public"], { cwd: FRONTEND, env, encoding: "utf8" });

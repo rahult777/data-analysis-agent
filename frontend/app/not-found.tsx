@@ -1,5 +1,11 @@
+import type { Metadata } from "next";
+
 // Any unknown address, in both modes; the public snapshot build exports it as
 // 404.html. Plain and neutral, with a plain link home (no next/link).
+
+// Next adds noindex to the 404 itself, and no canonical link reaches it.
+export const metadata: Metadata = { title: "Page not found" };
+
 export default function NotFound() {
   return (
     <main className="min-h-screen w-full px-6 py-8 sm:py-12 md:py-16">

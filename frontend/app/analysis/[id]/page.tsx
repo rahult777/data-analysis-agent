@@ -1,8 +1,24 @@
+import type { Metadata } from "next";
+
 import { AnalysisResults } from "@/components/AnalysisResults";
 import { isSnapshot } from "@/lib/mode";
 import { snapshotAnalyses, snapshotAnalysis, snapshotNote } from "@/lib/snapshot";
 
 import AnalysisPageClient from "./AnalysisPageClient";
+
+// A saved analysis's public page has its own title, description and canonical
+// link, and no openGraph (a page's openGraph would drop the site's card).
+// Local mode shows the visitor's own analysis: "Analysis". It reads no
+// snapshot data, so local mode never reaches the snapshot loader.
+export function generateMetadata({ params }: { params: { id: string } }): Metadata {
+  if (!isSnapshot) return { title: "Analysis" };
+  return {
+    title: "Example analysis",
+    description:
+      "A saved run of Omnalynt's four AI agents, shown read-only: the cleaning decisions, the charts and the report at three depths. Nothing the agents wrote has been corrected.",
+    alternates: { canonical: `/analysis/${params.id}` },
+  };
+}
 
 // Local mode renders the client page: live progress from the backend API, then
 // the results. The public snapshot build (`npm run build:public`) exports one
@@ -32,7 +48,7 @@ export default function AnalysisPage({ params }: { params: { id: string } }) {
             className="text-4xl sm:text-5xl md:text-6xl italic leading-tight"
             style={{ fontFamily: "var(--font-display)" }}
           >
-            Analysis
+            Example analysis
           </h1>
         </header>
         {/* The manifest's note, plain text with no motion, so it reads without JavaScript. */}

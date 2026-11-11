@@ -8,13 +8,15 @@ import path from "node:path";
 
 import { expect, test } from "@playwright/test";
 
-import { CANARY_API_URL, FIXTURE_ID } from "../e2e-public/fixture";
+import { CANARY_API_URL, FIXTURE_ID, TEST_SITE_URL } from "../e2e-public/fixture";
+import { BRAND_FILES, OLD_NAME, icoSizes, pngSize, robotsTxt, sitemapXml } from "../e2e-public/site";
 import { findForeignUuids } from "../lib/snapshot-rules.mjs";
 import { ANALYSIS, HIDDEN_STEMS, KEPT_CHARTS, MANIFEST, NOTE, PLOTLY, REAL_ID, SNAPSHOT_ABS } from "./snapshot";
 
 const NOTICE = "third-party-notices.txt";
 
 const OUT = path.join(__dirname, "..", "out");
+const APP = path.join(__dirname, "..", "app");
 const PAGE_FILES = [`analysis/${REAL_ID}.html`, `analysis/${REAL_ID}.txt`, "index.html", "index.txt"];
 
 // Keys the export dropped (its report at STOP 1) that are not also published
@@ -82,6 +84,23 @@ test("out/analysis/ holds exactly the real id, one .html and one .txt", () => {
   expect(readdirSync(path.join(OUT, "analysis")).sort()).toEqual([`${REAL_ID}.html`, `${REAL_ID}.txt`]);
 });
 
+test("out/robots.txt allows every page and points to the sitemap at the site's address", () => {
+  expect(readFileSync(path.join(OUT, "robots.txt"), "utf8")).toBe(robotsTxt(TEST_SITE_URL));
+});
+
+test("out/sitemap.xml lists '/' and the real analysis at the site's address", () => {
+  expect(readFileSync(path.join(OUT, "sitemap.xml"), "utf8")).toBe(sitemapXml([TEST_SITE_URL, `${TEST_SITE_URL}/analysis/${REAL_ID}`]));
+});
+
+test("the icons and the link-preview card ship byte for byte, at their sizes", () => {
+  for (const name of BRAND_FILES) {
+    expect(readFileSync(path.join(OUT, name)).equals(readFileSync(path.join(APP, name))), name).toBe(true);
+  }
+  expect(icoSizes(readFileSync(path.join(OUT, "favicon.ico")))).toEqual([16, 32, 48]);
+  expect(pngSize(readFileSync(path.join(OUT, "apple-icon.png")))).toEqual({ width: 180, height: 180 });
+  expect(pngSize(readFileSync(path.join(OUT, "opengraph-image.png")))).toEqual({ width: 1200, height: 630 });
+});
+
 test("out/demo/charts/ holds exactly frontend/snapshot/charts/, byte for byte: the 14 kept charts and plotly.min.js", () => {
   const charts = path.join(OUT, "demo", "charts");
   const expected = [...KEPT_CHARTS, PLOTLY].sort();
@@ -91,8 +110,10 @@ test("out/demo/charts/ holds exactly frontend/snapshot/charts/, byte for byte: t
   }
 });
 
-test("no exported file contains the fixture id, another UUID, localhost:8000, NEXT_PUBLIC_API_URL or the api-canary URL", () => {
-  const needles = [FIXTURE_ID, "localhost:8000", "NEXT_PUBLIC_API_URL", new URL(CANARY_API_URL).hostname];
+// localhost:3000 is Next's fallback when metadataBase is unset (the site's
+// address makes every metadata URL absolute); the old name is gone (M2b.4a).
+test("no exported file contains the fixture id, another UUID, localhost:8000, localhost:3000, NEXT_PUBLIC_API_URL, the api-canary URL or the old name", () => {
+  const needles = [FIXTURE_ID, "localhost:8000", "localhost:3000", "NEXT_PUBLIC_API_URL", new URL(CANARY_API_URL).hostname, OLD_NAME];
   const files = filesUnder(OUT);
   expect(files.length).toBeGreaterThan(0);
   const hits: string[] = [];

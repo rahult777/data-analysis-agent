@@ -1,6 +1,13 @@
+import type { Metadata } from "next";
+
 import { FileUpload } from "@/components/FileUpload";
 import { isSnapshot } from "@/lib/mode";
 import { snapshotAnalyses } from "@/lib/snapshot";
+
+// The site's root: its canonical link in the public build (the title is the
+// layout's default). Local mode has no site address, so it sets none, like
+// the analysis page.
+export const metadata: Metadata = isSnapshot ? { alternates: { canonical: "/" } } : {};
 
 export default function Home() {
   if (isSnapshot) return <SnapshotHome />;
@@ -13,7 +20,7 @@ export default function Home() {
             className="text-4xl sm:text-5xl md:text-6xl italic leading-tight"
             style={{ fontFamily: "var(--font-display)" }}
           >
-            Data Analysis Agent
+            Omnalynt
           </h1>
           <p
             className="text-base sm:text-lg text-muted-foreground"
@@ -42,7 +49,7 @@ function SnapshotHome() {
             className="text-4xl sm:text-5xl md:text-6xl italic leading-tight"
             style={{ fontFamily: "var(--font-display)" }}
           >
-            Data Analysis Agent
+            Omnalynt
           </h1>
           <p
             className="text-base sm:text-lg text-muted-foreground"

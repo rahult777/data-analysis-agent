@@ -32,7 +32,14 @@ export default defineConfig({
     url: `http://127.0.0.1:${PORT}`,
     reuseExistingServer: false,
     timeout: 180_000,
-    // A process env value takes precedence over frontend/.env.local.
-    env: { NEXT_PUBLIC_API_URL: MOCK_API_URL, NEXT_PUBLIC_DATA_SOURCE: "" },
+    // A process env value takes precedence over frontend/.env.local. Local
+    // mode ignores the public build's two site settings: deliberately invalid
+    // values prove it (next.config.mjs would refuse them in the public build).
+    env: {
+      NEXT_PUBLIC_API_URL: MOCK_API_URL,
+      NEXT_PUBLIC_DATA_SOURCE: "",
+      NEXT_PUBLIC_SITE_URL: "not a url",
+      NEXT_PUBLIC_GITHUB_URL: "not a url",
+    },
   },
 });

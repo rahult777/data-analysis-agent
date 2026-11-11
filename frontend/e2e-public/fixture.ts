@@ -11,6 +11,10 @@ export const FIXTURE_DIR = "e2e/fixtures/snapshot";
 // NEXT_PUBLIC_API_URL for the public build: no request may reach it, and no
 // built file may contain it.
 export const CANARY_API_URL = "http://api-canary.invalid";
+// The two site settings the public build requires (next.config.mjs): an RFC
+// 2606 address and a fictional repository, never fetched.
+export const TEST_SITE_URL = "https://omnalynt.example";
+export const TEST_GITHUB_URL = "https://github.com/e2e-owner/e2e-repo";
 
 export const FIXTURE_ID = "00000000-0000-4000-a000-000000000001";
 // The "About this example" note every fixture manifest carries: an independent

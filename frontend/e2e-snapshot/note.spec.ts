@@ -16,7 +16,7 @@ test("shows the manifest's note under 'About this example', between the page's h
   await expect(section.getByRole("heading", { level: 2, name: "About this example", exact: true })).toBeVisible();
   await expect(section.locator("p")).toHaveCount(1);
   expect(await section.locator("p").textContent()).toBe(NOTE);
-  const h1 = page.getByRole("heading", { level: 1, name: "Analysis" });
+  const h1 = page.getByRole("heading", { level: 1, name: "Example analysis", exact: true });
   const header = page.getByRole("heading", { name: "Analysis complete" });
   expect(await comesBefore(h1, section), "the page's h1 comes first").toBe(true);
   expect(await comesBefore(section, header), "then the note, then the results header").toBe(true);

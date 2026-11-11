@@ -6,7 +6,8 @@
 //   - a missing page gets 404.html with status 404;
 //   - query strings are ignored;
 //   - .txt is text/plain; charset=utf-8: Next's exported router fetches
-//     <path>.txt?_rsc=… and accepts only text/x-component or text/plain.
+//     <path>.txt?_rsc=… and accepts only text/x-component or text/plain;
+//   - .xml is application/xml, as Next's own sitemap route sends it.
 // Usage: node e2e-public/serve-static.mjs <root dir> <port>
 
 import fs from "node:fs";
@@ -27,6 +28,7 @@ const CONTENT_TYPES = {
   ".js": "application/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".xml": "application/xml",
   ".map": "application/json; charset=utf-8",
   ".png": "image/png",
   ".svg": "image/svg+xml",

@@ -6,9 +6,11 @@ import path from "node:path";
 
 import { expect, test } from "@playwright/test";
 
-import { CANARY_API_URL, FIXTURE_ABS, FIXTURE_ID, HTML_CHART, PLOTLY, PNG_CHART } from "./fixture";
+import { CANARY_API_URL, FIXTURE_ABS, FIXTURE_ID, HTML_CHART, PLOTLY, PNG_CHART, TEST_SITE_URL } from "./fixture";
+import { BRAND_FILES, OLD_NAME, icoSizes, pngSize, robotsTxt, sitemapXml } from "./site";
 
 const OUT = path.join(__dirname, "..", "out");
+const APP = path.join(__dirname, "..", "app");
 
 function filesUnder(dir: string): string[] {
   return readdirSync(dir, { recursive: true, encoding: "utf8" })
@@ -16,8 +18,10 @@ function filesUnder(dir: string): string[] {
     .sort();
 }
 
-test("no exported file contains localhost:8000, NEXT_PUBLIC_API_URL or the api-canary URL", () => {
-  const needles = ["localhost:8000", "NEXT_PUBLIC_API_URL", new URL(CANARY_API_URL).hostname];
+// localhost:3000 is Next's fallback when metadataBase is unset (the site's
+// address makes every metadata URL absolute); the old name is gone (M2b.4a).
+test("no exported file contains localhost:8000, localhost:3000, NEXT_PUBLIC_API_URL, the api-canary URL or the old name", () => {
+  const needles = ["localhost:8000", "localhost:3000", "NEXT_PUBLIC_API_URL", new URL(CANARY_API_URL).hostname, OLD_NAME];
   const files = filesUnder(OUT);
   expect(files.length).toBeGreaterThan(0);
   const hits: string[] = [];
@@ -30,6 +34,25 @@ test("no exported file contains localhost:8000, NEXT_PUBLIC_API_URL or the api-c
 
 test("out/analysis/ holds exactly the listed ids, one .html and one .txt each", () => {
   expect(readdirSync(path.join(OUT, "analysis")).sort()).toEqual([`${FIXTURE_ID}.html`, `${FIXTURE_ID}.txt`]);
+});
+
+test("out/robots.txt allows every page and points to the sitemap at the site's address", () => {
+  expect(readFileSync(path.join(OUT, "robots.txt"), "utf8")).toBe(robotsTxt(TEST_SITE_URL));
+});
+
+test("out/sitemap.xml lists '/' and the analysis at the site's address", () => {
+  expect(readFileSync(path.join(OUT, "sitemap.xml"), "utf8")).toBe(
+    sitemapXml([TEST_SITE_URL, `${TEST_SITE_URL}/analysis/${FIXTURE_ID}`]),
+  );
+});
+
+test("the icons and the link-preview card ship byte for byte, at their sizes", () => {
+  for (const name of BRAND_FILES) {
+    expect(readFileSync(path.join(OUT, name)).equals(readFileSync(path.join(APP, name))), name).toBe(true);
+  }
+  expect(icoSizes(readFileSync(path.join(OUT, "favicon.ico")))).toEqual([16, 32, 48]);
+  expect(pngSize(readFileSync(path.join(OUT, "apple-icon.png")))).toEqual({ width: 180, height: 180 });
+  expect(pngSize(readFileSync(path.join(OUT, "opengraph-image.png")))).toEqual({ width: 1200, height: 630 });
 });
 
 test("the third-party notice in public/ ships as out/third-party-notices.txt, byte for byte", () => {

@@ -11,7 +11,7 @@
 
 import { defineConfig, devices } from "@playwright/test";
 
-import { CANARY_API_URL } from "./e2e-public/fixture";
+import { CANARY_API_URL, TEST_GITHUB_URL, TEST_SITE_URL } from "./e2e-public/fixture";
 
 // Its own port (override with E2E_SNAPSHOT_PORT).
 const PORT = Number.parseInt(process.env.E2E_SNAPSHOT_PORT ?? "", 10) || 3201;
@@ -53,6 +53,9 @@ export default defineConfig({
       SNAPSHOT_DIR: "",
       SNAPSHOT_ALLOW_FIXTURE: "",
       NEXT_PUBLIC_API_URL: CANARY_API_URL,
+      // The public build requires both site settings (next.config.mjs).
+      NEXT_PUBLIC_SITE_URL: TEST_SITE_URL,
+      NEXT_PUBLIC_GITHUB_URL: TEST_GITHUB_URL,
     },
   },
 });

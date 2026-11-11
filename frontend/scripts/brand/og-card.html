@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Omnalynt link-preview card</title>
+<!--
+  The link-preview card, 1200 x 630, which scripts/brand-assets.mjs renders into
+  app/opengraph-image.png. The script fills in the site's own built font files;
+  nothing here loads from the network. The mark (app/icon.svg) is drawn at the
+  card's scale: its line runs on as the pipeline, with its diamond, the decision
+  node, on it. Colors are the dark theme's token values (globals.css, .dark):
+  background, foreground, muted-foreground, and chart-3 for the pipeline.
+-->
+<style>
+  @font-face { font-family: "Brand Sans"; src: url("{{DM_SANS}}") format("woff2"); font-weight: 100 1000; }
+  @font-face { font-family: "Brand Serif"; font-style: italic; src: url("{{INSTRUMENT_SERIF_ITALIC}}") format("woff2"); }
+  * { margin: 0; box-sizing: border-box; }
+  html, body { width: 1200px; height: 630px; overflow: hidden; background: #0a0a0a; }
+  body { color: #fafafa; font-family: "Brand Sans"; }
+  .name { position: absolute; left: 96px; top: 128px; font: italic 400 168px/1 "Brand Serif"; letter-spacing: -0.01em; }
+  /* The mark's line, run on past the card's edge: the pipeline. */
+  .pipeline { position: absolute; left: 96px; right: 0; top: 349px; height: 4px; background: #525252; }
+  .node { position: absolute; left: 150px; top: 327px; width: 48px; height: 48px; color: #fafafa; }
+  .tagline { position: absolute; left: 96px; top: 408px; font: 400 36px/1.3 "Brand Sans"; }
+  .tagline span { color: #a1a1a1; }
+</style>
+</head>
+<body>
+  <div class="name">Omnalynt</div>
+  <div class="pipeline"></div>
+  <svg class="node" viewBox="8 8 16 16" aria-hidden="true"><path fill="currentColor" d="M16 8l8 8l-8 8l-8-8Z"/></svg>
+  <p class="tagline">An agentic analytics pipeline:<br><span>LLM reasoning, deterministic execution, human checkpoints.</span></p>
+</body>
+</html>

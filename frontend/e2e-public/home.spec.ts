@@ -12,6 +12,7 @@ test("'/' links to each saved analysis and renders no upload UI", async ({ page,
   const requests = logRequests(page);
   const response = await page.goto("/");
   expect(response?.status()).toBe(200);
+  await expect(page.getByRole("heading", { level: 1, name: "Omnalynt", exact: true })).toBeVisible();
 
   const link = page.locator(`a[href="/analysis/${FIXTURE_ID}"]`);
   await expect(link).toHaveCount(1);
