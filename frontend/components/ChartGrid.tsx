@@ -5,6 +5,7 @@ import { motion } from "framer-motion";
 import { Maximize2, Minimize2 } from "lucide-react";
 
 import { chartUrl } from "@/lib/api";
+import { isSnapshot } from "@/lib/mode";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -120,9 +121,11 @@ export function ChartGrid({ chartPaths }: { chartPaths: string[] | null }) {
           Visualizations generated during the analysis. Select a chart to expand it.
         </p>
       </div>
+      {/* No entry animation in the public build (the cards inherit it): the
+          prerendered grid would stay transparent until JavaScript runs. */}
       <motion.div
         variants={container}
-        initial="hidden"
+        initial={isSnapshot ? false : "hidden"}
         animate="show"
         className="grid grid-cols-1 gap-4 sm:grid-cols-2"
       >

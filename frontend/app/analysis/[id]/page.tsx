@@ -41,7 +41,17 @@ export default function AnalysisPage({ params }: { params: { id: string } }) {
   const analysis = snapshotAnalysis(params.id);
   const note = snapshotNote(params.id);
   return (
-    <main className="min-h-screen w-full px-6 py-8 sm:py-12 md:py-16">
+    // The skip link's target: tabIndex -1 lets <main> take the focus itself,
+    // and as a focus target, not a control, it draws no ring.
+    <main id="main" tabIndex={-1} className="w-full flex-1 px-6 py-8 outline-none sm:py-12 md:py-16">
+      {/* Without JavaScript the closed layers stay in the page but hidden
+          (Base UI gives each panel `hidden`): show them. The selector is
+          unquoted because React escapes quotes inside <style>, which would
+          drop the rule; keep "&", "<" and ">" out of it too. It sits outside
+          the column below, where an empty element would still take a gap. */}
+      <noscript>
+        <style>{"[data-slot=accordion-content][hidden]{display:block!important}"}</style>
+      </noscript>
       <div className="mx-auto flex w-full max-w-4xl flex-col gap-12">
         <header className="flex flex-col gap-4 text-center">
           <h1
@@ -51,8 +61,9 @@ export default function AnalysisPage({ params }: { params: { id: string } }) {
             Example analysis
           </h1>
         </header>
-        {/* The manifest's note, plain text with no motion, so it reads without JavaScript. */}
-        <section aria-labelledby="about-this-example" className="flex flex-col gap-2 rounded-md border border-border/60 bg-card/40 p-5">
+        {/* The manifest's note, plain text with no motion, so it reads without JavaScript.
+            Its box keeps to the reading width: 29rem of text plus the padding. */}
+        <section aria-labelledby="about-this-example" className="flex max-w-[31.5rem] flex-col gap-2 rounded-md border border-border/60 bg-card/40 p-5">
           <h2 id="about-this-example" className="text-xl italic leading-tight" style={{ fontFamily: "var(--font-display)" }}>
             About this example
           </h2>

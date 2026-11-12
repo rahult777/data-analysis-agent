@@ -2,9 +2,9 @@
 // (M2b.3b.2), on the committed snapshot: the header's counts and its second
 // line; no raw chart file name outside the code blocks; nothing clipped
 // sideways (the clipping rule, with its own controls on synthetic boxes); the
-// Code section's label; and the page under locales whose digits are not
-// Latin (no hydration error, Latin digits in the header). Every test runs at
-// 320 px and at 1280 px.
+// Code section's label; and the page under en-US and under locales whose
+// digits are not Latin (no hydration error, Latin digits in the header).
+// Every test runs at 320 px and at 1280 px.
 
 import { expect, test, type Page } from "@playwright/test";
 
@@ -13,9 +13,11 @@ import { ANALYSIS, chartCardId, HEADER, KEPT_CHARTS, REAL_ID } from "./snapshot"
 
 const PAGE = `/analysis/${REAL_ID}`;
 const CODE_LABEL = "Written by the Explainer agent to illustrate each step. It is not the code that ran.";
-// Locales whose digits are not Latin: the old header's toLocaleString() broke
-// hydration under both (errors.md 2026-10-14).
-const LOCALES = ["fa-IR", "ar-SA"];
+// en-US, and two locales whose digits are not Latin: the old header's
+// toLocaleString() broke hydration under both (errors.md 2026-10-14). Since
+// M2b.4b the three layers are prerendered too, the correlation matrix among
+// them, so all of it hydrates under each locale.
+const LOCALES = ["en-US", "fa-IR", "ar-SA"];
 const DECIMAL_DIGIT = new RegExp("\\p{Nd}", "u");
 
 async function openEveryPanel(page: Page): Promise<void> {
@@ -116,9 +118,11 @@ for (const locale of LOCALES) {
       });
       page.on("pageerror", (error) => errors.push(`pageerror: ${error.message}`));
       await page.goto(PAGE);
-      // Hydration is over once a chart card shows its image: the cards render
-      // their media only after they mount (ChartGrid.tsx).
+      // Hydration is over once a chart card shows its image (the cards render
+      // their media only after they mount, ChartGrid.tsx) and each closed
+      // panel is hidden until found (Base UI sets that in an effect).
       await expect(page.locator(`#${chartCardId(KEPT_CHARTS[0])} img`)).toHaveCount(1);
+      await expect(page.locator('[data-slot="accordion-content"][hidden="until-found"]')).toHaveCount(3);
       expect.soft(errors, "no hydration error").toEqual([]);
       await expect.soft(page.locator("dl dd")).toHaveText(HEADER.dd);
       await expect.soft(page.locator('dl + p [aria-hidden="true"]')).toHaveText(HEADER.visible);

@@ -1,14 +1,15 @@
 // Unit tests for the public build's two site settings (lib/site-settings.mjs):
 // NEXT_PUBLIC_SITE_URL, the site's address, and NEXT_PUBLIC_GITHUB_URL, its
 // GitHub repository. next.config.mjs refuses the public build when either is
-// missing or invalid (lib/mode.test.mjs covers that wiring). Run with
+// missing or invalid (lib/mode.test.mjs covers that wiring). Also the owner's
+// GitHub profile, which githubProfileUrl derives from the repository. Run with
 // `npm run test:unit`. Never put this file under e2e/ or e2e-public/:
 // Playwright's default test pattern matches *.test.mjs.
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { checkGithubUrl, checkSiteUrl, siteSettingsProblems } from "./site-settings.mjs";
+import { checkGithubUrl, checkSiteUrl, githubProfileUrl, siteSettingsProblems } from "./site-settings.mjs";
 
 const SITE = "NEXT_PUBLIC_SITE_URL";
 const GITHUB = "NEXT_PUBLIC_GITHUB_URL";
@@ -155,6 +156,51 @@ describe("checkGithubUrl: the GitHub repository", () => {
   it("refuses a repository name GitHub would not accept, or a clone address", () => {
     for (const repo of [".", "..", "r.git", "r".repeat(101), "r!"]) {
       assert.deepEqual(checkGithubUrl(`https://github.com/o/${repo}`), [badRepo(repo)], repo);
+    }
+  });
+});
+
+describe("githubProfileUrl: the owner's GitHub profile, from the repository's address", () => {
+  it("gives the repository's origin plus its owner", () => {
+    assert.equal(githubProfileUrl("https://github.com/e2e-owner/e2e-repo"), "https://github.com/e2e-owner");
+    assert.equal(githubProfileUrl("https://github.com/a/b"), "https://github.com/a");
+    const owner = "a".repeat(39);
+    assert.equal(githubProfileUrl(`https://github.com/${owner}/r`), `https://github.com/${owner}`);
+  });
+
+  it("keeps the owner as written and drops the repository, even one named like its owner", () => {
+    assert.equal(githubProfileUrl("https://github.com/Owner-1/repo.name_x"), "https://github.com/Owner-1");
+    assert.equal(githubProfileUrl("https://github.com/same/same"), "https://github.com/same");
+  });
+
+  it("is the address's own origin plus one segment, with nothing after it", () => {
+    for (const value of ["https://github.com/e2e-owner/e2e-repo", "https://github.com/Owner-1/repo.name_x", `https://github.com/o/${"r".repeat(100)}`]) {
+      assert.deepEqual(checkGithubUrl(value), [], value);
+      const profile = githubProfileUrl(value);
+      assert.equal(typeof profile, "string", value);
+      const url = new URL(String(profile));
+      assert.equal(url.origin, new URL(value).origin, value);
+      assert.equal(url.href, profile, "no trailing slash, query or fragment");
+      assert.deepEqual(url.pathname.split("/"), ["", new URL(value).pathname.split("/")[1]], value);
+    }
+  });
+
+  it("gives nothing for a missing value or one checkGithubUrl refuses", () => {
+    for (const value of [
+      undefined,
+      "",
+      "http://github.com/o/r",
+      "https://gitlab.com/o/r",
+      "https://github.com/o",
+      "https://github.com/o/r/",
+      "https://github.com/o/r/tree/main",
+      " https://github.com/o/r",
+      "https://github.com/-o/r",
+      "https://github.com/o/r.git",
+      "not a url",
+    ]) {
+      assert.ok(checkGithubUrl(value).length > 0, JSON.stringify(value));
+      assert.equal(githubProfileUrl(value), undefined, JSON.stringify(value));
     }
   });
 });

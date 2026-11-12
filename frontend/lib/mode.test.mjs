@@ -222,6 +222,26 @@ describe("lib/mode.ts", () => {
     }
   });
 
+  it("lib/site.ts derives the owner's GitHub profile from the repository in the public build", () => {
+    assert.deepEqual(
+      runModule("lib/site.ts", { [FLAG]: "snapshot", ...SETTINGS }, "return { profile: m.GITHUB_PROFILE_URL ?? null };"),
+      { profile: "https://github.com/e2e-owner" },
+    );
+  });
+
+  it("lib/site.ts gives no profile in local mode, even when the repository is set", () => {
+    for (const env of [{ ...SETTINGS }, { [FLAG]: "", ...SETTINGS }]) {
+      assert.deepEqual(runModule("lib/site.ts", env, "return { profile: m.GITHUB_PROFILE_URL ?? null };"), { profile: null });
+    }
+  });
+
+  it("lib/site.ts never throws on a repository the rules refuse: it gives no profile", () => {
+    assert.deepEqual(
+      runModule("lib/site.ts", { [FLAG]: "snapshot", ...SETTINGS, [GITHUB]: "not a url" }, "return { profile: m.GITHUB_PROFILE_URL ?? null };"),
+      { profile: null },
+    );
+  });
+
   it("lib/api.ts re-exports the same API_URL", () => {
     assert.deepEqual(
       runModule("lib/api.ts", { [FLAG]: "snapshot", NEXT_PUBLIC_API_URL: "http://api-canary.invalid" }, "return m.API_URL;"),

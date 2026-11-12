@@ -4,6 +4,8 @@
 // build and refuses a missing or invalid value; local mode never reads them.
 // Each check gives at most one problem, the first that fails. Messages show
 // the expected form with placeholders, never an example address.
+// githubProfileUrl, also pure, derives the owner's profile address from the
+// repository for lib/site.ts.
 
 const SITE = "NEXT_PUBLIC_SITE_URL";
 const GITHUB = "NEXT_PUBLIC_GITHUB_URL";
@@ -79,6 +81,19 @@ export function checkGithubUrl(value) {
     ];
   }
   return [];
+}
+
+/**
+ * The owner's GitHub profile, derived from the repository's address: its
+ * origin plus the owner segment, so the site needs no third setting and holds
+ * no address of its own. Undefined for a value checkGithubUrl refuses.
+ * @param {string | undefined} value
+ * @returns {string | undefined}
+ */
+export function githubProfileUrl(value) {
+  if (value === undefined || checkGithubUrl(value).length > 0) return undefined;
+  const url = new URL(value);
+  return `${url.origin}/${url.pathname.split("/")[1]}`;
 }
 
 /**

@@ -1,6 +1,9 @@
 import type { Metadata, Viewport } from "next";
 import { DM_Sans, Instrument_Serif } from "next/font/google";
 
+import { SiteFooter } from "@/components/SiteFooter";
+import { SiteHeader } from "@/components/SiteHeader";
+import { isSnapshot } from "@/lib/mode";
 import { SITE_NAME, SITE_URL } from "@/lib/site";
 
 import "./globals.css";
@@ -53,7 +56,25 @@ export default function RootLayout({
       lang="en"
       className={`dark ${dmSans.variable} ${instrumentSerif.variable}`}
     >
-      <body className="font-sans antialiased">{children}</body>
+      {/* The public build's pages get a skip link, a header and a footer, as
+          landmarks outside each page's <main>; the 404 gets them too. The body
+          is a full-height column there, so the footer sits at the bottom of a
+          short page. Local mode's pages stay as they are. */}
+      <body className={isSnapshot ? "flex min-h-screen flex-col font-sans antialiased" : "font-sans antialiased"}>
+        {isSnapshot && (
+          <>
+            <a
+              href="#main"
+              className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:inline-flex focus:min-h-11 focus:items-center focus:rounded-md focus:bg-primary focus:px-4 focus:text-sm focus:font-medium focus:text-primary-foreground"
+            >
+              Skip to main content
+            </a>
+            <SiteHeader />
+          </>
+        )}
+        {children}
+        {isSnapshot && <SiteFooter />}
+      </body>
     </html>
   );
 }

@@ -19,7 +19,10 @@ for (const url of UNKNOWN) {
     // Not Next's default 404 page.
     await expect(page.getByText("This page could not be found.")).toHaveCount(0);
     expect(await page.evaluate(() => document.body.innerText)).not.toMatch(/upload/i);
-    await expect(page.locator('a[href="/"]')).toHaveCount(1);
+    // Two ways home: the page's own link, and the header's name (M2b.4b).
+    await expect(page.getByRole("main").locator('a[href="/"]')).toHaveCount(1);
+    await expect(page.getByRole("banner").locator('a[href="/"]')).toHaveCount(1);
+    await expect(page.locator('a[href="/"]')).toHaveCount(2);
     await expectNoHorizontalOverflow(page);
 
     await page.waitForLoadState("networkidle");

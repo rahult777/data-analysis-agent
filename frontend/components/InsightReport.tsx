@@ -3,6 +3,7 @@
 import { motion } from "framer-motion";
 import { ArrowRight, HelpCircle } from "lucide-react";
 
+import { isSnapshot } from "@/lib/mode";
 import { splitChartNames } from "@/lib/results";
 import type { CleaningDecision } from "@/lib/types";
 import {
@@ -163,11 +164,14 @@ export function InsightReportExecutive({
       {bullets.length === 0 ? (
         <EmptyNote>No executive summary was produced for this analysis.</EmptyNote>
       ) : (
+        // No entry animation in the public build (the bullets inherit it):
+        // the prerendered list would stay transparent until JavaScript runs.
+        // The cards keep to the reading width: 29rem of text plus the padding.
         <motion.ol
           variants={staggerContainer}
-          initial="hidden"
+          initial={isSnapshot ? false : "hidden"}
           animate="show"
-          className="flex flex-col gap-4"
+          className="flex max-w-[31.5rem] flex-col gap-4"
         >
           {bullets.map((bullet, i) => (
             <motion.li
@@ -207,7 +211,10 @@ export function InsightReportExecutive({
 // ---------------------------------------------------------------------------
 // Analyst + Open Questions + Technical — collapsible accordion, all closed.
 // Base UI drives the expand/collapse height animation natively; no Framer
-// Motion wraps the panels (see decisions.md).
+// Motion wraps the panels (see decisions.md). In the public build the closed
+// panels stay in the page (hiddenUntilFound): the browser's find-in-page opens
+// them, and a <noscript> rule on the analysis page shows them without
+// JavaScript. Local mode mounts a panel only when it is opened, as before.
 // ---------------------------------------------------------------------------
 
 export function InsightReportDetail({
@@ -232,7 +239,7 @@ export function InsightReportDetail({
   const correlationMatrix = readCorrelationMatrix(analysisReport);
 
   return (
-    <Accordion multiple className="flex flex-col">
+    <Accordion multiple hiddenUntilFound={isSnapshot} className="flex flex-col">
       <AccordionItem value="analyst" className="border-t border-border/60">
         <AccordionTrigger>
           <TriggerLabel
@@ -322,8 +329,8 @@ function AnalystPanel({
         <Callout title="Your question, addressed">{userQuestionAddressed}</Callout>
       )}
       {paragraphs.map((p, i) => (
-        <p key={i} className="text-sm leading-relaxed text-foreground/90 [overflow-wrap:anywhere]">
-          {/* A chart file name becomes a link to its card, labelled as the card is. */}
+        <p key={i} className="max-w-[29rem] text-sm leading-relaxed text-foreground/90 [overflow-wrap:anywhere]">
+          {/* The reading width. A chart file name becomes a link to its card, labelled as the card is. */}
           {splitChartNames(p, availableCharts).map((part, j) =>
             typeof part === "string" ? (
               part
@@ -375,8 +382,10 @@ function OpenQuestionsPanel({ questions }: { questions: OpenQuestion[] }) {
       </EmptyNote>
     );
   }
+  // The cards keep to the reading width: 29rem of text, plus the padding and
+  // the 1.5rem indent beside the question mark.
   return (
-    <ol className="flex flex-col gap-4 pt-1">
+    <ol className="flex max-w-[32.5rem] flex-col gap-4 pt-1">
       {questions.map((q, i) => (
         <li
           key={i}
@@ -444,7 +453,8 @@ function TechnicalPanel({
           <p className="text-sm uppercase tracking-wider text-muted-foreground">
             Cleaning decisions
           </p>
-          <ul className="flex flex-col gap-2">
+          {/* The cards keep to the reading width: 29rem of text plus the padding. */}
+          <ul className="flex max-w-[30.5rem] flex-col gap-2">
             {decisions.map((d, i) => (
               <li
                 key={i}
@@ -479,7 +489,8 @@ function TechnicalPanel({
           <p className="text-sm uppercase tracking-wider text-muted-foreground">
             Statistical methodology
           </p>
-          <p className="whitespace-pre-line text-sm leading-relaxed text-foreground/90 [overflow-wrap:anywhere]">
+          {/* The reading width, as for the narrative. */}
+          <p className="max-w-[29rem] whitespace-pre-line text-sm leading-relaxed text-foreground/90 [overflow-wrap:anywhere]">
             {statistical}
           </p>
         </div>
@@ -555,9 +566,10 @@ function TriggerLabel({
   );
 }
 
+// The box keeps to the reading width: 29rem of text plus the padding.
 function Callout({ title, children }: { title: string; children: string }) {
   return (
-    <div className="rounded-md border border-l-2 border-border/60 border-l-primary/50 bg-card/40 px-4 py-3">
+    <div className="max-w-[31rem] rounded-md border border-l-2 border-border/60 border-l-primary/50 bg-card/40 px-4 py-3">
       <p className="mb-1 text-sm uppercase tracking-wider text-muted-foreground">
         {title}
       </p>

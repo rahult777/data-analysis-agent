@@ -121,8 +121,10 @@ function AnalysisHeader({
   const shape = readHeaderShape(cleaningReport, rowCount, columnCount);
   const line = headerLine(shape);
   return (
+    // No entry animation in the public build: its prerendered header would
+    // otherwise stay transparent until JavaScript runs.
     <motion.header
-      initial={{ opacity: 0, y: 8 }}
+      initial={isSnapshot ? false : { opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3, ease: "easeOut" }}
       className="flex flex-col gap-5"

@@ -129,6 +129,107 @@ export async function expectNoClipping(page: Page): Promise<void> {
   expect(clipped, "no element clips its content sideways").toEqual([]);
 }
 
+// Every text on the page is drawn (M2b.4b): each element under <body> that
+// holds text of its own (a non-blank text node as a direct child) must be
+// displayed (no `display: none` on it or above it), with `visibility: visible`
+// and an effective opacity of 1 (its own times every ancestor's). Run it with
+// JavaScript off: content the static HTML keeps hidden until scripts run fails
+// here, and toBeVisible() would not notice an opacity of 0.
+// Skipped: script, style, noscript and template elements; visually hidden
+// elements (clip rect(0px, 0px, 0px, 0px), as sr-only sets it and as the
+// clipping rule above skips them: the skip link until it is focused, text for
+// screen readers); and the chart cards' loading placeholders (.animate-pulse),
+// which pulse and never clear without JavaScript: those are M2b.4c's (F3).
+export async function expectTextVisible(page: Page): Promise<void> {
+  const result = await page.evaluate(() => {
+    const hidden: string[] = [];
+    let texts = 0;
+    const visit = (element: Element, opacityAbove: number, displayedAbove: boolean): void => {
+      if (["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"].includes(element.tagName)) return;
+      const style = getComputedStyle(element);
+      if (style.clip === "rect(0px, 0px, 0px, 0px)") return;
+      // The chart cards' loading placeholders: M2b.4c (F3).
+      if (element.classList.contains("animate-pulse")) return;
+      const opacity = opacityAbove * Number(style.opacity);
+      const displayed = displayedAbove && style.display !== "none";
+      const ownText = Array.from(element.childNodes)
+        .filter((node) => node.nodeType === Node.TEXT_NODE)
+        .map((node) => node.textContent ?? "")
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (ownText !== "") {
+        texts += 1;
+        const problems: string[] = [];
+        if (!displayed) problems.push("not displayed");
+        if (style.visibility !== "visible") problems.push(`visibility ${style.visibility}`);
+        if (opacity !== 1) problems.push(`opacity ${opacity}`);
+        if (problems.length > 0) hidden.push(`<${element.tagName.toLowerCase()}> ${problems.join(", ")}: ${ownText.slice(0, 60)}`);
+      }
+      for (const child of Array.from(element.children)) visit(child, opacity, displayed);
+    };
+    visit(document.body, 1, true);
+    return { hidden, texts };
+  });
+  expect(result.texts, "the page has text").toBeGreaterThan(0);
+  expect(result.hidden, "every text is displayed, visible and at full opacity").toEqual([]);
+}
+
+export interface LineStats {
+  lines: number;
+  // Characters in the longest line, and in the median line.
+  longest: number;
+  median: number;
+}
+
+// The characters per line of an element's text as it is laid out: each
+// character is counted in the line box it is drawn in.
+export async function lineStats(locator: Locator): Promise<LineStats> {
+  return locator.evaluate((element) => {
+    const perLine = new Map<number, number>();
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    const range = document.createRange();
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const length = (node.textContent ?? "").length;
+      for (let i = 0; i < length; i += 1) {
+        range.setStart(node, i);
+        range.setEnd(node, i + 1);
+        const rect = range.getClientRects()[0];
+        if (!rect) continue;
+        const top = Math.round(rect.top);
+        perLine.set(top, (perLine.get(top) ?? 0) + 1);
+      }
+    }
+    const counts = Array.from(perLine.values()).sort((a, b) => a - b);
+    return {
+      lines: counts.length,
+      longest: counts.length > 0 ? counts[counts.length - 1] : 0,
+      median: counts.length > 0 ? counts[Math.floor(counts.length / 2)] : 0,
+    };
+  });
+}
+
+// One block of long text keeps to the reading width (owner rulings B6 and R4,
+// M2b.4b), in both modes (R5): the block has a max-width narrower than a wide
+// screen's column (896 px) and stays within it and within the page's column;
+// on a wide screen the text inside it (`text`, an element as wide as the
+// block's measure) is 29rem, 464 px, wide, give or take a card's borders.
+// Soft, so one run names every block that misses it.
+export async function expectReadingWidth(name: string, block: Locator, text: Locator, column: number, wide: boolean): Promise<void> {
+  await expect(block, name).toHaveCount(1);
+  await expect(text, `${name}: its text`).toHaveCount(1);
+  const { maxWidth, width } = await block.evaluate((element) => ({ maxWidth: getComputedStyle(element).maxWidth, width: element.getBoundingClientRect().width }));
+  expect.soft(maxWidth, `${name}: a max-width is set`).toMatch(/^\d+(\.\d+)?px$/);
+  expect.soft(Number.parseFloat(maxWidth), `${name}: narrower than a wide screen's column`).toBeLessThan(896);
+  expect.soft(width, `${name}: within its measure and the page's column`).toBeLessThanOrEqual(Math.min(Number.parseFloat(maxWidth), column) + 0.5);
+  if (!wide) return;
+  const measure = await text.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return element.clientWidth - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight);
+  });
+  expect.soft(Math.abs(measure - 464), `${name}: its text is 29rem wide (${measure} px)`).toBeLessThanOrEqual(3);
+}
+
 // Records every localStorage call the page makes (the local client page reads
 // session_id_<id>; the snapshot page must make none).
 export async function spyOnLocalStorage(page: Page): Promise<void> {

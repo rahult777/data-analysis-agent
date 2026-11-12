@@ -1,12 +1,16 @@
 // The site's identity as the e2e suites expect it (M2b.4a): the head metadata
-// of every page and the files it points to. The texts are independent literals,
-// never read from the app; the builders write robots.txt and sitemap.xml the
-// way Next serializes them. Shared by e2e-public, e2e-snapshot and the local
-// suite (e2e/).
+// of every page and the files it points to; and its front door (M2b.4b): the
+// landing page's copy and the header, footer and skip link every public page
+// carries. The texts are independent literals, never read from the app; the
+// builders write robots.txt and sitemap.xml the way Next serializes them.
+// Shared by e2e-public, e2e-snapshot and the local suite (e2e/).
 
-import { expect, type Page } from "@playwright/test";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 
-import { TEST_SITE_URL } from "./fixture";
+import { expect, type Locator, type Page } from "@playwright/test";
+
+import { TEST_GITHUB_PROFILE_URL, TEST_GITHUB_URL, TEST_SITE_URL } from "./fixture";
 
 export const SITE_NAME = "Omnalynt";
 export const OLD_NAME = "Data Analysis Agent";
@@ -134,4 +138,111 @@ export function expectIcons(head: HeadTags): void {
     { rel: "icon", href: "/icon.svg", type: "image/svg+xml", sizes: "any" },
     { rel: "apple-touch-icon", href: "/apple-icon.png", type: "image/png", sizes: "180x180" },
   ]);
+}
+
+// ---------------------------------------------------------------------------
+// The front door (M2b.4b).
+// ---------------------------------------------------------------------------
+
+// The landing page ("/" in the public build), in reading order. No text says
+// "upload", and the pauses ask "the person running it", never "you".
+export const TAGLINE = "An agentic analytics pipeline: LLM reasoning, deterministic execution, human checkpoints.";
+export const LANDING_LEAD =
+  "Omnalynt runs a spreadsheet, a CSV or an Excel (.xlsx) file, through four AI agents. They profile it, clean it, analyze it and write one report at three depths: a summary for decision-makers, the full narrative for analysts, and the methods and limits for data scientists. Where a choice belongs to a person, the run stops and asks.";
+export const LANDING_HOW = "How it works";
+// The key to the steps' markers: a diamond (the mark's decision node) stands
+// on the two steps that can pause, the Profiler's and the Cleaner's.
+export const LANDING_KEY = "A diamond marks a step where the run can stop and ask a person.";
+export const LANDING_AGENTS: ReadonlyArray<readonly [string, string]> = [
+  [
+    "Profiler",
+    "Code computes each column's statistics and counts the exact duplicate rows. The model then says what kind of data this is, with a confidence score. Below 80 out of 100, the run stops and asks the person running it to confirm or correct that.",
+  ],
+  [
+    "Cleaner",
+    "Exact duplicate rows are removed first, in code. For the rest, the model chooses from a fixed set of operations, and code checks each one, runs it and writes the record of what was done; the reasons are the model's own words. When a column is more than 30% empty, or when the model judges that extreme values need a person's call, the run stops and asks the person running it.",
+  ],
+  [
+    "Analyzer",
+    'Code computes the correlations and draws every chart. A correlation that rests on fewer than 30 complete pairs of values is labelled "Cannot Determine" instead of being reported as a finding. Code also checks that the model\'s analysis covers each of the Profiler\'s top concerns and every strong correlation, and asks the model again when it does not.',
+  ],
+  [
+    "Explainer",
+    "Writes the report: the findings with recommended actions, the analyst's narrative with its confidence in each finding, the technical detail, and the questions this data cannot answer.",
+  ],
+];
+export const LANDING_EXAMPLE_HEADING = "The example";
+export const LANDING_EXAMPLE =
+  "One saved run on a small synthetic sales file. Three of its cleaning decisions were made by the person running it, at pauses in the run, and are marked as theirs. Nothing the agents wrote has been corrected, so known errors are left in; a note at the top of the page says so and points out the clearest one.";
+export const EXAMPLE_LINK = "Open the example analysis";
+export const LANDING_READ_ONLY =
+  "This site is a read-only copy. The agents run only on their author's own computer, so nothing here can start an analysis or take in a file.";
+
+// The example's counts line, as the landing page writes it from the snapshot.
+export function exampleCounts(rows: number, columns: number): string {
+  return `${rows} rows and ${columns} columns before cleaning`;
+}
+
+// The header, footer and skip link of every public page.
+export const SKIP_LINK = "Skip to main content";
+export const HEADER_GITHUB = "GitHub";
+export const FOOTER_SOURCE = "Source on GitHub";
+export const FOOTER_NOTICES = "Third-party notices";
+export const NOTICES_URL = "/third-party-notices.txt";
+export const AUTHOR = "Rahul Tanikanti";
+export const BUILT_BY = `Built by ${AUTHOR}`;
+
+// The mark's path in app/icon.svg, which the header draws inline.
+export const ICON_PATH = / d="([^"]+)"/.exec(readFileSync(path.join(__dirname, "..", "app", "icon.svg"), "utf8"))?.[1] ?? "";
+
+async function hrefs(links: Locator): Promise<(string | null)[]> {
+  return links.evaluateAll((elements) => elements.map((a) => a.getAttribute("href")));
+}
+
+// The header, footer and skip link a public page carries (owner ruling B2):
+// one <header> and one <footer>, outside <main> and around it; the mark drawn
+// inline from app/icon.svg's path, never an <img>; plain links to the home
+// page, the repository, the third-party notices and the owner's profile; one
+// h1, which the header's name is not.
+export async function expectChrome(page: Page): Promise<void> {
+  expect(ICON_PATH, "app/icon.svg has a path").not.toBe("");
+  const header = page.getByRole("banner");
+  const main = page.getByRole("main");
+  const footer = page.getByRole("contentinfo");
+  await expect(header, "one header landmark").toHaveCount(1);
+  await expect(main, "one main landmark").toHaveCount(1);
+  await expect(footer, "one footer landmark").toHaveCount(1);
+  await expect(main).toHaveAttribute("id", "main");
+  const order = await page.evaluate(() => {
+    const mainElement = document.querySelector("main");
+    const outside = (tag: string) => Array.from(document.querySelectorAll(tag)).filter((element) => !mainElement?.contains(element));
+    const [headers, footers] = [outside("header"), outside("footer")];
+    if (mainElement === null || headers.length !== 1 || footers.length !== 1) return `${headers.length} header(s), ${footers.length} footer(s) outside <main>`;
+    const before = (a: Element, b: Element) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    return before(headers[0], mainElement) && before(mainElement, footers[0]) ? "header, main, footer" : "out of order";
+  });
+  expect(order).toBe("header, main, footer");
+  await expect(page.locator("h1"), "one h1").toHaveCount(1);
+
+  const skip = page.locator('a[href="#main"]');
+  await expect(skip).toHaveCount(1);
+  await expect(skip).toHaveText(SKIP_LINK);
+  await expect(page.getByRole("link").first(), "the skip link is the page's first link").toHaveText(SKIP_LINK);
+
+  const headerLinks = header.getByRole("link");
+  await expect(headerLinks).toHaveText([SITE_NAME, HEADER_GITHUB]);
+  expect(await hrefs(headerLinks)).toEqual(["/", TEST_GITHUB_URL]);
+  const mark = headerLinks.first().locator("svg");
+  await expect(mark, "the mark, inline").toHaveCount(1);
+  await expect(mark).toHaveAttribute("aria-hidden", "true");
+  await expect(mark.locator("path")).toHaveAttribute("d", ICON_PATH);
+  expect(await mark.evaluate((svg) => getComputedStyle(svg.querySelector("path") ?? svg).fill === getComputedStyle(svg).color), "drawn in the text color").toBe(true);
+
+  const footerLinks = footer.getByRole("link");
+  await expect(footerLinks).toHaveText([FOOTER_SOURCE, FOOTER_NOTICES, AUTHOR]);
+  expect(await hrefs(footerLinks)).toEqual([TEST_GITHUB_URL, NOTICES_URL, TEST_GITHUB_PROFILE_URL]);
+  await expect(footer).toContainText(BUILT_BY);
+
+  await expect(header.locator("img, iframe"), "no image or frame in the header").toHaveCount(0);
+  await expect(footer.locator("img, iframe"), "no image or frame in the footer").toHaveCount(0);
 }

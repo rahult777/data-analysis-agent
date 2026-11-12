@@ -15,6 +15,9 @@ export const CANARY_API_URL = "http://api-canary.invalid";
 // 2606 address and a fictional repository, never fetched.
 export const TEST_SITE_URL = "https://omnalynt.example";
 export const TEST_GITHUB_URL = "https://github.com/e2e-owner/e2e-repo";
+// The owner's profile the footer links to, which the site derives from the
+// repository (lib/site-settings.mjs githubProfileUrl): an independent literal.
+export const TEST_GITHUB_PROFILE_URL = "https://github.com/e2e-owner";
 
 export const FIXTURE_ID = "00000000-0000-4000-a000-000000000001";
 // The "About this example" note every fixture manifest carries: an independent

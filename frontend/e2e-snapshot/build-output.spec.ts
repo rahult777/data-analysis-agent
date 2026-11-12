@@ -8,7 +8,7 @@ import path from "node:path";
 
 import { expect, test } from "@playwright/test";
 
-import { CANARY_API_URL, FIXTURE_ID, TEST_SITE_URL } from "../e2e-public/fixture";
+import { CANARY_API_URL, FIXTURE_ID, TEST_GITHUB_URL, TEST_SITE_URL } from "../e2e-public/fixture";
 import { BRAND_FILES, OLD_NAME, icoSizes, pngSize, robotsTxt, sitemapXml } from "../e2e-public/site";
 import { findForeignUuids } from "../lib/snapshot-rules.mjs";
 import { ANALYSIS, HIDDEN_STEMS, KEPT_CHARTS, MANIFEST, NOTE, PLOTLY, REAL_ID, SNAPSHOT_ABS } from "./snapshot";
@@ -123,6 +123,25 @@ test("no exported file contains the fixture id, another UUID, localhost:8000, lo
     for (const uuid of findForeignUuids(text, REAL_ID)) hits.push(`UUID ${uuid} in out/${rel}`);
   }
   expect(hits).toEqual([]);
+});
+
+// lib/site.ts is for server code only (owner ruling, 2026-11-11): a client
+// component that imported it would compile the settings into its bundle. The
+// pages' HTML and RSC payloads do carry the addresses; the scripts must not.
+test("no client script or style carries a site setting: neither address is in out/_next/static", () => {
+  const dir = path.join(OUT, "_next", "static");
+  const files = filesUnder(dir);
+  expect(files.filter((rel) => rel.endsWith(".js")).length, "client scripts").toBeGreaterThan(0);
+  const hits: string[] = [];
+  for (const rel of files) {
+    const text = readFileSync(path.join(dir, rel), "latin1");
+    for (const needle of [TEST_SITE_URL, new URL(TEST_SITE_URL).hostname, TEST_GITHUB_URL]) if (text.includes(needle)) hits.push(`${needle} in out/_next/static/${rel}`);
+  }
+  expect(hits).toEqual([]);
+  // The check sees the addresses where they belong: the page itself.
+  const home = readFileSync(path.join(OUT, "index.html"), "utf8");
+  expect(home.includes(TEST_SITE_URL), "the site's address is in index.html").toBe(true);
+  expect(home.includes(TEST_GITHUB_URL), "the repository's address is in index.html").toBe(true);
 });
 
 test("no exported file names a hidden chart: not the pages, their RSC payloads, the charts or the scripts", () => {
