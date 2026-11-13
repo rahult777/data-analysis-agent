@@ -45,12 +45,17 @@ export default function AnalysisPage({ params }: { params: { id: string } }) {
     // and as a focus target, not a control, it draws no ring.
     <main id="main" tabIndex={-1} className="w-full flex-1 px-6 py-8 outline-none sm:py-12 md:py-16">
       {/* Without JavaScript the closed layers stay in the page but hidden
-          (Base UI gives each panel `hidden`): show them. The selector is
-          unquoted because React escapes quotes inside <style>, which would
-          drop the rule; keep "&", "<" and ">" out of it too. It sits outside
-          the column below, where an empty element would still take a gap. */}
+          (Base UI gives each panel `hidden`): show them. A chart card's
+          loading placeholder would pulse forever: hide it. An interactive
+          chart cannot draw: show its card's line instead (ChartGrid.tsx).
+          The selectors are unquoted because React escapes quotes inside
+          <style>, which would drop the rule; keep "&", "<" and ">" out of it
+          too. It sits outside the column below, where an empty element would
+          still take a gap. */}
       <noscript>
-        <style>{"[data-slot=accordion-content][hidden]{display:block!important}"}</style>
+        <style>
+          {"[data-slot=accordion-content][hidden]{display:block!important}[data-chart-placeholder]{display:none!important}[data-chart-nojs][hidden]{display:flex!important}"}
+        </style>
       </noscript>
       <div className="mx-auto flex w-full max-w-4xl flex-col gap-12">
         <header className="flex flex-col gap-4 text-center">

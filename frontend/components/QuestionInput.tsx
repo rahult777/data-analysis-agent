@@ -6,6 +6,7 @@ import { motion } from "framer-motion";
 import { AlertTriangle, Clock, Loader2, Send } from "lucide-react";
 
 import { getQuestion, postQuestion } from "@/lib/api";
+import { formatCount } from "@/lib/results";
 import type { QuestionStatus } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,6 +14,12 @@ import { CodeBlock } from "@/components/CodeBlock";
 
 const POLL_INTERVAL_MS = 3000;
 const MAX_POLLS = 40; // ~2 minutes at 3s cadence
+// The longest question the box takes (owner ruling Q15). At JSON's worst, 6
+// bytes per character, the request stays far under the backend's 64 KiB body
+// cap (backend/utils/request_gate.py), which refuses a longer body with 413;
+// the backend has no length check of its own yet (tasks.md, M5). A browser
+// cuts a longer paste silently, so the owner's view says so in a hint.
+const MAX_QUESTION_LENGTH = 2000;
 
 interface SubmittedQuestion {
   questionId: string;
@@ -71,9 +78,13 @@ export function QuestionInput({
         >
           Ask a question
         </h3>
+        {/* What answer_question does (backend/agents/explainer.py): a model
+            writes pandas code, the code runs on the cleaned data, and a model
+            describes the result, so the answer's words are the model's. */}
         <p className="text-sm text-muted-foreground">
-          Query the cleaned dataset directly — every answer is computed with
-          pandas and shows its code.
+          Ask about the cleaned data. The Explainer writes pandas code for your
+          question, runs it on the data and describes the result. The code that
+          ran is shown with each answer: check it before relying on the answer.
         </p>
       </div>
 
@@ -104,7 +115,8 @@ export function QuestionInput({
                 : "Read-only view"
             }
             aria-label="Ask a question about this dataset"
-            aria-describedby={isOwner ? undefined : "question-readonly-note"}
+            aria-describedby={isOwner ? "question-limit-hint" : "question-readonly-note"}
+            maxLength={MAX_QUESTION_LENGTH}
             disabled={!isOwner || submitting}
             className="h-11 flex-1"
           />
@@ -128,6 +140,11 @@ export function QuestionInput({
             <span>Ask</span>
           </Button>
         </div>
+        {isOwner && (
+          <p id="question-limit-hint" className="text-sm text-muted-foreground">
+            Questions can be up to {formatCount(MAX_QUESTION_LENGTH)} characters.
+          </p>
+        )}
         {!isOwner && (
           <p id="question-readonly-note" className="text-sm text-muted-foreground">
             You&apos;re viewing a read-only copy of this analysis. Questions can

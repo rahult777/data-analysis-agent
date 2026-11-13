@@ -52,6 +52,42 @@ export function expectSameOriginOnly(log: LoggedRequest[], baseURL: string | und
   ).toEqual([]);
 }
 
+// Every response the page and its frames receive, with its status and its
+// headers (names in lower case).
+export interface LoggedResponse {
+  url: string;
+  status: number;
+  headers: Record<string, string>;
+}
+
+export function logResponses(page: Page): LoggedResponse[] {
+  const log: LoggedResponse[] = [];
+  page.on("response", (response) => {
+    log.push({ url: response.url(), status: response.status(), headers: response.headers() });
+  });
+  return log;
+}
+
+// The Content Security Policy violations the page and every frame it loads
+// report (the securitypolicyviolation event; an init script runs in every
+// frame, the sandboxed chart frames included). Call before the first
+// navigation; each entry names the directive, what was blocked and where.
+const VIOLATION = "csp violation: ";
+
+export async function recordCspViolations(page: Page): Promise<string[]> {
+  const violations: string[] = [];
+  page.on("console", (message) => {
+    const text = message.text();
+    if (text.startsWith(VIOLATION)) violations.push(text.slice(VIOLATION.length));
+  });
+  await page.addInitScript((prefix: string) => {
+    document.addEventListener("securitypolicyviolation", (event) => {
+      console.log(`${prefix}${event.effectiveDirective} ${event.blockedURI || "(inline)"} on ${location.pathname}`);
+    });
+  }, VIOLATION);
+  return violations;
+}
+
 export function statusCalls(log: LoggedRequest[]): string[] {
   return log.filter((r) => /\/status$/.test(new URL(r.url).pathname)).map((r) => r.url);
 }
@@ -100,9 +136,9 @@ export async function expectNoHorizontalOverflow(page: Page): Promise<void> {
 // to auto beside a hidden overflow-x, and such an element is still checked.
 // Skipped: elements that are not displayed; horizontal scroll containers
 // (overflow-x auto or scroll: the code blocks, the correlation matrix) and
-// their subtrees; visually hidden elements (clip rect(0px, 0px, 0px, 0px), as
-// sr-only sets it); and a chart card's title, which an ellipsis truncates by
-// design (card-title wrapping is an M2b.4 task). Open every panel first.
+// their subtrees; and visually hidden elements (clip rect(0px, 0px, 0px, 0px),
+// as sr-only sets it). The chart cards' titles wrap since M2b.4c, so they are
+// checked like everything else. Open every panel first.
 export async function expectNoClipping(page: Page): Promise<void> {
   await page.evaluate(() => document.fonts.ready.then(() => undefined));
   const clipped = await page.evaluate(() => {
@@ -113,9 +149,8 @@ export async function expectNoClipping(page: Page): Promise<void> {
       if (style.display === "none") return;
       if (scrolls(style.overflowX)) return;
       if (style.clip === "rect(0px, 0px, 0px, 0px)") return;
-      const cardTitle = style.textOverflow === "ellipsis" && element.closest('[id^="chart-"]') !== null;
       const hides = style.overflowX === "hidden" || style.overflowX === "clip";
-      if (hides && !cardTitle && element.scrollWidth > element.clientWidth) {
+      if (hides && element.scrollWidth > element.clientWidth) {
         const text = (element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 80);
         found.push(`<${element.tagName.toLowerCase()} class="${element.getAttribute("class") ?? ""}"> ${element.scrollWidth}/${element.clientWidth}: ${text}`);
       }
@@ -138,8 +173,8 @@ export async function expectNoClipping(page: Page): Promise<void> {
 // Skipped: script, style, noscript and template elements; visually hidden
 // elements (clip rect(0px, 0px, 0px, 0px), as sr-only sets it and as the
 // clipping rule above skips them: the skip link until it is focused, text for
-// screen readers); and the chart cards' loading placeholders (.animate-pulse),
-// which pulse and never clear without JavaScript: those are M2b.4c's (F3).
+// screen readers). The chart cards' loading placeholders hold no text; since
+// M2b.4c the public page hides them without JavaScript (the nojs specs check).
 export async function expectTextVisible(page: Page): Promise<void> {
   const result = await page.evaluate(() => {
     const hidden: string[] = [];
@@ -148,8 +183,6 @@ export async function expectTextVisible(page: Page): Promise<void> {
       if (["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"].includes(element.tagName)) return;
       const style = getComputedStyle(element);
       if (style.clip === "rect(0px, 0px, 0px, 0px)") return;
-      // The chart cards' loading placeholders: M2b.4c (F3).
-      if (element.classList.contains("animate-pulse")) return;
       const opacity = opacityAbove * Number(style.opacity);
       const displayed = displayedAbove && style.display !== "none";
       const ownText = Array.from(element.childNodes)

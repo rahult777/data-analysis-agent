@@ -5,13 +5,15 @@
 // at full opacity. On a wide screen the note, the executive bullets and the
 // narrative (F6), and the open questions, the cleaning decisions, the
 // methodology and the callouts (owner ruling R4), keep to one reading width.
-// The chart cards' loading placeholders stay up without JavaScript: M2b.4c
-// (F3). Every test runs at 320 px and at 1280 px.
+// Without JavaScript every chart image is drawn, no loading placeholder
+// pulses, and the scatter's card says it needs JavaScript (M2b.4c, F3). Every
+// test runs at 320 px and at 1280 px.
 
 import { expect, test } from "@playwright/test";
 
 import { expectNoHorizontalOverflow, expectTextVisible, lineStats, shot } from "../e2e-public/helpers";
-import { ANALYSIS, KEPT_CHARTS, NOTE, REAL_ID } from "./snapshot";
+import { CHART_NOJS_LINE } from "../e2e-public/site";
+import { ANALYSIS, chartCardId, KEPT_CHARTS, NOTE, REAL_ID, SCATTER_CHART } from "./snapshot";
 
 const PAGE = `/analysis/${REAL_ID}`;
 const PANELS = '[data-slot="accordion-content"]';
@@ -140,5 +142,22 @@ test.describe("the prerendered HTML (JavaScript off)", () => {
     await expect(technical.locator("pre code")).toHaveCount(26);
     await expectNoHorizontalOverflow(page);
     await shot(page, info, "snapshot-layers-js-off");
+  });
+
+  test("the charts: every image is drawn, nothing pulses, and the scatter's card says it needs JavaScript", async ({ page }, info) => {
+    await page.goto(PAGE);
+    for (const name of KEPT_CHARTS) {
+      if (name === SCATTER_CHART) continue;
+      const img = page.locator(`#${chartCardId(name)} img`);
+      await expect(img, `${name}: the image, without JavaScript`).toHaveCount(1);
+      await img.scrollIntoViewIfNeeded();
+      await expect.poll(() => img.evaluate((element: HTMLImageElement) => element.complete && element.naturalWidth > 0), { message: name }).toBe(true);
+    }
+    const scatter = page.locator(`#${chartCardId(SCATTER_CHART)}`);
+    await expect(scatter.getByText(CHART_NOJS_LINE, { exact: true })).toBeVisible();
+    await expect(scatter.locator("iframe")).toHaveCount(0);
+    const pulsing = await page.locator(".animate-pulse").evaluateAll((elements) => elements.filter((element) => getComputedStyle(element).display !== "none").length);
+    expect(pulsing, "loading placeholders shown").toBe(0);
+    await shot(page, info, "snapshot-charts-js-off");
   });
 });

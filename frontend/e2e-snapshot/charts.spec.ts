@@ -1,17 +1,21 @@
 // The real analysis page's charts: every kept chart loads from the site's own
 // /demo/charts/, a hidden chart never appears or loads, nothing leaves the
 // site's origin, and the real scatter renders in its scripts-only sandbox.
-// Every test runs at 320 px and at 1280 px.
+// Since M2b.4c every card's title shows its whole label (it wraps, never an
+// ellipsis) and every PNG card links to its image at full size. Every test
+// runs at 320 px and at 1280 px.
 
 import { expect, test, type Page } from "@playwright/test";
 
 import { expectSameOriginOnly, logRequests, saveRequestLog, shot, statusCalls } from "../e2e-public/helpers";
+import { FULL_SIZE } from "../e2e-public/site";
 import {
   chartCardId,
   chartUrl,
   HIDDEN_CHARTS,
   HIDDEN_STEMS,
   KEPT_CHARTS,
+  NARRATIVE_LABELS,
   PLOTLY,
   REAL_ID,
   SCATTER_CHART,
@@ -82,4 +86,59 @@ test("the real scatter renders in its sandbox: 185 points, an opaque origin, plo
   expect(errors).toEqual([]);
   saveRequestLog(requests, info, "snapshot-scatter");
   await shot(page, info, "snapshot-scatter");
+});
+
+// A card's title: the first element of its first row (ChartGrid.tsx).
+test("every card's title shows its whole label: it wraps instead of ending in an ellipsis", async ({ page }, info) => {
+  await page.goto(PAGE);
+  const titles = await page.locator('[id^="chart-"]').evaluateAll((cards) =>
+    cards.map((card) => {
+      const title = card.firstElementChild?.firstElementChild ?? null;
+      if (!(title instanceof HTMLElement)) return { text: "", ellipsis: true, clipped: true, lines: 0 };
+      const style = getComputedStyle(title);
+      return {
+        text: title.textContent ?? "",
+        ellipsis: style.textOverflow === "ellipsis",
+        clipped: title.scrollWidth > title.clientWidth,
+        lines: Math.round(title.getBoundingClientRect().height / Number.parseFloat(style.lineHeight)),
+      };
+    }),
+  );
+  expect(titles).toHaveLength(KEPT_CHARTS.length);
+  for (const title of titles) {
+    expect.soft(title.ellipsis, `${title.text}: no ellipsis`).toBe(false);
+    expect.soft(title.clipped, `${title.text}: nothing cut off`).toBe(false);
+  }
+  // The labels the narrative names, whole (independent literals).
+  const shown = titles.map((title) => title.text);
+  for (const [, label] of NARRATIVE_LABELS) expect.soft(shown, label).toContain(label);
+  // On a phone the three longest labels take a second line (they ended in an
+  // ellipsis before M2b.4c).
+  if ((page.viewportSize()?.width ?? 0) <= 320) expect(titles.filter((title) => title.lines > 1).length, "titles on two lines at 320 px").toBeGreaterThanOrEqual(3);
+  await shot(page, info, "snapshot-chart-titles");
+});
+
+test("every PNG card offers its image at full size through a plain link named for its chart; the scatter's card has none", async ({ page }) => {
+  await page.goto(PAGE);
+  const labels = new Map(NARRATIVE_LABELS);
+  for (const name of KEPT_CHARTS) {
+    const card = page.locator(`#${chartCardId(name)}`);
+    const links = card.getByRole("link");
+    if (name === SCATTER_CHART) {
+      await expect(links, name).toHaveCount(0);
+      continue;
+    }
+    await expect(links, name).toHaveCount(1);
+    await expect(links, name).toHaveAttribute("href", chartUrl(name));
+    await expect(card.locator("img"), name).toHaveAttribute("src", chartUrl(name));
+    expect(await links.evaluate((a) => a.getAttributeNames().sort()), `${name}: a plain link`).toEqual(["class", "href"]);
+    const title = await card.evaluate((element) => element.firstElementChild?.firstElementChild?.textContent ?? "");
+    const label = labels.get(name);
+    if (label !== undefined) expect(title, name).toBe(label);
+    await expect(links, name).toHaveAccessibleName(`${FULL_SIZE} (${title})`);
+    expect((await links.boundingBox())?.height ?? 0, `${name}: a tap target`).toBeGreaterThanOrEqual(44);
+  }
+  // The links add neither an image nor a frame: 13 images, 1 frame.
+  await expect(page.locator("img")).toHaveCount(KEPT_CHARTS.length - 1);
+  await expect(page.locator("iframe")).toHaveCount(1);
 });

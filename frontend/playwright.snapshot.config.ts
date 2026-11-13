@@ -43,7 +43,9 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: `npm run build:public && node e2e-public/serve-static.mjs out ${PORT}`,
+    // Served with frontend/vercel.json's headers and trailing-slash rule, as
+    // Vercel serves the site (M2b.4c).
+    command: `npm run build:public && node e2e-public/serve-static.mjs out ${PORT} vercel.json`,
     url: `http://127.0.0.1:${PORT}`,
     reuseExistingServer: false,
     // A full static build runs first.

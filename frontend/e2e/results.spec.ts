@@ -57,17 +57,15 @@ function header(page: Page): { dd: Locator; line: Locator } {
   return { dd: page.locator("dl dd"), line: page.locator("dl + p") };
 }
 
-// Opens an accordion panel and returns it. Under next dev (React's StrictMode)
-// Base UI 1.4.1 drops the panel's aria-labelledby, so its region has no name
-// there (the static build keeps it): find the panel through the trigger's
-// aria-controls instead.
+// Opens an accordion panel and returns it: the region its trigger names. Each
+// trigger has an explicit id (InsightReport.tsx), which Base UI 1.4.1 keeps
+// under next dev's StrictMode, so the name holds here too (M2b.4c; errors.md
+// 2026-10-18).
 async function openPanel(page: Page, name: RegExp): Promise<Locator> {
   const trigger = page.getByRole("button", { name });
   await trigger.click();
   await expect(trigger).toHaveAttribute("aria-expanded", "true");
-  const id = await trigger.getAttribute("aria-controls");
-  expect(id, "the trigger names its panel").toBeTruthy();
-  return page.locator(`[id="${id}"]`);
+  return page.getByRole("region", { name });
 }
 
 let api: MockApi;
@@ -190,6 +188,18 @@ test("a long chart file name in an executive bullet wraps instead of widening th
     expect.soft(fits, `the ${field} text fits its bullet`).toBe(true);
   }
   await expectNoHorizontalOverflow(page);
+});
+
+// M2b.4c (F9): each AccordionTrigger has an explicit id, which Base UI 1.4.1
+// keeps through React's StrictMode under next dev, so each panel is a region
+// named by its trigger here too (errors.md 2026-10-18).
+test("each layer opens a region named by its trigger, under next dev too", async ({ page }) => {
+  api.setAnalysis(analysis({ insight_report: { analyst_layer: { narrative: "A short narrative." }, technical_layer: { code_blocks: ["df.head()"] } } }));
+  await openAsVisitor(page);
+  for (const name of [/Analyst Report/, /Open Questions/, /Technical Detail/]) {
+    await page.getByRole("button", { name }).click();
+    await expect(page.getByRole("region", { name }), `${name}`).toBeVisible();
+  }
 });
 
 test.describe("under a Danish locale", () => {

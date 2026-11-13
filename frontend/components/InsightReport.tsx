@@ -215,6 +215,9 @@ export function InsightReportExecutive({
 // panels stay in the page (hiddenUntilFound): the browser's find-in-page opens
 // them, and a <noscript> rule on the analysis page shows them without
 // JavaScript. Local mode mounts a panel only when it is opened, as before.
+// Each trigger has an explicit id: Base UI 1.4.1 keeps only an explicit id
+// through React's StrictMode (next dev), so each panel stays named by its
+// trigger there too (errors.md 2026-10-18). One accordion per page.
 // ---------------------------------------------------------------------------
 
 export function InsightReportDetail({
@@ -241,7 +244,7 @@ export function InsightReportDetail({
   return (
     <Accordion multiple hiddenUntilFound={isSnapshot} className="flex flex-col">
       <AccordionItem value="analyst" className="border-t border-border/60">
-        <AccordionTrigger>
+        <AccordionTrigger id="analyst-report-trigger">
           <TriggerLabel
             title="Analyst Report"
             description="For analysts — the full narrative, evidence, and confidence."
@@ -258,7 +261,7 @@ export function InsightReportDetail({
       </AccordionItem>
 
       <AccordionItem value="open-questions" className="border-t border-border/60">
-        <AccordionTrigger>
+        <AccordionTrigger id="open-questions-trigger">
           <TriggerLabel
             title="Open Questions"
             description="What this data cannot answer — and what would."
@@ -273,7 +276,7 @@ export function InsightReportDetail({
         value="technical"
         className="border-t border-b border-border/60"
       >
-        <AccordionTrigger>
+        <AccordionTrigger id="technical-detail-trigger">
           <TriggerLabel
             title="Technical Detail"
             description="For data scientists — methodology, code, and limitations."

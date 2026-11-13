@@ -111,3 +111,22 @@ test("the intelligence layers render from the real data: domain hypothesis, conf
   await expectNoHorizontalOverflow(page);
   await shot(page, info, "snapshot-layers");
 });
+
+// M2b.4c (F5): a chart card is a focus target (tabIndex -1), so following a
+// narrative link by keyboard moves the focus to the card it scrolls to, and
+// the card shows it with a focus ring.
+test("each narrative link moves the keyboard focus to its chart card, which draws a focus ring", async ({ page }, info) => {
+  await page.goto(PAGE);
+  await page.getByRole("button", { name: /Analyst Report/ }).click();
+  const analyst = page.getByRole("region", { name: /Analyst Report/ });
+  await expect(analyst.locator("p a[href^='#chart-']")).toHaveCount(NARRATIVE_LABELS.length);
+  for (const [name, label] of NARRATIVE_LABELS) {
+    await analyst.locator(`p a[href="#${chartCardId(name)}"]`).focus();
+    await page.keyboard.press("Enter");
+    const card = page.locator(`#${chartCardId(name)}`);
+    await expect(card, label).toBeFocused();
+    expect.soft(await card.evaluate((element) => element.matches(":focus-visible")), `${label}: keyboard focus`).toBe(true);
+    expect.soft(await card.evaluate((element) => getComputedStyle(element).boxShadow), `${label}: a focus ring`).not.toBe("none");
+  }
+  await shot(page, info, "snapshot-card-focused");
+});

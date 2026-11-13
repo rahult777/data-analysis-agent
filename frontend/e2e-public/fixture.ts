@@ -31,6 +31,13 @@ export const HTML_CHART = `${FIXTURE_ID}_scatter_fixture_x_fixture_y.html`;
 // The fixture's stand-in for plotly's bundle: the snapshot rules require
 // plotly.min.js beside an HTML chart (M2b.3a).
 export const PLOTLY = "plotly.min.js";
+// The PNG chart's label, as its card shows it: an independent literal.
+export const PNG_LABEL = "Distribution \u2014 fixture value";
+
+// A chart card's element id, as ChartGrid.tsx chartAnchorId builds it.
+export function chartCardId(name: string): string {
+  return `chart-${name.replace(/[^a-zA-Z0-9]/g, "-")}`;
+}
 
 export const FIXTURE_ABS = path.join(__dirname, "..", FIXTURE_DIR);
 export const FIXTURE = JSON.parse(

@@ -246,3 +246,43 @@ export async function expectChrome(page: Page): Promise<void> {
   await expect(header.locator("img, iframe"), "no image or frame in the header").toHaveCount(0);
   await expect(footer.locator("img, iframe"), "no image or frame in the footer").toHaveCount(0);
 }
+
+// ---------------------------------------------------------------------------
+// The charts and the host's headers (M2b.4c).
+// ---------------------------------------------------------------------------
+
+// The line an interactive chart's card shows without JavaScript.
+export const CHART_NOJS_LINE = "This interactive chart needs JavaScript.";
+// The link under every PNG chart; its accessible name adds the chart's label
+// in parentheses, "Open full size (<label>)".
+export const FULL_SIZE = "Open full size";
+
+// The two header sets frontend/vercel.json gives the public site, as a
+// response carries them (header names in lower case): the page set everywhere
+// but under /demo/charts/, the chart set there. Literals, never read from
+// vercel.json (lib/vercel-config.test.mjs pins the file itself).
+export const PAGE_HEADERS: Readonly<Record<string, string>> = {
+  "content-security-policy":
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "strict-origin-when-cross-origin",
+  "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+};
+export const CHART_HEADERS: Readonly<Record<string, string>> = {
+  "content-security-policy": "script-src 'self' 'unsafe-inline'; sandbox allow-scripts",
+  "x-content-type-options": "nosniff",
+  "x-robots-tag": "noindex",
+  "referrer-policy": "no-referrer",
+};
+
+// A response carries exactly one of the two sets: every header of the set its
+// path takes, with that set's value, and none of the other set's own headers.
+// Soft, so one run names every miss.
+export function expectOneHeaderSet(url: string, headers: Record<string, string>): void {
+  const { pathname } = new URL(url);
+  const [want, other] = pathname.startsWith("/demo/charts/") ? [CHART_HEADERS, PAGE_HEADERS] : [PAGE_HEADERS, CHART_HEADERS];
+  for (const [key, value] of Object.entries(want)) expect.soft(headers[key], `${pathname}: ${key}`).toBe(value);
+  for (const key of Object.keys(other)) {
+    if (!(key in want)) expect.soft(headers[key], `${pathname}: no ${key}`).toBeUndefined();
+  }
+}

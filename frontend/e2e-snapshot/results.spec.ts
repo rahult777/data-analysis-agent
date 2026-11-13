@@ -9,7 +9,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { comesBefore, expectNoClipping, expectNoHorizontalOverflow, shot } from "../e2e-public/helpers";
-import { ANALYSIS, chartCardId, HEADER, KEPT_CHARTS, REAL_ID } from "./snapshot";
+import { ANALYSIS, chartCardId, HEADER, REAL_ID, SCATTER_CHART } from "./snapshot";
 
 const PAGE = `/analysis/${REAL_ID}`;
 const CODE_LABEL = "Written by the Explainer agent to illustrate each step. It is not the code that ran.";
@@ -118,10 +118,11 @@ for (const locale of LOCALES) {
       });
       page.on("pageerror", (error) => errors.push(`pageerror: ${error.message}`));
       await page.goto(PAGE);
-      // Hydration is over once a chart card shows its image (the cards render
-      // their media only after they mount, ChartGrid.tsx) and each closed
-      // panel is hidden until found (Base UI sets that in an effect).
-      await expect(page.locator(`#${chartCardId(KEPT_CHARTS[0])} img`)).toHaveCount(1);
+      // Hydration is over once the scatter's card shows its frame (an
+      // interactive chart renders only after its card mounts, ChartGrid.tsx;
+      // since M2b.4c an image does not wait, so it is no signal) and each
+      // closed panel is hidden until found (Base UI sets that in an effect).
+      await expect(page.locator(`#${chartCardId(SCATTER_CHART)} iframe`)).toHaveCount(1);
       await expect(page.locator('[data-slot="accordion-content"][hidden="until-found"]')).toHaveCount(3);
       expect.soft(errors, "no hydration error").toEqual([]);
       await expect.soft(page.locator("dl dd")).toHaveText(HEADER.dd);

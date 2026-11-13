@@ -2,14 +2,16 @@
 // there (M2b.4b): no entry animation in the public build (F1), the three
 // layers in the static HTML and shown by a <noscript> style rule (F2), and a
 // reading width for long text (F6). The whole-page check (expectTextVisible)
-// requires every text displayed at full opacity on each public page. The chart
-// cards' loading placeholders stay up without JavaScript: M2b.4c (F3). Every
-// test runs at 320 px and at 1280 px.
+// requires every text displayed at full opacity on each public page. Without
+// JavaScript a chart image is drawn, no loading placeholder pulses, and the
+// interactive chart's card says it needs JavaScript (M2b.4c, F3). Every test
+// runs at 320 px and at 1280 px.
 
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-import { FIXTURE, FIXTURE_ID } from "./fixture";
+import { chartCardId, FIXTURE, FIXTURE_ID, HTML_CHART, PNG_CHART } from "./fixture";
 import { expectNoHorizontalOverflow, expectReadingWidth, expectTextVisible, shot } from "./helpers";
+import { CHART_NOJS_LINE } from "./site";
 
 const PAGE = `/analysis/${FIXTURE_ID}`;
 const PANELS = '[data-slot="accordion-content"]';
@@ -125,6 +127,20 @@ test.describe("the prerendered HTML (JavaScript off)", () => {
     expect(spacing?.between, "one gap between the note and the results header").toBe(spacing?.gap);
     await expectNoHorizontalOverflow(page);
     await shot(page, info, "analysis-js-off");
+  });
+
+  test("the chart cards: the image is drawn, nothing pulses, and the interactive chart says it needs JavaScript", async ({ page }, info) => {
+    await page.goto(PAGE);
+    const img = page.locator(`#${chartCardId(PNG_CHART)} img`);
+    await expect(img, "the image, without JavaScript").toHaveCount(1);
+    await img.scrollIntoViewIfNeeded();
+    await expect.poll(() => img.evaluate((element: HTMLImageElement) => element.complete && element.naturalWidth)).toBe(48);
+    const html = page.locator(`#${chartCardId(HTML_CHART)}`);
+    await expect(html.getByText(CHART_NOJS_LINE, { exact: true })).toBeVisible();
+    await expect(html.locator("iframe")).toHaveCount(0);
+    const pulsing = await page.locator(".animate-pulse").evaluateAll((elements) => elements.filter((element) => getComputedStyle(element).display !== "none").length);
+    expect(pulsing, "loading placeholders shown").toBe(0);
+    await shot(page, info, "charts-js-off");
   });
 
   for (const [name, url] of [["the analysis page", PAGE], ["'/'", "/"], ["the 404 page", "/no-such-page"]] as const) {

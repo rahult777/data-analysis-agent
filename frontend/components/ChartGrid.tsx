@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Maximize2, Minimize2 } from "lucide-react";
 
@@ -152,27 +152,40 @@ interface ChartCardProps {
 
 function ChartCard({ filename, expanded, onToggle }: ChartCardProps) {
   const [loaded, setLoaded] = useState<boolean>(false);
-  // The image or iframe renders only once mounted. In the prerendered snapshot
-  // build a chart in the static HTML can finish loading before React hydrates
-  // and listens for its load event, which would leave the placeholder up.
+  // An interactive chart's frame renders only once the card has mounted: in
+  // the prerendered public build it could finish loading before React
+  // hydrates and listens for its load event, and a sandboxed frame's load
+  // state cannot be read afterwards, so its placeholder would stay up (M2b.1
+  // Code Review #7). An image renders at once, so it shows without
+  // JavaScript; an image that loaded before hydration is caught by checking
+  // it after mounting (M2b.4c).
   const [mounted, setMounted] = useState<boolean>(false);
-  useEffect(() => setMounted(true), []);
+  const imageRef = useRef<HTMLImageElement | null>(null);
+  useEffect(() => {
+    setMounted(true);
+    const image = imageRef.current;
+    if (image !== null && image.complete && image.naturalWidth > 0) setLoaded(true);
+  }, []);
   const parsed = parseChartFilename(filename);
   const src = chartUrl(filename);
   const mediaHeight = expanded ? "h-[70vh]" : "h-56";
 
   return (
+    // A focus target (tabIndex -1): a link to the card moves the keyboard
+    // focus here, and a ring shows it (M2b.4c).
     <motion.div
       layout
       variants={item}
       id={chartAnchorId(filename)}
+      tabIndex={-1}
       className={cn(
-        "flex scroll-mt-8 flex-col overflow-hidden rounded-md border border-border/60 bg-card/40",
+        "flex scroll-mt-8 flex-col overflow-hidden rounded-md border border-border/60 bg-card/40 outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
         expanded && "sm:col-span-2",
       )}
     >
       <div className="flex items-center justify-between gap-2 border-b border-border/60 px-3 py-2">
-        <span className="truncate text-sm text-foreground/90" title={parsed.label}>
+        {/* The whole label, wrapping on a narrow card (M2b.4c). */}
+        <span className="min-w-0 text-sm text-foreground/90 [overflow-wrap:anywhere]">
           {parsed.label}
         </span>
         <button
@@ -191,15 +204,18 @@ function ChartCard({ filename, expanded, onToggle }: ChartCardProps) {
       </div>
 
       <div className={cn("relative bg-background/40", mediaHeight)}>
+        {/* The analysis page's <noscript> rule hides the placeholder without
+            JavaScript, where it would pulse forever. */}
         {!loaded && (
-          <div className="absolute inset-0 animate-pulse bg-muted" aria-hidden />
+          <div data-chart-placeholder="" className="absolute inset-0 animate-pulse bg-muted" aria-hidden />
         )}
-        {!mounted ? null : parsed.format === "png" ? (
+        {parsed.format === "png" ? (
           // A static PNG: cross-origin from FastAPI StaticFiles locally,
           // /demo/charts/ in the snapshot build; next/image would require
           // remotePatterns config. no-img-element is warn-only.
           // eslint-disable-next-line @next/next/no-img-element
           <img
+            ref={imageRef}
             src={src}
             alt={parsed.label}
             loading="lazy"
@@ -209,21 +225,48 @@ function ChartCard({ filename, expanded, onToggle }: ChartCardProps) {
             className="relative h-full w-full cursor-zoom-in object-contain"
           />
         ) : (
-          // Scripts only: never allow-same-origin, so the chart runs in an
-          // opaque origin. No allow-downloads either, so plotly's "Download
-          // plot as a png" button and its logo link do nothing (owner ruling
-          // D1; M2b.2 removes both from regenerated charts).
-          <iframe
-            src={src}
-            title={parsed.label}
-            sandbox="allow-scripts"
-            loading="lazy"
-            referrerPolicy="no-referrer"
-            onLoad={() => setLoaded(true)}
-            className="relative h-full w-full"
-          />
+          <>
+            {/* Shown only without JavaScript, by the public analysis page's
+                <noscript> rule, which also makes it a flex box: a display
+                class here would override the hidden attribute. */}
+            <p
+              data-chart-nojs=""
+              hidden
+              className="absolute inset-0 items-center justify-center px-4 text-center text-sm text-muted-foreground"
+            >
+              This interactive chart needs JavaScript.
+            </p>
+            {mounted && (
+              // Scripts only: never allow-same-origin, so the chart runs in
+              // an opaque origin. No allow-downloads either, so plotly's
+              // "Download plot as a png" button and its logo link do nothing
+              // (owner ruling D1; M2b.2 removes both from regenerated charts).
+              <iframe
+                src={src}
+                title={parsed.label}
+                sandbox="allow-scripts"
+                loading="lazy"
+                referrerPolicy="no-referrer"
+                onLoad={() => setLoaded(true)}
+                className="relative h-full w-full"
+              />
+            )}
+          </>
         )}
       </div>
+      {parsed.format === "png" && (
+        // The image at its own address, where the browser's image view can
+        // zoom it, as a phone needs (owner ruling Q7). A plain link: it works
+        // without JavaScript, and its name says which chart it opens.
+        <div className="border-t border-border/60 px-3">
+          <a
+            href={src}
+            className="inline-flex min-h-11 items-center text-sm text-muted-foreground underline underline-offset-4 hover:text-foreground"
+          >
+            Open full size<span className="sr-only"> ({parsed.label})</span>
+          </a>
+        </div>
+      )}
     </motion.div>
   );
 }
