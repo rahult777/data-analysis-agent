@@ -379,6 +379,14 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1 --lo
 
 `--reload` is for local development only; `watchfiles`, which is in the lock, is used only by `--reload`.
 
+**Regenerating requirements.txt** (decisions.md 2026-10-05 and 2026-11-14). The lock is the `pip freeze` of a clean install, not a hand edit. In a new, empty venv made with Python 3.11.3 (and the pip it brings, 22.3.1), install the header's direct pins, constrained to the lock, from wheels only:
+
+````
+python -m pip install --only-binary=:all: -r direct.txt -c constraints.txt
+````
+
+`direct.txt` holds the header's 18 `name==version` pins and `constraints.txt` every line of the lock's body, each with the intended version changes applied. Install requirements-dev.txt's three test pins the same way and run `python -m pip check`; `python -m pip freeze` without pytest, iniconfig and pluggy is the new body, in the freeze's order. Keep the header as it is, rewriting in place only the direct pins that changed, with one blank line before the body. A first run with no changes must reproduce the committed file byte for byte. Then M1's acceptance check: a clean venv installed from `requirements-dev.txt` exits 0, `pip check` is clean, its freeze minus the three test pins equals the lock, and the backend suite passes in it.
+
 **Frontend.** In `frontend/`, copy `.env.example` to `.env.local`, run `npm ci`, then `npm run dev` (or `npm run build && npm start`). `frontend/.npmrc` sets `ignore-scripts=true`: npm runs no package's install script (the frontend needs none) and none of our own scripts' pre or post hooks. `npm run dev` and `npm start` listen on 127.0.0.1 only. `npx next dev -H 0.0.0.0` lets another device on the network view the local pages, but their API calls go to localhost and fail there. The backend stays on 127.0.0.1, because on the network any device could reach it: requests without an Origin pass the gate, so with agent work on, that means paid runs. For small-screen checks, use the Playwright viewports or the public build.
 
 **Public snapshot build.** In `frontend/`, `npm run build:public` builds the public site as static files in `out/`: `next build` with `NEXT_PUBLIC_DATA_SOURCE=snapshot` set inline, then a step that copies the chart files into `out/demo/charts/`. It reads the committed snapshot in `frontend/snapshot/` (the demo analysis, exported in M2b.3a) and fails closed on anything wrong with it (decisions.md 2026-10-09 and 2026-10-13). Its `manifest.json` lists each analysis with its "About this example" note, which the analysis page shows above the results (decisions.md 2026-10-17). `npm run dev` refuses snapshot mode.
@@ -420,7 +428,6 @@ The backend's variables are loaded via `backend/config.py`, which fails fast on 
 | LANGCHAIN_TRACING_V2 | "true" (case-insensitive) turns tracing on; agent work also needs AGENT_WORK_ENABLED |
 | AGENT_WORK_ENABLED | Unset = off. "true" (case-insensitive) allows agent work, with tracing on; set it inline per session, not in `.env` |
 | ALLOWED_ORIGINS | Browser origins the API accepts: exact origins, comma-separated; default `http://localhost:3000,http://127.0.0.1:3000`; "*" refused |
-| GITHUB_TOKEN | Not read by the app; only the GitHub MCP server uses it |
 | NEXT_PUBLIC_API_URL | Frontend only (`frontend/.env.local`): the backend's base URL; `lib/mode.ts` falls back to `http://localhost:8000` when it is unset; unused in the public build |
 | NEXT_PUBLIC_DATA_SOURCE | Frontend build mode: unset or empty = local; "snapshot" = the public static build, set inline by `npm run build:public`. Never in a `.env` file |
 | NEXT_PUBLIC_SITE_URL | Public build only, required: the site's address, `https://<host>` with no path and no trailing slash (canonical links, the link-preview card, robots.txt and sitemap.xml); inline or in `frontend/.env.local`; ignored in local mode |

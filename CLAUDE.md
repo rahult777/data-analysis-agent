@@ -40,7 +40,6 @@ Installed and available. For invocation details see `docs/plugins-and-mcps.md`.
 - Code Review Plugin — verify computations and pandas code
 - Context7 MCP — verify library docs before implementation
 - LangSmith Tracing — every agent run traced
-- GitHub MCP — version control
 - Frontend Design Plugin — UI components
 - Security Review Plugin — pre-deployment scanning
 - Supabase MCP — read-only database introspection (it cannot apply migrations)

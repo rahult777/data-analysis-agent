@@ -137,24 +137,6 @@ Every plugin has a specific trigger condition. When that condition is met, the p
 
 ---
 
-## GitHub MCP
-
-**What it does:** Handles git operations — commits, pushes, branch management. Ensures every working state is preserved and every commit message is descriptive.
-
-**When to invoke:**
-- After every working, tested, verified feature is complete
-- Always before modifying any module that currently works (commit the working state first)
-- After every session's final working state
-
-**Commit message format:** Descriptive, specific, past tense. Not "update files" or "fix stuff." Examples:
-- "Add LangSmith tracing client with connection validation"
-- "Implement Profiler agent with domain hypothesis and provenance detection"
-- "Add self-evaluation loop to Analyzer with 5-point checklist"
-
-**How to invoke:** "Commit all current changes to GitHub with the message '[descriptive message]'"
-
----
-
 ## Frontend Design Plugin
 
 **What it does:** Generates production-quality, non-generic UI components. Prevents the default AI aesthetic that makes every tool look the same.
@@ -239,7 +221,7 @@ This section maps every build task to the specific plugins that must be activate
 |------|--------|
 | Before implementing any library function | Context7 MCP |
 | After file is complete | Code Review Plugin |
-| After tests pass | GitHub MCP |
+| After tests pass | Commit with git (Rule 15) |
 
 ### Building any agent file (profiler.py, cleaner.py, analyzer.py, explainer.py)
 
@@ -251,7 +233,7 @@ This section maps every build task to the specific plugins that must be activate
 | At end of every agent run (runtime) | Memory MCP — write (at runtime the agent returns its outputs into the pipeline state and saves its report to Supabase; no MCP server is called) |
 | For every agent run (runtime) | LangSmith Tracing — enforced in code (Rule 8): agent work runs only with AGENT_WORK_ENABLED and tracing on; otherwise the agent-work routes refuse with 503 |
 | After agent file is complete | Code Review Plugin |
-| After tests pass | GitHub MCP |
+| After tests pass | Commit with git (Rule 15) |
 
 ### Writing any system prompt (profiler_system.md, cleaner_system.md, analyzer_system.md, explainer_system.md)
 
@@ -269,7 +251,7 @@ This section maps every build task to the specific plugins that must be activate
 | Before designing the graph | Sequential Thinking MCP |
 | Before implementing LangGraph graph construction | Context7 MCP |
 | After orchestrator is complete | Code Review Plugin |
-| After tests pass | GitHub MCP |
+| After tests pass | Commit with git (Rule 15) |
 
 ### Building any tool file (data_tools.py, viz_tools.py, code_executor.py)
 
@@ -278,7 +260,7 @@ This section maps every build task to the specific plugins that must be activate
 | Before implementing any pandas or plotting function | Context7 MCP |
 | After tool file is complete | Code Review Plugin |
 | Before any computed value is presented | Code Review Plugin |
-| After tests pass | GitHub MCP |
+| After tests pass | Commit with git (Rule 15) |
 
 ### Building the FastAPI backend (main.py)
 
@@ -286,7 +268,7 @@ This section maps every build task to the specific plugins that must be activate
 |------|--------|
 | Before implementing any FastAPI feature | Context7 MCP |
 | After main.py is complete | Code Review Plugin |
-| After tests pass | GitHub MCP |
+| After tests pass | Commit with git (Rule 15) |
 
 ### Building any frontend component
 
@@ -295,7 +277,7 @@ This section maps every build task to the specific plugins that must be activate
 | When building the component | Frontend Design Plugin |
 | Before implementing any Next.js or React feature | Context7 MCP |
 | After component is complete | Code Review Plugin |
-| After tests pass | GitHub MCP |
+| After tests pass | Commit with git (Rule 15) |
 
 ### Analyzing any complex finding or error during agent runtime
 
@@ -303,14 +285,14 @@ This section maps every build task to the specific plugins that must be activate
 |------|--------|
 | Multiple competing hypotheses | Superpowers Plugin |
 | Stuck after 2 failed attempts | Brave Search MCP |
-| After solving | Document in errors.md, commit with GitHub MCP |
+| After solving | Document in errors.md, commit with git |
 
 ### Before any deployment
 
 | Step | Plugin |
 |------|--------|
 | Security scan | Security Review Plugin |
-| After scan passes | GitHub MCP |
+| After scan passes | Commit with git (Rule 15) |
 
 ### Any session start
 
