@@ -6,12 +6,12 @@
     "node": "24.x"
   },
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev -H 127.0.0.1",
     "build": "next build",
     "build:public": "NEXT_PUBLIC_DATA_SOURCE=snapshot next build && node scripts/copy-snapshot-charts.mjs",
-    "start": "next start",
+    "start": "next start -H 127.0.0.1",
     "lint": "next lint --dir app --dir components --dir lib --dir e2e --dir e2e-public --dir e2e-snapshot",
-    "test:unit": "node --test lib/snapshot-rules.test.mjs lib/mode.test.mjs lib/site-settings.test.mjs lib/results.test.mjs lib/vercel-config.test.mjs scripts/export-snapshot.test.mjs",
+    "test:unit": "node --test lib/snapshot-rules.test.mjs lib/mode.test.mjs lib/site-settings.test.mjs lib/results.test.mjs lib/vercel-config.test.mjs lib/package-config.test.mjs scripts/export-snapshot.test.mjs",
     "test:builds": "node scripts/test-builds.mjs",
     "test:e2e": "playwright test",
     "test:e2e:public": "playwright test -c playwright.public.config.ts",
@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "@base-ui/react": "^1.4.1",
-    "axios": "^1.16.1",
+    "axios": "^1.21.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "framer-motion": "^12.38.0",
@@ -27,13 +27,10 @@
     "next": "14.2.35",
     "react": "^18",
     "react-dom": "^18",
-    "recharts": "^3.8.1",
-    "shadcn": "^4.7.0",
-    "tailwind-merge": "^3.6.0",
-    "tw-animate-css": "^1.4.0"
+    "tailwind-merge": "^2.6.1"
   },
   "devDependencies": {
-    "@playwright/test": "^1.63.0",
+    "@playwright/test": "1.63.0",
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",

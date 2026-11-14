@@ -5,12 +5,15 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
 import { expect, test } from "@playwright/test";
+import postcss from "postcss";
 
 import { CANARY_API_URL, FIXTURE_ABS, FIXTURE_ID, HTML_CHART, PLOTLY, PNG_CHART, TEST_GITHUB_URL, TEST_SITE_URL } from "./fixture";
 import { BRAND_FILES, OLD_NAME, icoSizes, pngSize, robotsTxt, sitemapXml } from "./site";
 
 const OUT = path.join(__dirname, "..", "out");
 const APP = path.join(__dirname, "..", "app");
+// Tailwind v4 at-rules: Tailwind v3 passes them into the built CSS unprocessed.
+const V4_AT_RULES = ["theme", "utility", "custom-variant", "property"];
 
 function filesUnder(dir: string): string[] {
   return readdirSync(dir, { recursive: true, encoding: "utf8" })
@@ -85,4 +88,20 @@ test("out/demo/charts/ holds exactly the listed chart files and plotly.min.js, b
   for (const name of [PNG_CHART, HTML_CHART, PLOTLY]) {
     expect(readFileSync(path.join(charts, name)).equals(readFileSync(path.join(FIXTURE_ABS, "charts", name))), name).toBe(true);
   }
+});
+
+// globals.css imported two Tailwind v4 files (tw-animate-css, shadcn/tailwind.css) that v3 passed into
+// the build unprocessed: @theme, @utility and @custom-variant blocks the browser ignores, and @property
+// rules that registered --tw-* custom properties on every element (M2c.1). None may come back.
+test("the built CSS holds no @theme, @utility, @custom-variant or @property", () => {
+  const dir = path.join(OUT, "_next", "static", "css");
+  const files = readdirSync(dir).filter((name) => name.endsWith(".css"));
+  expect(files.length, "built stylesheets").toBeGreaterThan(0);
+  const found: string[] = [];
+  for (const name of files) {
+    postcss.parse(readFileSync(path.join(dir, name), "utf8")).walkAtRules((rule) => {
+      if (V4_AT_RULES.includes(rule.name)) found.push(`@${rule.name} ${rule.params} in ${name}`);
+    });
+  }
+  expect(found).toEqual([]);
 });
