@@ -12,7 +12,7 @@ This document contains the complete UI design rules, component specifications, a
 
 **Every UI component is built using the Frontend Design plugin.** No component is built without it. Generic AI-generated UI is not acceptable for a system at this level.
 
-**Production quality on every component.** Every component is tested at 320px minimum width. Every component has smooth transitions via Framer Motion. Every interactive element has appropriate hover and focus states.
+**Production quality on every component.** Every component is tested at 320px minimum width. Animated entrances and layout changes use Framer Motion, and small color and size changes use CSS transitions (see Animation Specification). Every interactive element has appropriate hover and focus states.
 
 **Color system:** Use shadcn/ui tokens exclusively. Never raw hex values in components. This ensures consistency and makes future theme changes easy.
 
@@ -192,7 +192,7 @@ When status is `complete`, the full results are displayed.
 **Behavior:** Two named exports, no default export — split so `ChartGrid` can sit physically between them in the results layout (header → Executive → Charts → Analyst/Open Questions/Technical). See decisions.md, 2026-09-16.
 
 - `InsightReportExecutive` — Executive Summary cards, always expanded on load.
-- `InsightReportDetail` — Analyst Report, Open Questions, and Technical Detail as three collapsible AccordionItems (shadcn/ui Accordion), all collapsed by default. Expand/collapse height animation is driven natively by Base UI, not Framer Motion.
+- `InsightReportDetail` — Analyst Report, Open Questions, and Technical Detail as three collapsible AccordionItems (the Base UI Accordion in components/ui/accordion.tsx), all collapsed by default. A panel opens and closes at once: there is no height animation (the Tailwind v4 classes that would have driven one emitted no CSS and were removed in M2c.1).
 - Each section has a header with the layer name and a brief description of who it is for
 - **Without JavaScript (public build, M2b.4b):** the accordion keeps its closed panels mounted (Base UI's `hiddenUntilFound`), so the three layers are in the static HTML. Once the page has hydrated, each closed panel is `hidden="until-found"`, which the browser's find-in-page opens; before that it is plain `hidden`, and a `<noscript>` style rule in the analysis page, `[data-slot=accordion-content][hidden]{display:block!important}`, shows the panels when scripting is off (unquoted: React escapes quotes inside `<style>`). Local mode mounts a panel only when it is opened.
 - **Reading width (both modes, M2b.4b):** long text keeps to 29rem of text, about 65–75 characters a line on a wide screen: the executive bullets' list (29rem plus the cards' padding, so each card hugs its text), the narrative paragraphs, the open questions' list (plus the 1.5rem indent beside the question mark), the cleaning decisions' list, the methodology and the callouts. The blocks sit on the left of the column; the results header, the chart grid and the correlation matrix keep its full width.
@@ -314,7 +314,7 @@ Displayed with red error styling.
 
 ## Animation Specification
 
-All animations use Framer Motion. No CSS transitions or keyframe animations — everything goes through Framer Motion for consistency.
+Framer Motion drives the animated entrances and layout changes: the fade-ins below, the chart grid's layout and the pause UI's reveals. CSS transitions are used only for small color and size changes: hover and focus colors (`transition-colors`, `transition-all`) and the results column's widening (`transition-[max-width]` in app/analysis/[id]/AnalysisPageClient.tsx). `animate-pulse` marks loading placeholders. There are no other CSS keyframe animations.
 
 **Exception: no entry animation in the public build (M2b.4b; decisions.md 2026-11-12).** There the results header, the executive bullets and the chart cards start from their final state (`initial={false}`), so the prerendered page reads without JavaScript; local mode keeps the fade-ins below. The landing page, the header and the footer are static server components with no motion and no CSS transition: hover and focus states change at once.
 
@@ -373,9 +373,9 @@ The frontend polls `/api/analysis/{id}/status` every 3 seconds while the pipelin
 - Next.js 14 App Router
 - TypeScript strict mode — no `any` types
 - Tailwind CSS for all styling
-- shadcn/ui for all base components (Button, Card, Accordion, Badge, Input, etc.)
-- Recharts for any data visualizations built in React (not the agent-generated charts)
-- Framer Motion for all animations
+- components/ui for the base components, from the shadcn scaffold: Accordion, Button and Input on Base UI (`@base-ui/react`), and Label and Textarea as plain elements. The shadcn CLI, its components.json and the unused Card and Badge were removed in M2c.1.
+- No chart library: visuals built in React are plain components (the correlation matrix is a native table, decisions.md 2026-09-21); the agent-generated charts are PNG images and sandboxed HTML.
+- Framer Motion for animated entrances and layout (see Animation Specification)
 - axios for all API calls — configured with base URL and default headers
 
 **TypeScript interfaces** in `frontend/lib/types.ts` must match the pydantic schemas in `backend/models/schemas.py` exactly. Any schema change in the backend requires a corresponding update in the frontend types.

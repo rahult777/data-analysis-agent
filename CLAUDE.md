@@ -52,7 +52,7 @@ Installed and available. For invocation details see `docs/plugins-and-mcps.md`.
 
 Backend: Python 3.11, FastAPI, Uvicorn, langchain-core (tracing callbacks), LangGraph, LangSmith, Supabase client, pandas, numpy, matplotlib, seaborn, plotly, pydantic, pyarrow.
 
-Frontend: Next.js 14 App Router, TypeScript strict, Tailwind, shadcn/ui, Recharts, Framer Motion, axios.
+Frontend: Next.js 14 App Router, TypeScript strict, Tailwind CSS 3, Base UI (components/ui), Framer Motion, axios.
 
 Every package, direct and transitive, is pinned in `requirements.txt` (a full lock; its header lists the direct dependencies); test tools are pinned in `requirements-dev.txt`. Never install packages without stating the reason.
 
