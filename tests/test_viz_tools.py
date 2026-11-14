@@ -3,19 +3,30 @@
 Covers: the _short_name truncation helper; the title recipe of
 generate_scatter_plot and generate_line_chart (column names cut at 19
 characters, font size 14, plotly's default title placement, fixed margins),
-including the adversarial case of very long column names; and the HTML both
+including the adversarial case of very long column names; the HTML both
 write (the shared plotly.min.js beside the chart instead of an inlined
 bundle, the fixed div id, no download button or logo, no UUID but the
-analysis id, the same bytes on every run). Charts are written to a
-per-test CHARTS_DIR under tmp_path, never to backend/outputs/charts.
+analysis id, the same bytes on every run); and how both files are written
+(the bundle pinned by its sha256 and replaced when missing or damaged, an
+intact one left as it is, nothing written for a plotly whose bundle is not
+the pinned one, every file renamed into place from a hidden temporary name
+with the permissions a plain write gives, and no partial or temporary file
+left by an error). Charts are written to a per-test CHARTS_DIR under
+tmp_path, never to backend/outputs/charts.
 """
 
+import errno
+import hashlib
 import json
+import logging
+import os
 import pathlib
 import re
+import stat
 from typing import Callable, Optional
 
 import pandas as pd
+import plotly.io._html as plotly_html  # where plotly's write_html reads the bundle it writes in "directory" mode
 import pytest
 from plotly.offline import get_plotlyjs
 
@@ -27,6 +38,7 @@ LONG_Y = "equally_long_measurement_column_name_for_y_axis"
 
 # A UUID-shaped analysis id, as real charts have ("testviz" is not one).
 ANALYSIS_ID = "5b3f6d1e-8c2a-4e9b-a7d4-1f0e2c3b4a59"
+OTHER_ID = "7a2c9e4b-1d3f-4a6b-8c5e-2f0d9b7e1a34"
 
 MARGIN = {"t": 80, "l": 60, "r": 20, "b": 50}
 
@@ -327,3 +339,159 @@ def test_chart_bytes_are_the_same_on_every_run(
         assert filename is not None
         written.append((charts / filename).read_bytes())
     assert written[0] == written[1]
+
+
+# ---------------------------------------------------------------------------
+# How the bundle and the chart are written: whole or not at all
+# ---------------------------------------------------------------------------
+
+
+def pinned_bundle() -> bytes:
+    """The installed plotly's bundle, as the charts' plotly.min.js must hold it."""
+    return get_plotlyjs().encode("utf-8")
+
+
+def names(folder: pathlib.Path) -> list:
+    return sorted(path.name for path in folder.iterdir())
+
+
+def test_a_truncated_bundle_is_replaced_by_the_whole_one(
+    interactive_chart: Callable[[str], Optional[str]]
+) -> None:
+    """What a process killed during the bundle's first write leaves behind (M2b.2 Code Review #1)."""
+    bundle = viz_tools.CHARTS_DIR / "plotly.min.js"
+    bundle.write_bytes(pinned_bundle()[:1000])
+    assert interactive_chart(ANALYSIS_ID) is not None
+    assert bundle.read_bytes() == pinned_bundle()
+
+
+def test_a_failed_bundle_step_leaves_no_chart(
+    interactive_chart: Callable[[str], Optional[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M2b.2 Code Review #5: plotly wrote the chart before the bundle."""
+
+    def no_space() -> str:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(plotly_html, "get_plotlyjs", no_space)  # read by write_html's "directory" mode
+    monkeypatch.setattr(viz_tools, "get_plotlyjs", no_space, raising=False)  # read by ensure_plotly_bundle
+    assert interactive_chart(ANALYSIS_ID) is None
+    assert names(viz_tools.CHARTS_DIR) == []
+
+
+def test_a_failed_chart_write_leaves_no_partial_or_temporary_file(
+    interactive_chart: Callable[[str], Optional[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_write_text = pathlib.Path.write_text
+
+    def half_then_no_space(self: pathlib.Path, data: str, *args: object, **kwargs: object) -> int:
+        if self.name == "plotly.min.js":
+            return real_write_text(self, data, *args, **kwargs)
+        real_write_text(self, data[: len(data) // 2], *args, **kwargs)
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(pathlib.Path, "write_text", half_then_no_space)
+    assert interactive_chart(ANALYSIS_ID) is None
+    assert names(viz_tools.CHARTS_DIR) == ["plotly.min.js"]
+    assert (viz_tools.CHARTS_DIR / "plotly.min.js").read_bytes() == pinned_bundle()
+
+
+def test_the_bundle_pin_is_the_installed_plotly_bundle() -> None:
+    """Fails after a plotly upgrade until the pin, the snapshot's plotly.min.js and the third-party
+    notice are regenerated together (tasks.md)."""
+    assert hashlib.sha256(pinned_bundle()).hexdigest() == viz_tools.PLOTLY_BUNDLE_SHA256
+
+
+def test_a_plotly_whose_bundle_is_not_the_pinned_one_writes_nothing(
+    interactive_chart: Callable[[str], Optional[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    bundle = viz_tools.CHARTS_DIR / "plotly.min.js"
+    bundle.write_bytes(pinned_bundle())
+    before = bundle.stat()
+
+    def upgraded() -> str:
+        return "/*! plotly.js v9.9.9 */"
+
+    monkeypatch.setattr(plotly_html, "get_plotlyjs", upgraded)
+    monkeypatch.setattr(viz_tools, "get_plotlyjs", upgraded, raising=False)
+    with caplog.at_level(logging.ERROR, logger="backend.tools.viz_tools"):
+        assert interactive_chart(ANALYSIS_ID) is None
+    after = bundle.stat()
+    assert names(viz_tools.CHARTS_DIR) == ["plotly.min.js"]
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+    assert bundle.read_bytes() == pinned_bundle()
+    assert any(
+        record.levelno == logging.ERROR and "PLOTLY_BUNDLE_SHA256" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.parametrize("failing", ["fsync", "replace"])
+def test_a_failed_bundle_write_leaves_no_temporary_file(
+    small_df: pd.DataFrame, monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    def io_error(*args: object, **kwargs: object) -> None:
+        raise OSError(errno.EIO, "Input/output error")
+
+    if failing == "fsync":
+        monkeypatch.setattr(os, "fsync", io_error)
+    else:
+        real_replace = os.replace
+
+        def replace(
+            src: "str | os.PathLike[str]", dst: "str | os.PathLike[str]", *args: object, **kwargs: object
+        ) -> None:
+            if pathlib.Path(dst).name == "plotly.min.js":
+                io_error()
+            real_replace(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr(os, "replace", replace)
+    assert generate_scatter_plot(small_df, "a", "b", ANALYSIS_ID, 0.5) is None
+    assert names(viz_tools.CHARTS_DIR) == []
+
+
+def test_files_are_renamed_into_place_from_hidden_temporary_names(
+    interactive_chart: Callable[[str], Optional[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    renames: list = []
+    real_replace = os.replace
+
+    def spy(
+        src: "str | os.PathLike[str]", dst: "str | os.PathLike[str]", *args: object, **kwargs: object
+    ) -> None:
+        renames.append((pathlib.Path(src), pathlib.Path(dst)))
+        real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", spy)
+    first = interactive_chart(ANALYSIS_ID)
+    second = interactive_chart(OTHER_ID)
+    assert [dst.name for _, dst in renames] == ["plotly.min.js", first, second]
+    for src, dst in renames:
+        assert src.parent == dst.parent == viz_tools.CHARTS_DIR
+        assert src.name.startswith(".") and src.name.endswith(".tmp")
+    assert names(viz_tools.CHARTS_DIR) == sorted([first, second, "plotly.min.js"])
+
+
+def test_an_intact_bundle_is_left_as_it_is(interactive_chart: Callable[[str], Optional[str]]) -> None:
+    """Rewriting it would change the cache validators StaticFiles sends for it (decisions.md 2026-10-12)."""
+    bundle = viz_tools.CHARTS_DIR / "plotly.min.js"
+    bundle.write_bytes(pinned_bundle())
+    before = bundle.stat()
+    assert interactive_chart(ANALYSIS_ID) is not None
+    after = bundle.stat()
+    assert (after.st_ino, after.st_mtime_ns, after.st_size) == (before.st_ino, before.st_mtime_ns, before.st_size)
+
+
+def test_chart_and_bundle_get_the_permissions_a_plain_write_gives(
+    interactive_chart: Callable[[str], Optional[str]], tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """0o666 less the umask, as plotly's own writes gave them before M2c.2 (tempfile.mkstemp gives 0o600)."""
+    filename = interactive_chart(ANALYSIS_ID)
+    assert filename is not None
+    reference = tmp_path_factory.mktemp("reference") / "file"
+    reference.write_text("x")
+    expected = stat.S_IMODE(reference.stat().st_mode)
+    for name in (filename, "plotly.min.js"):
+        assert stat.S_IMODE((viz_tools.CHARTS_DIR / name).stat().st_mode) == expected

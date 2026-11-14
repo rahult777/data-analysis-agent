@@ -5,12 +5,19 @@ Generates all static (PNG via matplotlib/seaborn) and interactive (HTML via plot
 charts required by the Analyzer agent. Every function saves to CHARTS_DIR and returns
 only the filename — never the full path — so analyzer.py can store it in Supabase and
 the frontend can construct /charts/{filename} URLs via the StaticFiles mount. The
-interactive charts load plotly.min.js from beside them: plotly writes it into
-CHARTS_DIR with the first one and never replaces it.
+interactive charts load plotly.min.js from beside them: before each one is written,
+ensure_plotly_bundle() makes CHARTS_DIR's copy the bundle pinned by
+PLOTLY_BUNDLE_SHA256, and both files are written under a temporary name and renamed
+into place, so an error or a killed process leaves no partial chart or bundle. A power
+loss or OS crash before the page cache is flushed is not covered for the chart, only for
+the bundle, which is fsynced and is repaired by hash on the next chart (tasks.md, M5).
 """
 
+import hashlib
 import logging
+import os
 import re
+import secrets
 
 import matplotlib
 
@@ -19,6 +26,8 @@ matplotlib.use("Agg")  # non-interactive backend — must precede pyplot import
 import matplotlib.pyplot as plt
 import seaborn as sns
 import plotly.express as px
+from plotly.graph_objects import Figure
+from plotly.offline import get_plotlyjs
 import pandas as pd
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -48,12 +57,88 @@ PROJECT_COLORS: List[str] = [
     "#6D6875",
 ]
 
+# The plotly.js bundle the interactive charts load from beside them: the installed
+# plotly's own copy (plotly 5.20.0: plotly.js 2.30.0), as plotly.offline.get_plotlyjs()
+# returns it. After a plotly upgrade the suite fails until this pin, the snapshot's
+# plotly.min.js and the third-party notice are regenerated together (tasks.md, M2c).
+PLOTLY_BUNDLE = "plotly.min.js"
+PLOTLY_BUNDLE_SHA256 = "3baddf12a4f47ac22f006078f95c38b21abd53d1511b80e600a60cf0c52bab6e"
+
 
 def ensure_charts_dir() -> None:
     CHARTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 ensure_charts_dir()
+
+
+def _create_temporary_file(kind: str) -> Tuple[int, Path]:
+    """Create a new, empty file in CHARTS_DIR under a fresh temporary name; return its descriptor and path.
+
+    The name starts with a dot and ends in .tmp, so nothing takes it for a chart, and its length does
+    not depend on the chart's name. The mode 0o666 is reduced by the umask, as for a plain open(), so
+    the renamed file gets the permissions a direct write gives (tempfile.mkstemp would give 0o600).
+    """
+    path = CHARTS_DIR / f".{kind}.{secrets.token_hex(8)}.tmp"
+    return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666), path
+
+
+def ensure_plotly_bundle() -> None:
+    """Make CHARTS_DIR/plotly.min.js the pinned bundle, before an interactive chart is written.
+
+    A missing bundle is written, and one with another hash (a truncated first write, say) is replaced,
+    atomically: a temporary file in CHARTS_DIR, written, flushed to disk, then renamed over it. An intact
+    bundle is left as it is. If the installed plotly's bundle is not the pinned one (plotly upgraded
+    without regenerating the pin), nothing is written: the error is logged and raised.
+    """
+    bundle = get_plotlyjs().encode("utf-8")
+    if hashlib.sha256(bundle).hexdigest() != PLOTLY_BUNDLE_SHA256:
+        logger.error(
+            "The installed plotly's bundle does not match PLOTLY_BUNDLE_SHA256, so no interactive chart is "
+            "written. Regenerate the pin, the snapshot's plotly.min.js and the third-party notice together "
+            "(tasks.md)."
+        )
+        raise RuntimeError("the installed plotly's bundle does not match PLOTLY_BUNDLE_SHA256")
+    target = CHARTS_DIR / PLOTLY_BUNDLE
+    try:
+        if hashlib.sha256(target.read_bytes()).hexdigest() == PLOTLY_BUNDLE_SHA256:
+            return
+    except FileNotFoundError:
+        pass
+    fd, temporary = _create_temporary_file("plotly-bundle")
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(bundle)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _write_interactive_chart(fig: Figure, filename: str) -> None:
+    """Write an interactive chart as CHARTS_DIR/filename: the pinned bundle first, then the chart under a
+    temporary name, renamed into place. An error or a killed process leaves no partial chart or bundle; an
+    error also removes the temporary file, which a hard kill can leave behind (tasks.md, M5). A power loss
+    or OS crash before the page cache is flushed is not covered for the chart, only for the bundle, which
+    is fsynced and is repaired by hash on the next chart (tasks.md, M5)."""
+    ensure_plotly_bundle()
+    fd, temporary = _create_temporary_file("chart")
+    try:
+        os.close(fd)
+        # The string names the bundle beside the chart, with the same tag "directory" wrote, but plotly
+        # never writes it. The config dict is new on every call: plotly adds keys to the dict it is given.
+        fig.write_html(
+            str(temporary),
+            include_plotlyjs=PLOTLY_BUNDLE,
+            div_id="chart",
+            config={"displaylogo": False, "modeBarButtonsToRemove": ["toImage"]},
+        )
+        os.replace(temporary, CHARTS_DIR / filename)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _safe_name(name: str) -> str:
@@ -182,12 +267,7 @@ def generate_line_chart(
             margin=dict(t=80, l=60, r=20, b=50),
         )
         filename = f"{analysis_id}_linechart_{_safe_name(value_column)}.html"
-        fig.write_html(
-            str(CHARTS_DIR / filename),
-            include_plotlyjs="directory",
-            div_id="chart",
-            config={"displaylogo": False, "modeBarButtonsToRemove": ["toImage"]},
-        )
+        _write_interactive_chart(fig, filename)
         return filename
     except Exception as e:
         logger.warning(
@@ -222,12 +302,7 @@ def generate_scatter_plot(
             margin=dict(t=80, l=60, r=20, b=50),
         )
         filename = f"{analysis_id}_scatter_{_safe_name(x_column)}_{_safe_name(y_column)}.html"
-        fig.write_html(
-            str(CHARTS_DIR / filename),
-            include_plotlyjs="directory",
-            div_id="chart",
-            config={"displaylogo": False, "modeBarButtonsToRemove": ["toImage"]},
-        )
+        _write_interactive_chart(fig, filename)
         return filename
     except Exception as e:
         logger.warning(
