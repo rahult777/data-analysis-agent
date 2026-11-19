@@ -1,5 +1,5 @@
 // The second half of `npm run build:public`: copies the snapshot's chart files
-// into the static export at out/demo/charts/, where chartUrl (lib/api.ts)
+// into the static export at out/demo/charts/, where chartUrl (lib/chart-url.ts)
 // points. It runs after `next build`, which deletes out/ at the start of every
 // export, so nothing stale survives; Vercel collects out/ after the whole
 // build command has finished.

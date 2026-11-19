@@ -57,7 +57,7 @@ export const HEADER = {
   spoken: "After cleaning. The original file had 200 rows and 9 columns.",
 };
 
-// The site's URL for a chart, as lib/api.ts chartUrl builds it in snapshot
+// The site's URL for a chart, as lib/chart-url.ts chartUrl builds it in snapshot
 // mode (an HTML chart's URL has no .html, as on Vercel).
 export function chartUrl(name: string): string {
   return `/demo/charts/${name.replace(/\.html$/, "")}`;

@@ -9,6 +9,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -327,22 +328,116 @@ describe("lib/api.ts network functions", () => {
   });
 });
 
-describe("lib/api.ts chartUrl", () => {
+describe("lib/chart-url.ts chartUrl", () => {
   const PNG = "00000000-0000-4000-a000-000000000001_histogram_x.png";
   const HTML = "00000000-0000-4000-a000-000000000001_scatter_x_y.html";
   const urls = `return [m.chartUrl(${JSON.stringify(PNG)}), m.chartUrl(${JSON.stringify(HTML)})];`;
 
   it("local mode: the backend's /charts route, file names unchanged", () => {
-    assert.deepEqual(runModule("lib/api.ts", { NEXT_PUBLIC_API_URL: "http://127.0.0.1:9" }, urls), [
+    assert.deepEqual(runModule("lib/chart-url.ts", { NEXT_PUBLIC_API_URL: "http://127.0.0.1:9" }, urls), [
       `http://127.0.0.1:9/charts/${PNG}`,
       `http://127.0.0.1:9/charts/${HTML}`,
     ]);
   });
 
   it("snapshot build: /demo/charts/, .html dropped (Vercel strips it from exported files), PNG unchanged", () => {
-    assert.deepEqual(runModule("lib/api.ts", { [FLAG]: "snapshot", NEXT_PUBLIC_API_URL: "http://api-canary.invalid" }, urls), [
+    assert.deepEqual(runModule("lib/chart-url.ts", { [FLAG]: "snapshot", NEXT_PUBLIC_API_URL: "http://api-canary.invalid" }, urls), [
       `/demo/charts/${PNG}`,
       `/demo/charts/${HTML.slice(0, -".html".length)}`,
     ]);
+  });
+});
+
+// The public build's lib/api (M3a): next.config.mjs swaps lib/api-public.ts in
+// for lib/api.ts, so it must offer the same names, refuse every call before
+// any request, and import no axios.
+const NO_AXIOS = `
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier === "axios" || specifier.startsWith("axios/")) throw new Error("axios imported");
+    return nextResolve(specifier, context);
+  },
+});
+`;
+
+describe("lib/api-public.ts, the public build's lib/api", () => {
+  it("exports exactly lib/api.ts's names", () => {
+    const names = "return Object.keys(m).sort();";
+    const env = { NEXT_PUBLIC_API_URL: "http://127.0.0.1:9" };
+    assert.deepEqual(runModule("lib/api-public.ts", env, names), runModule("lib/api.ts", env, names));
+  });
+
+  it("refuses every network function before any request, and imports no axios, even in local mode", () => {
+    const { results, attempts } = runModule(
+      "lib/api-public.ts",
+      { NEXT_PUBLIC_API_URL: "http://127.0.0.1:9" },
+      CALL_EVERY_NETWORK_FUNCTION,
+      RECORD_REQUESTS + NO_AXIOS,
+    );
+    assert.deepEqual(attempts, []);
+    assert.equal(Object.keys(results).length, 7);
+    for (const [name, result] of Object.entries(results)) {
+      assert.deepEqual(result, { name: "ApiError", status: null, message: "This is a read-only snapshot: it makes no API requests." }, name);
+    }
+  });
+
+  it("the no-axios hook works: lib/api.ts fails to load under the same prelude (the control)", () => {
+    assert.throws(
+      () => runModule("lib/api.ts", { NEXT_PUBLIC_API_URL: "http://127.0.0.1:9" }, CALL_EVERY_NETWORK_FUNCTION, RECORD_REQUESTS + NO_AXIOS),
+      /axios imported/,
+    );
+  });
+});
+
+describe("next.config.mjs: the public build's lib/api and image optimization", () => {
+  // webpack's own NormalModuleReplacementPlugin (Next's compiled copy, the one
+  // next build passes to the config), driven through stand-in factory hooks
+  // with the data webpack's resolver produces: a loader chain ending in the file.
+  const nextWebpack = createRequire(import.meta.url)("next/dist/compiled/webpack/webpack");
+  nextWebpack.init();
+  const { webpack } = nextWebpack;
+  const LOADERS = "/loaders/next-swc-loader.js??ruleSet[1].rules[0]";
+  const API = path.join(FRONTEND, "lib", "api.ts");
+  const API_PUBLIC = path.join(FRONTEND, "lib", "api-public.ts");
+
+  // Applies the public build's plugin; returns its two hooks.
+  function swapHooks() {
+    const { plugins } = configWith("snapshot", PHASE_PRODUCTION_BUILD).webpack({ plugins: [] }, { webpack });
+    assert.equal(plugins.length, 1);
+    assert.ok(plugins[0] instanceof webpack.NormalModuleReplacementPlugin);
+    const hooks = {};
+    const factory = { hooks: { beforeResolve: { tap: (_, fn) => (hooks.before = fn) }, afterResolve: { tap: (_, fn) => (hooks.after = fn) } } };
+    plugins[0].apply({ hooks: { normalModuleFactory: { tap: (_, fn) => fn(factory) } } });
+    return hooks;
+  }
+  function resolved(file, suffix = "") {
+    const createData = { resource: file, request: `${LOADERS}!${file}${suffix}`, userRequest: file };
+    swapHooks().after({ createData });
+    return createData;
+  }
+
+  it("the public build points lib/api.ts's resource, request and userRequest at lib/api-public.ts, and only that file", () => {
+    assert.deepEqual(resolved(API), { resource: API_PUBLIC, request: `${LOADERS}!${API_PUBLIC}`, userRequest: API_PUBLIC });
+    for (const other of ["lib/api-public.ts", "lib/api.tsx", "lib/mode.ts", "node_modules/x/lib/api.ts"]) {
+      const file = path.join(FRONTEND, other);
+      assert.deepEqual(resolved(file), { resource: file, request: `${LOADERS}!${file}`, userRequest: file }, other);
+    }
+    const raw = { request: "./api.ts" };
+    swapHooks().before(raw);
+    assert.deepEqual(raw, { request: "./api.ts" }, "a request before resolve is left alone");
+    assert.throws(() => resolved(API, "?x"), /lib\/api\.ts's request does not end with its path/);
+  });
+
+  it("local mode keeps lib/api.ts: no webpack hook", () => {
+    for (const phase of [PHASE_DEVELOPMENT_SERVER, PHASE_PRODUCTION_BUILD, PHASE_PRODUCTION_SERVER]) {
+      assert.equal(configWith(undefined, phase).webpack, undefined, phase);
+    }
+  });
+
+  it("neither mode optimizes images (no next/image; /_next/image answers 404 under next dev and next start)", () => {
+    assert.deepEqual(configWith("snapshot", PHASE_PRODUCTION_BUILD).images, { unoptimized: true });
+    for (const phase of [PHASE_DEVELOPMENT_SERVER, PHASE_PRODUCTION_BUILD, PHASE_PRODUCTION_SERVER]) {
+      assert.deepEqual(configWith(undefined, phase).images, { unoptimized: true }, phase);
+    }
   });
 });

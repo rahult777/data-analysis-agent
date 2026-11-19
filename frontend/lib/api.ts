@@ -1,3 +1,5 @@
+// The public build (npm run build:public) replaces this module with lib/api-public.ts,
+// which imports no axios and makes no request; next.config.mjs configures the swap.
 import axios from "axios";
 
 import { API_URL, isSnapshot } from "./mode";
@@ -31,20 +33,14 @@ export class ApiError extends Error {
   }
 }
 
-// The public snapshot build makes no API request: every network function
-// below refuses before one starts.
+// The fallback behind the public build's swap: that build replaces this module
+// with lib/api-public.ts, so this guard runs in no built bundle today. If the
+// swap were ever lost, every network function below would still refuse in the
+// snapshot build before a request starts.
 function refuseInSnapshot(): void {
   if (isSnapshot) {
     throw new ApiError("This is a read-only snapshot: it makes no API requests.", null);
   }
-}
-
-// Where a chart file is served. Local mode: the backend's /charts route. The
-// snapshot build copies the charts into out/demo/charts/ and Vercel strips
-// ".html" from exported files, so an HTML chart's URL drops it; PNG names stay.
-export function chartUrl(filename: string): string {
-  if (isSnapshot) return `/demo/charts/${filename.replace(/\.html$/, "")}`;
-  return `${API_URL}/charts/${filename}`;
 }
 
 function toError(error: unknown, fallback: string): ApiError {

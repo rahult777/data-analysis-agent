@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Maximize2, Minimize2 } from "lucide-react";
 
-import { chartUrl } from "@/lib/api";
+import { chartUrl } from "@/lib/chart-url";
 import { isSnapshot } from "@/lib/mode";
 import { cn } from "@/lib/utils";
 

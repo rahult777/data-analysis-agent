@@ -263,10 +263,11 @@ export const FULL_SIZE = "Open full size";
 // vercel.json (lib/vercel-config.test.mjs pins the file itself).
 export const PAGE_HEADERS: Readonly<Record<string, string>> = {
   "content-security-policy":
-    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
   "x-content-type-options": "nosniff",
   "referrer-policy": "strict-origin-when-cross-origin",
   "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+  "cross-origin-opener-policy": "same-origin",
 };
 export const CHART_HEADERS: Readonly<Record<string, string>> = {
   "content-security-policy": "script-src 'self' 'unsafe-inline'; sandbox allow-scripts",

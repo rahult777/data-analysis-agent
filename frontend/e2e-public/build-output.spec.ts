@@ -7,6 +7,8 @@ import path from "node:path";
 import { expect, test } from "@playwright/test";
 import postcss from "postcss";
 
+import { clientMarkerHits, markersMissingFromSources } from "./client-markers";
+import { exactFiles, unexpectedFiles } from "./export-files";
 import { CANARY_API_URL, FIXTURE_ABS, FIXTURE_ID, HTML_CHART, PLOTLY, PNG_CHART, TEST_GITHUB_URL, TEST_SITE_URL } from "./fixture";
 import { BRAND_FILES, OLD_NAME, icoSizes, pngSize, robotsTxt, sitemapXml } from "./site";
 
@@ -52,6 +54,16 @@ test("no client script or style carries a site setting: neither address is in ou
   const home = readFileSync(path.join(OUT, "index.html"), "utf8");
   expect(home.includes(TEST_SITE_URL), "the site's address is in index.html").toBe(true);
   expect(home.includes(TEST_GITHUB_URL), "the repository's address is in index.html").toBe(true);
+});
+
+// The public build ships no axios and none of lib/api.ts's code (M3a; the
+// markers and their source-first control are shared with the snapshot suite,
+// e2e-public/client-markers.ts).
+test("no client script carries axios or lib/api.ts's code", () => {
+  expect(markersMissingFromSources(path.join(__dirname, "..")), "markers missing from their sources").toEqual([]);
+  const { scripts, hits } = clientMarkerHits(path.join(OUT, "_next", "static"));
+  expect(scripts, "client scripts").toBeGreaterThan(0);
+  expect(hits).toEqual([]);
 });
 
 test("out/analysis/ holds exactly the listed ids, one .html and one .txt each", () => {
@@ -104,4 +116,26 @@ test("the built CSS holds no @theme, @utility, @custom-variant or @property", ()
     });
   }
   expect(found).toEqual([]);
+});
+
+// Every exported file is expected (M3a): the exact pages, site files and
+// charts, Next's hashed files by pattern, and never a source map, a dotfile or
+// an .env-like file. A file put in public/ fails here until it is listed in
+// e2e-public/export-files.ts.
+test("out/ holds exactly the expected files: the pages, the site's own files, the charts and Next's hashed files", () => {
+  const files = filesUnder(OUT);
+  const exact = exactFiles([FIXTURE_ID], [HTML_CHART, PNG_CHART, PLOTLY]);
+  expect(exact.filter((rel) => !files.includes(rel)), "missing").toEqual([]);
+  expect(unexpectedFiles(files, exact), "unexpected").toEqual([]);
+});
+
+// A chart may be named after a column called env; only a name with env as a
+// whole dot-separated part is .env-like.
+const ENV_CHARTS = ["histogram_env.png", "barchart_x_env.png", "scatter_env-1_y.html"].map((name) => `00000000-0000-4000-a000-000000000001_${name}`);
+
+test("the export allowlist's controls: a stray file, a source map, a dotfile and .env-like files are refused, and a chart named after an env column passes", () => {
+  const exact = exactFiles(["x"], ["c.png", ...ENV_CHARTS]);
+  const ok = ["index.html", "analysis/x.html", "analysis/x.txt", "demo/charts/c.png", ...ENV_CHARTS.map((name) => `demo/charts/${name}`), "_next/static/chunks/main-0123456789abcdef.js", "_next/static/media/0123456789abcdef-s.p.woff2"];
+  const bad = ["stray.txt", "_next/static/chunks/main-0123456789abcdef.js.map", ".DS_Store", "demo/.hidden/c.png", ".env", ".env.local", "env", "env.json", "demo/charts/x.env", "_next/static/media/photo.0123456789abcdef.png"];
+  expect(unexpectedFiles([...ok, ...bad], exact)).toEqual(bad);
 });

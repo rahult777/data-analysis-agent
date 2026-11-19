@@ -84,3 +84,20 @@ test("a path that ends in a slash answers 308 to the path without it, keeping it
   }
   expect((await request.get("/", { maxRedirects: 0 })).status(), "the root").toBe(200);
 });
+
+// script-src-attr 'none' (M3a): an inline event handler added to a page does
+// not run, and the listener reports it as a script-src-attr violation. The
+// exported pages carry no inline handler of their own.
+test("an inline event handler on a page is blocked and reported (script-src-attr 'none')", async ({ page }) => {
+  const violations = await recordCspViolations(page);
+  await page.goto("/");
+  await page.waitForLoadState("networkidle");
+  await page.evaluate(() => {
+    const image = document.createElement("img");
+    image.setAttribute("onerror", "document.title = 'inline handler ran'");
+    image.src = "/no-such-image.png";
+    document.body.append(image);
+  });
+  await expect.poll(() => violations.filter((violation) => violation.startsWith("script-src-attr ")).length).toBeGreaterThan(0);
+  expect(await page.title()).not.toBe("inline handler ran");
+});
