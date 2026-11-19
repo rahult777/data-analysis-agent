@@ -3,11 +3,14 @@
 // with no browser. out/analysis/<id>.txt is the page's RSC payload; the .html
 // carries the same payload inline.
 
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
 import { expect, test } from "@playwright/test";
 
+import { clientMarkerHits, markersMissingFromSources } from "../e2e-public/client-markers";
+import { exactFiles, unexpectedFiles } from "../e2e-public/export-files";
 import { CANARY_API_URL, FIXTURE_ID, TEST_GITHUB_URL, TEST_SITE_URL } from "../e2e-public/fixture";
 import { BRAND_FILES, OLD_NAME, icoSizes, pngSize, robotsTxt, sitemapXml } from "../e2e-public/site";
 import { findForeignUuids } from "../lib/snapshot-rules.mjs";
@@ -80,6 +83,37 @@ test("the notice ships with the site and names the bundle's own header", () => {
   expect(text).toContain("/*! ieee754. BSD-3-Clause License. Feross Aboukhadijeh <https://feross.org/opensource> */");
 });
 
+// The full license text of every component the bundle's own notices name
+// (plotly.min.js.LICENSE.txt; M3a; docs/infrastructure.md, "The third-party
+// notice"), in the notice's order: each sits verbatim between two lines of
+// eight hyphens, under its section's heading line (the line above the one that
+// leads into it), and is pinned by the sha256 of the license file it comes from.
+// native-promise-only ships no license file: its text is reconstructed, the
+// standard MIT text with its header's holder, and the notice says so.
+const LICENSE_TEXTS: ReadonlyArray<readonly [string, string]> = [
+  ["polybooljs 1.2.0 (MIT)", "6a3969e97bc3b992c17bfdcd6fcabd9b5688650cc0078235d512c014e86b716e"],
+  ["object-assign 4.1.1 (MIT)", "6fb9754611c20f6649f68805e8c990e83261f29316e29de9e6cedae607b8634c"],
+  ["is-buffer (MIT)", "c7cc929b57080f4b9d0c6cf57669f0463fc5b39906344dfc8d3bc43426b30eac"],
+  ["buffer (MIT)", "06bafa45fdad2579ba0e43b0c9b2c6290287c99c4203c300254a462b38a307f6"],
+  ["pad-left (MIT)", "3672fb6ef1c214578dfee689643516c2685f61ab08d130517ca8ea24f383a840"],
+  ["repeat-string (MIT)", "3672fb6ef1c214578dfee689643516c2685f61ab08d130517ca8ea24f383a840"],
+  ["native-promise-only 0.8.1 (MIT)", "ee6661307ebbac585d4574a87a18577b69f86326c2c4f2d1902ad0f497909b50"],
+  ["ieee754 1.2.1 (BSD-3-Clause)", "18d45466ba3253deae04667e267a91ea8de8548f18c1125264d1c9db28194cc1"],
+  ["safe-buffer 5.2.1 (MIT)", "c7cc929b57080f4b9d0c6cf57669f0463fc5b39906344dfc8d3bc43426b30eac"],
+];
+
+test("the notice carries the full license text of every component the bundle's notices name, verbatim, under its heading", () => {
+  const notice = readFileSync(path.join(__dirname, "..", "public", NOTICE), "utf8");
+  const parts = notice.split("\n--------\n");
+  const texts = parts.filter((_, index) => index % 2 === 1);
+  const headings = parts.filter((_, index) => index % 2 === 0).slice(0, texts.length).map((part) => {
+    const lines = part.split("\n");
+    return lines[lines.length - 2];
+  });
+  expect(headings).toEqual(LICENSE_TEXTS.map(([heading]) => heading));
+  expect(texts.map((text) => createHash("sha256").update(`${text}\n`).digest("hex"))).toEqual(LICENSE_TEXTS.map(([, sha256]) => sha256));
+});
+
 test("out/analysis/ holds exactly the real id, one .html and one .txt", () => {
   expect(readdirSync(path.join(OUT, "analysis")).sort()).toEqual([`${REAL_ID}.html`, `${REAL_ID}.txt`]);
 });
@@ -144,6 +178,17 @@ test("no client script or style carries a site setting: neither address is in ou
   expect(home.includes(TEST_GITHUB_URL), "the repository's address is in index.html").toBe(true);
 });
 
+// The deployed build ships no axios and none of lib/api.ts's code (M3a): this
+// suite builds the committed snapshot, which is what Vercel deploys. The
+// markers and their source-first control are shared with the public suite
+// (e2e-public/client-markers.ts).
+test("no client script carries axios or lib/api.ts's code", () => {
+  expect(markersMissingFromSources(path.join(__dirname, "..")), "markers missing from their sources").toEqual([]);
+  const { scripts, hits } = clientMarkerHits(path.join(OUT, "_next", "static"));
+  expect(scripts, "client scripts").toBeGreaterThan(0);
+  expect(hits).toEqual([]);
+});
+
 test("no exported file names a hidden chart: not the pages, their RSC payloads, the charts or the scripts", () => {
   const files = filesUnder(OUT);
   // The pages and their payloads are among the files scanned.
@@ -168,4 +213,15 @@ test("the pages and their RSC payloads carry no key the export dropped", () => {
   for (const rel of [`analysis/${REAL_ID}.html`, `analysis/${REAL_ID}.txt`]) {
     expect(hasJsonKey(readFileSync(path.join(OUT, rel), "utf8"), "statistical_methodology"), rel).toBe(true);
   }
+});
+
+// Every exported file is expected (M3a; the list and patterns are shared with
+// the public suite, e2e-public/export-files.ts): the exact pages, site files
+// and charts, Next's hashed files by pattern, and never a source map, a dotfile
+// or an .env-like file. A file put in public/ fails here until it is listed.
+test("out/ holds exactly the expected files: the pages, the site's own files, the charts and Next's hashed files", () => {
+  const files = filesUnder(OUT);
+  const exact = exactFiles([REAL_ID], [...KEPT_CHARTS, PLOTLY]);
+  expect(exact.filter((rel) => !files.includes(rel)), "missing").toEqual([]);
+  expect(unexpectedFiles(files, exact), "unexpected").toEqual([]);
 });
