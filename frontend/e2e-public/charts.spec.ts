@@ -21,9 +21,12 @@ test("chart iframes and images carry exactly the expected attributes", async ({ 
   const iframe = page.locator("iframe");
   await expect(iframe).toHaveCount(1);
   expect(await iframe.evaluate((el) => el.getAttributeNames().sort())).toEqual(
-    ["class", "loading", "referrerpolicy", "sandbox", "src", "title"],
+    ["class", "loading", "referrerpolicy", "sandbox", "src", "tabindex", "title"],
   );
   await expect(iframe).toHaveAttribute("src", HTML_CHART_URL);
+  // Out of the tab order (M3a.2): plotly draws no keyboard controls, and a
+  // focus inside the sandboxed frame shows no ring.
+  await expect(iframe).toHaveAttribute("tabindex", "-1");
   await expect(iframe).toHaveAttribute("sandbox", "allow-scripts");
   await expect(iframe).toHaveAttribute("loading", "lazy");
   await expect(iframe).toHaveAttribute("referrerpolicy", "no-referrer");

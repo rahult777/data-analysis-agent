@@ -509,7 +509,10 @@ function TechnicalPanel({
           <p className="text-sm text-muted-foreground">
             Written by the Explainer agent to illustrate each step. It is not the code that ran.
           </p>
-          <div className="flex flex-col gap-3">
+          {/* From lg the blocks leave the results' 32.5rem spine for the page
+              column's 56rem, (56 - 32.5) / 2 = 11.75rem a side (M3a.2); the
+              label and its note stay in the spine. */}
+          <div className="flex flex-col gap-3 lg:-mx-[11.75rem]">
             {codeBlocks.map((code, i) => (
               <CodeBlock key={i} code={code} language="python" />
             ))}

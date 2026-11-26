@@ -61,7 +61,9 @@ export function CodeBlock({ code, language, className }: CodeBlockProps) {
           )}
         </button>
       </div>
-      <pre className="overflow-x-auto px-4 py-3 text-sm leading-relaxed">
+      {/* A long line scrolls, so the browser makes the block a tab stop; its
+          focus outline is drawn inside it, since the root clips (M3a.2). */}
+      <pre className="overflow-x-auto px-4 py-3 text-sm leading-relaxed focus-visible:-outline-offset-2">
         <code className="font-mono text-foreground/90">{code}</code>
       </pre>
     </div>

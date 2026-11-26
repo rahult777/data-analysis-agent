@@ -66,7 +66,12 @@ export function AnalysisResults({
   }
 
   return (
-    <div className="flex flex-col gap-12">
+    // From lg the results keep to a 32.5rem spine centred in the page's 56rem
+    // column (M3a.2): the widest block of long text, the open questions' list,
+    // and each block keeps its own reading width inside it. The chart grid and
+    // the report's code blocks leave the spine (ChartGrid.tsx,
+    // InsightReport.tsx); the loading skeleton and the error box keep to it.
+    <div className="flex flex-col gap-12 lg:mx-auto lg:w-[32.5rem]">
       <AnalysisHeader
         filename={data.filename}
         rowCount={data.row_count}
@@ -184,7 +189,7 @@ function Stat({ label, value }: { label: string; value: string }) {
 
 function ResultsSkeleton() {
   return (
-    <div className="flex flex-col gap-12" aria-busy="true" aria-label="Loading results">
+    <div className="flex flex-col gap-12 lg:mx-auto lg:w-[32.5rem]" aria-busy="true" aria-label="Loading results">
       <div className="flex flex-col gap-5">
         <div className="h-3 w-40 animate-pulse rounded bg-muted" />
         <div className="h-9 w-64 animate-pulse rounded bg-muted" />
@@ -202,11 +207,12 @@ function ResultsSkeleton() {
           />
         ))}
       </div>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+      {/* As wide and as high as the chart grid it stands for (ChartGrid.tsx). */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:-mx-[11.75rem] xl:-mx-[19.75rem]">
         {[0, 1].map((i) => (
           <div
             key={i}
-            className="h-56 animate-pulse rounded-md border border-border/60 bg-card/40"
+            className="h-56 animate-pulse rounded-md border border-border/60 bg-card/40 xl:h-80"
           />
         ))}
       </div>
@@ -221,7 +227,7 @@ function ResultsError({ onTryAgain }: { onTryAgain: () => void }) {
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.25, ease: "easeOut" }}
-      className="flex items-start gap-4 rounded-md border border-red-500/30 bg-red-500/10 px-5 py-5 text-red-200 md:px-6 md:py-6"
+      className="flex items-start gap-4 rounded-md border border-red-500/30 bg-red-500/10 px-5 py-5 text-red-200 md:px-6 md:py-6 lg:mx-auto lg:w-[32.5rem]"
     >
       <AlertTriangle className="mt-0.5 size-5 shrink-0" aria-hidden />
       <div className="flex min-w-0 flex-1 flex-col gap-4">

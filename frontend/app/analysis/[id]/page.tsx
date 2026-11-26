@@ -67,8 +67,10 @@ export default function AnalysisPage({ params }: { params: { id: string } }) {
           </h1>
         </header>
         {/* The manifest's note, plain text with no motion, so it reads without JavaScript.
-            Its box keeps to the reading width: 29rem of text plus the padding. */}
-        <section aria-labelledby="about-this-example" className="flex max-w-[31.5rem] flex-col gap-2 rounded-md border border-border/60 bg-card/40 p-5">
+            Its box keeps to the reading width: 29rem of text plus the padding. From lg it
+            starts on the left edge of the results' 32.5rem spine (AnalysisResults.tsx):
+            half the column less half the spine (M3a.2). */}
+        <section aria-labelledby="about-this-example" className="flex max-w-[31.5rem] flex-col gap-2 rounded-md border border-border/60 bg-card/40 p-5 lg:ml-[calc(50%-16.25rem)]">
           <h2 id="about-this-example" className="text-xl italic leading-tight" style={{ fontFamily: "var(--font-display)" }}>
             About this example
           </h2>

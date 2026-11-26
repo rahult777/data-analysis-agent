@@ -122,12 +122,15 @@ export function ChartGrid({ chartPaths }: { chartPaths: string[] | null }) {
         </p>
       </div>
       {/* No entry animation in the public build (the cards inherit it): the
-          prerendered grid would stay transparent until JavaScript runs. */}
+          prerendered grid would stay transparent until JavaScript runs.
+          From lg the grid leaves the results' 32.5rem spine (M3a.2): by
+          11.75rem a side to the page column's 56rem, and from xl by 19.75rem
+          a side to 72rem, (72 - 32.5) / 2, where each chart is 20rem high. */}
       <motion.div
         variants={container}
         initial={isSnapshot ? false : "hidden"}
         animate="show"
-        className="grid grid-cols-1 gap-4 sm:grid-cols-2"
+        className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:-mx-[11.75rem] xl:-mx-[19.75rem]"
       >
         {charts.map((filename, i) => (
           <ChartCard
@@ -168,7 +171,7 @@ function ChartCard({ filename, expanded, onToggle }: ChartCardProps) {
   }, []);
   const parsed = parseChartFilename(filename);
   const src = chartUrl(filename);
-  const mediaHeight = expanded ? "h-[70vh]" : "h-56";
+  const mediaHeight = expanded ? "h-[70vh]" : "h-56 xl:h-80";
 
   return (
     // A focus target (tabIndex -1): a link to the card moves the keyboard
@@ -241,10 +244,15 @@ function ChartCard({ filename, expanded, onToggle }: ChartCardProps) {
               // an opaque origin. No allow-downloads either, so plotly's
               // "Download plot as a png" button and its logo link do nothing
               // (owner ruling D1; M2b.2 removes both from regenerated charts).
+              // Out of the tab order (M3a.2): plotly draws no keyboard
+              // controls, so the frame would be a tab stop that offers a
+              // keyboard nothing, and a focus inside a sandboxed frame shows
+              // no ring. The card and its expand button stay tab stops.
               <iframe
                 src={src}
                 title={parsed.label}
                 sandbox="allow-scripts"
+                tabIndex={-1}
                 loading="lazy"
                 referrerPolicy="no-referrer"
                 onLoad={() => setLoaded(true)}
@@ -257,11 +265,13 @@ function ChartCard({ filename, expanded, onToggle }: ChartCardProps) {
       {parsed.format === "png" && (
         // The image at its own address, where the browser's image view can
         // zoom it, as a phone needs (owner ruling Q7). A plain link: it works
-        // without JavaScript, and its name says which chart it opens.
+        // without JavaScript, and its name says which chart it opens. Its
+        // focus outline is drawn inside it, since the card clips anything
+        // outside, with padding so the outline clears the text (M3a.2).
         <div className="border-t border-border/60 px-3">
           <a
             href={src}
-            className="inline-flex min-h-11 items-center text-sm text-muted-foreground underline underline-offset-4 hover:text-foreground"
+            className="-mx-1.5 inline-flex min-h-11 items-center px-1.5 text-sm text-muted-foreground underline underline-offset-4 hover:text-foreground focus-visible:-outline-offset-2"
           >
             Open full size<span className="sr-only"> ({parsed.label})</span>
           </a>

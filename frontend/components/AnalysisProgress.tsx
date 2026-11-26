@@ -447,7 +447,7 @@ export function AnalysisProgress({
                     {STALL_TEXT}{" "}
                     <Link
                       href="/"
-                      className="text-foreground underline underline-offset-4 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      className="text-foreground underline underline-offset-4 box-decoration-clone hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     >
                       Start a new analysis
                     </Link>

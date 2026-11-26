@@ -119,7 +119,7 @@ export function PauseQuestion({ view, canAnswer, sessionRejected, submitting, su
         <p className="text-sm text-muted-foreground">
           The pipeline is waiting for an answer, but the question it stored is incomplete, so it
           can&apos;t be answered here.{" "}
-          <Link href="/" className={cn("text-foreground underline underline-offset-4 hover:text-primary", FOCUS_RING)}>
+          <Link href="/" className={cn("text-foreground underline underline-offset-4 box-decoration-clone hover:text-primary", FOCUS_RING)}>
             Start a new analysis
           </Link>
           .
@@ -188,13 +188,15 @@ function AnswerableQuestion({ view, canAnswer, sessionRejected, submitting, subm
                 canAnswer && !submitting ? "cursor-pointer hover:border-border" : "cursor-default opacity-80",
               )}
             >
+              {/* The label's ring is the one focus indicator: the radio's own
+                  outline is off (M3a.2). */}
               <input
                 type="radio"
                 name={groupName}
                 value={option.id}
                 checked={selected === option.id}
                 onChange={() => setSelected(option.id)}
-                className="mt-0.5 size-4 shrink-0 accent-[var(--primary)]"
+                className="mt-0.5 size-4 shrink-0 accent-[var(--primary)] focus-visible:outline-none"
               />
               <span className="min-w-0 [overflow-wrap:anywhere]">
                 <InlineText text={option.label} />

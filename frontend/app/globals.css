@@ -84,7 +84,12 @@
   }
   * {
     border-color: var(--border);
-    outline-color: color-mix(in oklch, var(--ring) 50%, transparent);
+    outline-color: var(--ring);
+  }
+  /* The keyboard focus indicator of every link and plain button (M3a.2). A component that draws its own ring sets outline-none: a utility, later in the cascade, so it wins. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
   }
   body {
     @apply bg-background text-foreground;

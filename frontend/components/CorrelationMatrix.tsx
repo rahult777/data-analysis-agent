@@ -3,6 +3,14 @@
 import { useCallback, useRef, useState } from "react";
 import type { FocusEvent, KeyboardEvent, PointerEvent } from "react";
 
+// The HTML standard's FocusOptions.focusVisible, which TypeScript 5.9's DOM
+// types lack (focusCell, below).
+declare global {
+  interface FocusOptions {
+    focusVisible?: boolean;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Interactive correlation matrix (Analyst layer). Deliberately a native
 // <table> of fixed-size button cells rather than a chart library — see
@@ -68,6 +76,10 @@ export function CorrelationMatrix({
   // Roving tabindex: the whole matrix is one tab stop, arrows move within it.
   const [tabStop, setTabStop] = useState<CellRef>({ row: 0, col: 0 });
   const tableRef = useRef<HTMLTableElement>(null);
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  // Where the scroller stood before an arrow key, Home or End moved the
+  // focus (see reveal).
+  const scrolledFrom = useRef<number | null>(null);
 
   const isStrong = useCallback(
     (row: number, col: number) =>
@@ -77,11 +89,42 @@ export function CorrelationMatrix({
 
   const focusCell = (cell: CellRef) => {
     setTabStop(cell);
+    scrolledFrom.current = scrollerRef.current?.scrollLeft ?? null;
+    // A key moved the focus, so it is a keyboard focus (focusVisible): a
+    // browser whose heuristic would not show a scripted focus after a pointer
+    // click (WebKit) still draws the outline and runs the reveal; one without
+    // the option ignores it.
     tableRef.current
       ?.querySelector<HTMLButtonElement>(
         `button[data-row="${cell.row}"][data-col="${cell.col}"]`,
       )
-      ?.focus();
+      ?.focus({ focusVisible: true });
+    scrolledFrom.current = null;
+  };
+
+  // A keyboard focus keeps the cell and its outline between the sticky row
+  // header and the scroller's right edge (M3a.2): the browser's own focus
+  // scroll ignores the header, and centres a cell that was out of view. The
+  // scroller moves at once, by the least amount: for an arrow key, Home or
+  // End, from where it stood before the key; on a Tab back in, from where the
+  // browser left it. The page's own scrolling stays the browser's.
+  const reveal = (button: HTMLButtonElement): void => {
+    const scroller = scrollerRef.current;
+    const header = button.closest("tr")?.querySelector("th");
+    if (!scroller || !header) return;
+    if (scrolledFrom.current !== null) {
+      scroller.scrollTo({ left: scrolledFrom.current, behavior: "instant" });
+    }
+    const style = getComputedStyle(button);
+    const reach = parseFloat(style.outlineOffset) + parseFloat(style.outlineWidth);
+    const cell = button.getBoundingClientRect();
+    const start = header.getBoundingClientRect().right;
+    const end =
+      scroller.getBoundingClientRect().left + scroller.clientLeft + scroller.clientWidth;
+    let by = 0;
+    if (cell.left - reach < start) by = Math.floor(cell.left - reach - start);
+    else if (cell.right + reach > end) by = Math.ceil(cell.right + reach - end);
+    if (by !== 0) scroller.scrollBy({ left: by, behavior: "instant" });
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLButtonElement>, cell: CellRef) => {
@@ -128,7 +171,10 @@ export function CorrelationMatrix({
   // second tap to unpin would leave the still-focused cell on display.
   const onFocus = (e: FocusEvent<HTMLButtonElement>, cell: CellRef) => {
     setTabStop(cell);
-    if (e.currentTarget.matches(":focus-visible")) setFocused(cell);
+    if (e.currentTarget.matches(":focus-visible")) {
+      setFocused(cell);
+      reveal(e.currentTarget);
+    }
   };
 
   const shown = hovered ?? focused ?? pinned;
@@ -150,7 +196,7 @@ export function CorrelationMatrix({
         )}
       </div>
 
-      <div className="overflow-x-auto pb-1">
+      <div ref={scrollerRef} className="overflow-x-auto pb-1">
         <table
           ref={tableRef}
           className="border-separate border-spacing-0.5"
@@ -217,8 +263,14 @@ export function CorrelationMatrix({
                         onFocus={(e) => onFocus(e, cell)}
                         onBlur={() => setFocused(null)}
                         style={{ background: cellFill(r) }}
+                        // The focus outline (M3a.2) sits in the 2 px gaps
+                        // around the cell (offset 0), so the sticky row
+                        // header can't hide its left side, in the
+                        // foreground colour: at offset 2 it crossed the
+                        // neighbouring cells, where the ring's grey fell
+                        // below 3:1 against a strongly coloured one.
                         className={
-                          "flex size-11 items-center justify-center rounded-sm font-mono text-sm tabular-nums text-foreground outline-offset-2 focus-visible:outline focus-visible:outline-2 " +
+                          "flex size-11 items-center justify-center rounded-sm font-mono text-sm tabular-nums text-foreground outline-offset-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--foreground)] focus-visible:outline-offset-0 " +
                           (strong ? "ring-2 ring-inset ring-foreground " : "") +
                           (isPinned ? "outline outline-2 outline-[var(--ring)] " : "") +
                           (r === null ? "text-[var(--muted-foreground)]" : "")
