@@ -8,6 +8,15 @@ import { defineConfig, devices } from "@playwright/test";
 
 import { MOCK_API_URL } from "./e2e/mockApi";
 
+// E2E_LIVE_URL switches e2e-public/fixture.ts to a deployed site's settings,
+// for playwright.live.config.ts alone (M3b.1): refuse to start while it is
+// set, even empty.
+if (process.env.E2E_LIVE_URL !== undefined) {
+  throw new Error(
+    "playwright.config.ts: E2E_LIVE_URL is set; only playwright.live.config.ts may run with it. Unset it to run this suite.",
+  );
+}
+
 // Its own port (override with E2E_PORT). It still shares `.next` with any
 // `next dev` or `next build` in frontend/, so do not run them at the same time.
 const PORT = Number.parseInt(process.env.E2E_PORT ?? "", 10) || 3100;

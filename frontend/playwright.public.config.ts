@@ -12,6 +12,15 @@ import { defineConfig, devices } from "@playwright/test";
 
 import { CANARY_API_URL, FIXTURE_DIR, TEST_GITHUB_URL, TEST_SITE_URL } from "./e2e-public/fixture";
 
+// E2E_LIVE_URL switches e2e-public/fixture.ts to a deployed site's settings,
+// for playwright.live.config.ts alone (M3b.1): refuse to start while it is
+// set, even empty.
+if (process.env.E2E_LIVE_URL !== undefined) {
+  throw new Error(
+    "playwright.public.config.ts: E2E_LIVE_URL is set; only playwright.live.config.ts may run with it. Unset it to run this suite.",
+  );
+}
+
 // Its own port (override with E2E_PUBLIC_PORT).
 const PORT = Number.parseInt(process.env.E2E_PUBLIC_PORT ?? "", 10) || 3200;
 const BUILD_OUTPUT = /build-output\.spec\.ts$/;
