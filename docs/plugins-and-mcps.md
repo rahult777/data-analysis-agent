@@ -294,6 +294,8 @@ This section maps every build task to the specific plugins that must be activate
 | Security scan | Security Review Plugin |
 | After scan passes | Commit with git (Rule 15) |
 
+Once the repository is connected to Vercel (M3b.2), a push to main is a deployment: `frontend/vercel.json` deploys main, and only main (decisions.md 2026-11-28). So the Security Review, with the push gate, comes before every push to main.
+
 ### Any session start
 
 | Step | Plugin |
