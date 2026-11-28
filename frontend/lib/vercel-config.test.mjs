@@ -1,7 +1,10 @@
 // frontend/vercel.json (M2b.4c; owner rulings Q5, Q13 and Q14): the public
 // build on Vercel's Next.js preset, a trailing slash dropped with a 308, and
 // two disjoint header sets, the page set everywhere but under /demo/charts/
-// and the chart set there. The sources are matched as Vercel matches them
+// and the chart set there. Since M3b.1 (ruling Q4 of the M3b evaluation) the
+// install takes the lock exactly and runs no install script, the build command
+// prints the Node and npm versions and VERCEL before the public build, and only
+// main deploys. The sources are matched as Vercel matches them
 // (lib/vercel-headers.mjs: next's bundled path-to-regexp, case-sensitive). The
 // ten paths are the M2b.4 evaluation's (report M10). The expected values are
 // literals, never read from the file under test.
@@ -50,11 +53,20 @@ const PATHS = [
 ];
 
 describe("frontend/vercel.json", () => {
-  it("builds the public site on the Next.js preset and drops a trailing slash, and sets nothing else", () => {
-    assert.deepEqual(Object.keys(CONFIG).sort(), ["buildCommand", "framework", "headers", "trailingSlash"]);
+  it("uses the Next.js preset and drops a trailing slash, and sets nothing beyond its commands, Git deploys and headers", () => {
+    assert.deepEqual(Object.keys(CONFIG).sort(), ["buildCommand", "framework", "git", "headers", "installCommand", "trailingSlash"]);
     assert.equal(CONFIG.framework, "nextjs");
-    assert.equal(CONFIG.buildCommand, "npm run build:public");
     assert.equal(CONFIG.trailingSlash, false);
+  });
+
+  // Vercel runs both commands with `sh -c` (the Next builder's execCommand), so
+  // the build log shows the Node and npm versions, then VERCEL=1 when Vercel
+  // exposes its system variables (the SNAPSHOT_DIR guard relies on it) or
+  // VERCEL=unset when it does not, then the public build.
+  it("installs the locked tree without install scripts, prints node, npm and VERCEL before the public build, and deploys main only", () => {
+    assert.equal(CONFIG.installCommand, "npm ci --ignore-scripts");
+    assert.equal(CONFIG.buildCommand, "node -v && npm -v && echo VERCEL=${VERCEL:-unset} && npm run build:public");
+    assert.deepEqual(CONFIG.git, { deploymentEnabled: { main: true, "**": false } });
   });
 
   it("has two header rules, the page set and then the chart set", () => {

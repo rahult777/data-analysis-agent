@@ -1,7 +1,9 @@
 {
   "framework": "nextjs",
-  "buildCommand": "npm run build:public",
+  "installCommand": "npm ci --ignore-scripts",
+  "buildCommand": "node -v && npm -v && echo VERCEL=${VERCEL:-unset} && npm run build:public",
   "trailingSlash": false,
+  "git": { "deploymentEnabled": { "main": true, "**": false } },
   "headers": [
     {
       "source": "/((?!demo/charts/).*)",
